@@ -1,0 +1,5 @@
+[build]
+# Bun configuration for the monorepo
+
+[env]
+# Load .env from the root directory

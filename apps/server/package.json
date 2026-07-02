@@ -1,0 +1,22 @@
+{
+  "name": "@sparks/server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "check": "tsc --noEmit",
+    "start": "bun dist/index.js"
+  },
+  "dependencies": {
+    "@sparks/db": "workspace:*",
+    "better-auth": "^1.6.0",
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.5"
+  }
+}
