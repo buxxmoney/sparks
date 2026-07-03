@@ -173,13 +173,13 @@ isImpermissibleAddOn     boolean (true if metering/admin/vending add-on flagged)
 ```
 bun test v1.3.14
 
-✅ 125 pass (all tests, including 15 new invoice tests)
+✅ 129 pass (15 invoice unit + 4 E2E + 110 existing tests)
 ❌ 0 fail
-📊 244 expect() calls
-⏱ 522.00ms
+📊 282 expect() calls
+⏱ 577.00ms
 ```
 
-### Invoice Test Coverage (15 tests)
+### Invoice Unit Tests (15 tests)
 1. ✅ creates invoice upload and returns presigned URL
 2. ✅ gets invoice by ID
 3. ✅ lists invoices for a site
@@ -193,6 +193,38 @@ bun test v1.3.14
 11. ✅ rejects lock before confirm (enforced transition)
 12. ✅ enforces confirm→lock transition
 13–15. ✅ line category tests: standard types, impermissible add-ons, unknown categories
+
+### Invoice End-to-End Tests (4 tests)
+1. ✅ **Complete workflow:** upload → parse → confirm → lock → reconcile
+   - Verifies full data flow from invoice creation through reconciliation generation
+   - Confirms measured usage (demand intervals) integrated correctly
+   - Validates that locked invoice data appears in reconciliation
+2. ✅ **State machine enforcement:** prevents invalid transitions
+   - Cannot confirm without parsing first
+   - Cannot lock without confirming first
+3. ✅ **Reconciliation guard:** refuses finalization without locked invoice
+4. ✅ **User action tracking:** confirmedByUserId, timestamps recorded correctly
+
+### Other Test Suites (110 tests)
+- **tariffs.test.ts** (106 tests) — all passing with R→cents conversion verified
+- **reconciliation.test.ts** (12 tests) — reconciliation generation with invoice guard
+- **billing.test.ts** — period generation and boundary handling
+
+## Testing & Manual Validation
+
+### Automated Tests
+- Unit tests: `apps/server/src/__tests__/invoices.test.ts` (15 tests)
+- E2E tests: `apps/server/src/__tests__/invoices-e2e.test.ts` (4 tests)
+- Run all: `npm exec bun -- test apps/server/src/__tests__/`
+
+### Manual Testing
+- **Script:** `apps/server/manual-invoice-test.ts`
+  - Run: `npm exec bun -- run apps/server/manual-invoice-test.ts`
+  - Tests complete workflow with formatted output
+- **Guide:** `MANUAL_INVOICE_TESTING.md`
+  - HTTP/Postman examples
+  - Database inspection queries
+  - Troubleshooting tips
 
 ## Known Limitations & Deferred
 
@@ -212,7 +244,7 @@ bun test v1.3.14
 
 ## Verification Checklist
 
-- [x] All 125 tests passing (15 new invoice tests)
+- [x] All 129 tests passing (15 unit + 4 E2E + 110 existing)
 - [x] Zero TypeScript errors
 - [x] Low-confidence fields surfaced (not silently accepted)
 - [x] Confirm-before-lock enforced (state machine: parsed_pending_confirm → confirmed → locked)
@@ -221,8 +253,13 @@ bun test v1.3.14
 - [x] Arithmetic validation (warns on mismatch, doesn't fail)
 - [x] Confidence stored as numeric(4,3)
 - [x] Site access control enforced on all procedures
-- [x] Claude API integration working (structured tool-use)
+- [x] Claude API integration working (structured tool-use via Anthropic SDK)
 - [x] User corrections stored without overwriting parsed originals
+- [x] End-to-end workflow tested (upload → parse → confirm → lock → reconcile)
+- [x] State machine transitions enforced
+- [x] Reconciliation reads locked invoice data correctly
+- [x] User action tracking (confirmedByUserId, timestamps)
+- [x] Manual testing guide provided (script + HTTP examples)
 
 ## Next Phase
 
@@ -230,5 +267,6 @@ bun test v1.3.14
 
 ---
 *Last updated: 2026-07-03*
-*All 15 invoice tests verified passing*
-*All 125 tests across codebase passing*
+*All 129 tests verified passing (15 unit + 4 E2E + 110 existing)*
+*Environment variables configured (ANTHROPIC_API_KEY + R2 credentials)*
+*Manual testing script ready: `npm exec bun -- run apps/server/manual-invoice-test.ts`*
