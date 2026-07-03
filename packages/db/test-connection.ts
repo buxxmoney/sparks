@@ -19,7 +19,7 @@ client.on("error", (err) => {
   console.error("Client error:", err);
 });
 
-client.connect((err) => {
+client.connect((err: Error | null) => {
   if (err) {
     console.error("✗ Connection failed:");
     console.error(err.message);
@@ -27,12 +27,12 @@ client.connect((err) => {
   } else {
     console.log("✓ Connected successfully!");
 
-    client.query("SELECT version();", (err, res) => {
+    client.query("SELECT version();", (err: Error | null, res?: pg.QueryResult<Record<string, unknown>>) => {
       if (err) {
         console.error("✗ Query failed:", err.message);
       } else {
         console.log("✓ Query successful!");
-        console.log("  Database:", res.rows[0].version);
+        console.log("  Database:", res?.rows[0].version);
       }
       client.end();
     });

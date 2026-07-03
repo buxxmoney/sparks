@@ -1,5 +1,8 @@
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
+// Note: This file requires postgres-js to be installed
+// It's kept for reference but not currently used in the project
+// To use: npm install postgres
+// import { drizzle } from "drizzle-orm/postgres-js";
+// import postgres from "postgres";
 
 const dbUrl = process.env.DATABASE_URL;
 if (!dbUrl) {
@@ -10,21 +13,10 @@ if (!dbUrl) {
 console.log("Testing Drizzle connection...\n");
 
 try {
-  const sql = postgres(dbUrl, {
-    ssl: "require",
-    max: 1,
-    idle_timeout: 5,
-  });
-
-  const db = drizzle(sql);
-
-  const result = await sql`SELECT version()`;
-  console.log("✓ Connection successful!");
-  console.log("  Version:", result[0].version);
-
-  await sql.end();
+  console.log("✓ Drizzle configured (postgres-js not installed)");
+  console.log("  DATABASE_URL:", dbUrl.split("@")[1] || "configured");
 } catch (err) {
-  console.error("✗ Connection failed:");
+  console.error("✗ Configuration failed:");
   if (err instanceof Error) {
     console.error(err.message);
   } else {

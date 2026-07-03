@@ -61,8 +61,8 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.activeEnergyCents).toBe(250);
-    expect(result.totalCents).toBe(250);
+    expect(result.activeEnergyCents).toBe(25000); // 100 kWh * 2.5 R/kWh * 100 cents/R
+    expect(result.totalCents).toBe(25000);
   });
 
   it("calculates demand charge", () => {
@@ -85,7 +85,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.demandCents).toBe(25000);
+    expect(result.demandCents).toBe(25000); // 10 kVA * 25 R/kVA * 100 cents/R
     expect(result.totalCents).toBe(25000);
   });
 
@@ -109,7 +109,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.reactiveEnergyCents).toBe(3750);
+    expect(result.reactiveEnergyCents).toBe(3750); // 25 kVArh * 1.5 R/kVArh * 100 cents/R
     expect(result.totalCents).toBe(3750);
   });
 
@@ -147,10 +147,10 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.activeEnergyCents).toBe(200);
-    expect(result.demandCents).toBe(20000);
-    expect(result.fixedCents).toBe(10000);
-    expect(result.totalCents).toBe(30200);
+    expect(result.activeEnergyCents).toBe(20000); // 100 kWh * 2.0 R/kWh * 100 cents/R
+    expect(result.demandCents).toBe(20000); // 10 kVA * 20 R/kVA * 100 cents/R
+    expect(result.fixedCents).toBe(10000); // 100 R * 100 cents/R
+    expect(result.totalCents).toBe(50000);
     expect(result.details.length).toBe(3);
   });
 
@@ -195,7 +195,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.activeEnergyCents).toBe(233);
+    expect(result.activeEnergyCents).toBe(23340); // 100 kWh * 2.334 R/kWh * 100 cents/R
   });
 });
 
@@ -361,7 +361,7 @@ describe("Tariff Routers", () => {
         where: eq(tariffRates.tariffProfileId, profileId),
       });
       expect(rates.length).toBe(1);
-      expect(rates[0].rateValue).toBe("2.50");
+      expect(Number(rates[0].rateValue)).toBe(2.50);
     });
 
     it("lists rates for a profile", async () => {

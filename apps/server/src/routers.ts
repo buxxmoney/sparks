@@ -9,6 +9,10 @@ import {
   tariffProfiles,
   tariffRates,
   siteTariffAssignments,
+  reconciliations,
+  landlordInvoices,
+  demandIntervals,
+  dataGaps,
 } from "@sparks/db";
 import { eq, and, desc, isNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -53,8 +57,14 @@ import {
   tariffsProfilesListRatesInput,
   tariffsAssignSetInput,
   tariffsAssignListInput,
+  reconciliationGenerateInput,
+  reconciliationGetInput,
+  reconciliationListInput,
+  reconciliationListVersionsInput,
+  reconciliationFinalizeInput,
 } from "./validators";
 import { materializePeriods, type BillingPeriodPolicy } from "./billing";
+import { generateReconciliation } from "./reconciliation";
 
 const db = getDb();
 
@@ -937,6 +947,297 @@ export async function tariffsAssignList(ctx: AuthContext, input: unknown) {
   return { siteId: parsed.siteId, assignments: results };
 }
 
+/* ─────────────── Reconciliation Router ─────────────── */
+
+export async function reconciliationGenerate(ctx: AuthContext, input: unknown) {
+  const parsed = reconciliationGenerateInput.parse(input);
+
+  const billingPeriod = await db.query.billingPeriods.findFirst({
+    where: eq(billingPeriods.id, parsed.billingPeriodId),
+  });
+
+  if (!billingPeriod) {
+    throw new Error("Billing period not found");
+  }
+
+  await requireSiteAccess(ctx, billingPeriod.siteId);
+
+  const site = await db.query.sites.findFirst({
+    where: eq(sites.id, billingPeriod.siteId),
+  });
+
+  if (!site) {
+    throw new Error("Site not found");
+  }
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.billingPeriodId, parsed.billingPeriodId),
+  });
+
+  if (!invoice) {
+    throw new Error("No invoice found for this billing period");
+  }
+
+  // Gather measured data from demand intervals within the billing period
+  const allIntervals = await db
+    .select()
+    .from(demandIntervals)
+    .where(
+      and(
+        eq(demandIntervals.siteId, billingPeriod.siteId),
+      ),
+    );
+
+  const intervals = allIntervals.filter((i) => {
+    const intervalStart = i.intervalStart.getTime();
+    const periodStart = billingPeriod.periodStart.getTime();
+    const periodEnd = billingPeriod.periodEnd.getTime();
+
+    if (billingPeriod.boundaryInclusivity === "half_open") {
+      return intervalStart >= periodStart && intervalStart < periodEnd;
+    }
+    if (billingPeriod.boundaryInclusivity === "inclusive") {
+      return intervalStart >= periodStart && intervalStart <= periodEnd;
+    }
+    return intervalStart >= periodStart && intervalStart < periodEnd;
+  });
+
+  // Calculate totals
+  let totalActiveKwh = 0;
+  let maxDemandKva = 0;
+  let totalReactiveKvarh = 0;
+
+  for (const interval of intervals) {
+    if (interval.activeEnergyKwh) {
+      totalActiveKwh += Number(interval.activeEnergyKwh);
+    }
+    if (interval.avgDemandKva) {
+      maxDemandKva = Math.max(maxDemandKva, Number(interval.avgDemandKva));
+    }
+    if (interval.reactiveEnergyKvarh) {
+      totalReactiveKvarh += Number(interval.reactiveEnergyKvarh);
+    }
+  }
+
+  // Gather data gaps
+  const gaps = await db.query.dataGaps.findMany({
+    where: and(
+      eq(dataGaps.siteId, billingPeriod.siteId),
+    ),
+  });
+
+  const gapCount = gaps.length;
+  let gapMinutesTotal = 0;
+  for (const gap of gaps) {
+    gapMinutesTotal += gap.durationMinutes;
+  }
+
+  // Get tariff profiles effective during the period
+  const landlordAssignment = await db.query.siteTariffAssignments.findFirst({
+    where: and(
+      eq(siteTariffAssignments.siteId, billingPeriod.siteId),
+      eq(siteTariffAssignments.role, "landlord"),
+    ),
+  });
+
+  const ceilingAssignment = await db.query.siteTariffAssignments.findFirst({
+    where: and(
+      eq(siteTariffAssignments.siteId, billingPeriod.siteId),
+      eq(siteTariffAssignments.role, "legal_ceiling"),
+    ),
+  });
+
+  if (!landlordAssignment) {
+    throw new Error("No landlord tariff assigned for site");
+  }
+
+  const landlordProfile = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, landlordAssignment.tariffProfileId),
+  });
+
+  if (!landlordProfile) {
+    throw new Error("Landlord tariff profile not found");
+  }
+
+  const landlordRates = await db.query.tariffRates.findMany({
+    where: eq(tariffRates.tariffProfileId, landlordProfile.id),
+  });
+
+  let ceilingProfile: typeof tariffProfiles.$inferSelect | undefined;
+  let ceilingRates: typeof tariffRates.$inferSelect[] = [];
+  if (ceilingAssignment) {
+    ceilingProfile = await db.query.tariffProfiles.findFirst({
+      where: eq(tariffProfiles.id, ceilingAssignment.tariffProfileId),
+    });
+    if (ceilingProfile) {
+      ceilingRates = await db.query.tariffRates.findMany({
+        where: eq(tariffRates.tariffProfileId, ceilingProfile.id),
+      });
+    }
+  }
+
+  // Generate reconciliation data
+  const reconData = await generateReconciliation(
+    billingPeriod,
+    site,
+    {
+      activeKwh: totalActiveKwh,
+      maxDemandKva,
+      reactiveKvarh: totalReactiveKvarh,
+    },
+    {
+      rates: landlordRates.map((r) => ({
+        chargeType: r.chargeType as "active_energy" | "demand" | "reactive_energy" | "fixed" | "ancillary",
+        unit: r.unit as "c_per_kwh" | "r_per_kva" | "c_per_kvarh" | "r_per_day" | "r_per_month",
+        rateValue: Number(r.rateValue),
+        season: r.season as "high" | "low" | "all",
+        touPeriod: r.touPeriod as "peak" | "standard" | "offpeak" | "all",
+        blockThresholdKwh: r.blockThresholdKwh ? Number(r.blockThresholdKwh) : undefined,
+      })),
+      touSchedule: (landlordProfile.touSchedule || {}) as Record<string, unknown>,
+    },
+    ceilingProfile && ceilingRates.length > 0
+      ? {
+          rates: ceilingRates.map((r) => ({
+            chargeType: r.chargeType as "active_energy" | "demand" | "reactive_energy" | "fixed" | "ancillary",
+            unit: r.unit as "c_per_kwh" | "r_per_kva" | "c_per_kvarh" | "r_per_day" | "r_per_month",
+            rateValue: Number(r.rateValue),
+            season: r.season as "high" | "low" | "all",
+            touPeriod: r.touPeriod as "peak" | "standard" | "offpeak" | "all",
+            blockThresholdKwh: r.blockThresholdKwh ? Number(r.blockThresholdKwh) : undefined,
+          })),
+          touSchedule: (ceilingProfile.touSchedule || {}) as Record<string, unknown>,
+        }
+      : null,
+    {
+      confirmedActiveCents: invoice.confirmedActiveCents,
+      confirmedDemandCents: invoice.confirmedDemandCents,
+      confirmedReactiveCents: invoice.confirmedReactiveCents,
+      confirmedFixedCents: invoice.confirmedFixedCents,
+      confirmedTotalCents: invoice.confirmedTotalCents,
+    },
+    { gapCount, gapMinutesTotal },
+  );
+
+  // Write reconciliation to database
+  const reconId = randomUUID();
+  await db.insert(reconciliations).values({
+    id: reconId,
+    siteId: billingPeriod.siteId,
+    invoiceId: invoice.id,
+    billingPeriodId: parsed.billingPeriodId,
+    billingPeriodStart: billingPeriod.periodStart,
+    billingPeriodEnd: billingPeriod.periodEnd,
+    boundaryInclusivity: billingPeriod.boundaryInclusivity,
+    demandIntervalMinutes: billingPeriod.demandIntervalMinutes,
+    landlordTariffProfileId: landlordProfile.id,
+    legalCeilingTariffProfileId: ceilingAssignment?.tariffProfileId || null,
+    measuredActiveKwh: reconData.measuredActiveKwh.toString(),
+    measuredMaxDemandKva: reconData.measuredMaxDemandKva.toString(),
+    measuredReactiveKvarh: reconData.measuredReactiveKvarh.toString(),
+    expectedLandlordCents: reconData.expectedLandlordCents,
+    expectedCeilingCents: reconData.expectedCeilingCents,
+    chargedTotalCents: reconData.chargedTotalCents,
+    discrepancyVsLandlordCents: reconData.discrepancyVsLandlordCents,
+    discrepancyVsCeilingCents: reconData.discrepancyVsCeilingCents,
+    dataIntegrityStatus: reconData.dataIntegrityStatus,
+    gapCount: reconData.gapCount,
+    gapMinutesTotal: reconData.gapMinutesTotal,
+    breakdown: reconData.breakdown,
+    status: "draft",
+    version: 1,
+    generatedAt: new Date(),
+  });
+
+  return { reconId, status: "draft", version: 1 };
+}
+
+export async function reconciliationGet(ctx: AuthContext, input: unknown) {
+  const parsed = reconciliationGetInput.parse(input);
+
+  const recon = await db.query.reconciliations.findFirst({
+    where: eq(reconciliations.id, parsed.reconId),
+  });
+
+  if (!recon) {
+    throw new Error("Reconciliation not found");
+  }
+
+  await requireSiteAccess(ctx, recon.siteId);
+
+  return recon;
+}
+
+export async function reconciliationList(ctx: AuthContext, input: unknown) {
+  const parsed = reconciliationListInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  const rows = await db.query.reconciliations.findMany({
+    where: eq(reconciliations.siteId, parsed.siteId),
+    limit: parsed.limit || 50,
+    offset: parsed.offset || 0,
+  });
+
+  return { reconciliations: rows, total: rows.length };
+}
+
+export async function reconciliationListVersions(ctx: AuthContext, input: unknown) {
+  const parsed = reconciliationListVersionsInput.parse(input);
+
+  const billingPeriod = await db.query.billingPeriods.findFirst({
+    where: eq(billingPeriods.id, parsed.billingPeriodId),
+  });
+
+  if (!billingPeriod) {
+    throw new Error("Billing period not found");
+  }
+
+  await requireSiteAccess(ctx, billingPeriod.siteId);
+
+  const versions = await db.query.reconciliations.findMany({
+    where: eq(reconciliations.billingPeriodId, parsed.billingPeriodId),
+  });
+
+  return { versions };
+}
+
+export async function reconciliationFinalize(ctx: AuthContext, input: unknown) {
+  const parsed = reconciliationFinalizeInput.parse(input);
+
+  const recon = await db.query.reconciliations.findFirst({
+    where: eq(reconciliations.id, parsed.reconId),
+  });
+
+  if (!recon) {
+    throw new Error("Reconciliation not found");
+  }
+
+  await requireSiteAccess(ctx, recon.siteId);
+
+  if (!recon.invoiceId) {
+    throw new Error("Reconciliation has no associated invoice");
+  }
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, recon.invoiceId),
+  });
+
+  if (!invoice) {
+    throw new Error("Associated invoice not found");
+  }
+
+  if (invoice.status !== "locked") {
+    throw new ForbiddenError("Cannot finalize reconciliation until invoice is locked");
+  }
+
+  await db
+    .update(reconciliations)
+    .set({ status: "final" })
+    .where(eq(reconciliations.id, parsed.reconId));
+
+  return { reconId: parsed.reconId, status: "final" };
+}
+
 /* ─────────────── Router Export ─────────────── */
 
 export const appRouter = {
@@ -953,5 +1254,12 @@ export const appRouter = {
     library: { list: tariffsLibraryList, get: tariffsLibraryGet },
     profiles: { create: tariffsProfilesCreate, update: tariffsProfilesUpdate, addRate: tariffsProfilesAddRate, listRates: tariffsProfilesListRates },
     assign: { set: tariffsAssignSet, list: tariffsAssignList },
+  },
+  reconciliation: {
+    generate: reconciliationGenerate,
+    get: reconciliationGet,
+    list: reconciliationList,
+    listVersions: reconciliationListVersions,
+    finalize: reconciliationFinalize,
   },
 };

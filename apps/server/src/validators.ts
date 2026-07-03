@@ -256,6 +256,29 @@ export const tariffsAssignListInput = z.object({
   siteId: z.string().uuid(),
 });
 
+/* ─────────────── Reconciliation ─────────────── */
+export const reconciliationGenerateInput = z.object({
+  billingPeriodId: z.string().uuid(),
+});
+
+export const reconciliationGetInput = z.object({
+  reconId: z.string().uuid(),
+});
+
+export const reconciliationListInput = z.object({
+  siteId: z.string().uuid(),
+  limit: z.number().int().positive().default(50).optional(),
+  offset: z.number().int().nonnegative().default(0).optional(),
+});
+
+export const reconciliationListVersionsInput = z.object({
+  billingPeriodId: z.string().uuid(),
+});
+
+export const reconciliationFinalizeInput = z.object({
+  reconId: z.string().uuid(),
+});
+
 /* ─────────────── Device Ingestion ─────────────── */
 export const ingestReadingsBatchInput = z.object({
   readings: z.array(
@@ -336,3 +359,9 @@ export type TariffsProfilesAddRateInput = z.infer<typeof tariffsProfilesAddRateI
 export type TariffsProfilesListRatesInput = z.infer<typeof tariffsProfilesListRatesInput>;
 export type TariffsAssignSetInput = z.infer<typeof tariffsAssignSetInput>;
 export type TariffsAssignListInput = z.infer<typeof tariffsAssignListInput>;
+
+export type ReconciliationGenerateInput = z.infer<typeof reconciliationGenerateInput>;
+export type ReconciliationGetInput = z.infer<typeof reconciliationGetInput>;
+export type ReconciliationListInput = z.infer<typeof reconciliationListInput>;
+export type ReconciliationListVersionsInput = z.infer<typeof reconciliationListVersionsInput>;
+export type ReconciliationFinalizeInput = z.infer<typeof reconciliationFinalizeInput>;
