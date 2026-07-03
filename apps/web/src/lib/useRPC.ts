@@ -6,8 +6,12 @@ export function useRPC<T>(method: string, params?: unknown, deps: any[] = []) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Don't fetch if params are undefined (indicates dependencies aren't ready)
-    if (params === undefined) {
+    // For session.me, allow undefined params since it doesn't need them
+    // For other methods, undefined params means we're not ready yet
+    const shouldSkip = params === undefined && method !== "session.me";
+
+    if (shouldSkip) {
+      setData(null);
       setLoading(false);
       return;
     }
@@ -47,7 +51,7 @@ export function useRPC<T>(method: string, params?: unknown, deps: any[] = []) {
     };
 
     fetchData();
-  }, deps);
+  }, [method, params, ...deps]);
 
   return { data, loading, error };
 }
