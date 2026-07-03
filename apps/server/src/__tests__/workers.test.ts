@@ -10,7 +10,7 @@ import {
   alerts,
 } from "@sparks/db";
 import { randomUUID } from "node:crypto";
-import { sql, eq, and } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import {
   aggregateDemandIntervals,
   detectDataGaps,
@@ -190,9 +190,11 @@ describe("aggregateDemandIntervals", () => {
       .where(eq(demandIntervals.meterId, testMeterId));
 
     if (intervals.length > 0) {
-      const interval = intervals[0]!;
-      expect(parseFloat(interval.activeEnergyKwh || "0")).toBeGreaterThan(0);
-      expect(parseFloat(interval.avgDemandKw || "0")).toBeGreaterThan(0);
+      const interval = intervals[0];
+      if (interval) {
+        expect(Number.parseFloat(interval.activeEnergyKwh || "0")).toBeGreaterThan(0);
+        expect(Number.parseFloat(interval.avgDemandKw || "0")).toBeGreaterThan(0);
+      }
     }
   });
 
@@ -231,7 +233,7 @@ describe("aggregateDemandIntervals", () => {
 
   it("should mark intervals as complete when sample count >= 90% expected", async () => {
     const testReadings = [];
-    let time = new Date("2026-07-03T00:00:00Z");
+    const time = new Date("2026-07-03T00:00:00Z");
 
     for (let i = 0; i < 30; i++) {
       testReadings.push({

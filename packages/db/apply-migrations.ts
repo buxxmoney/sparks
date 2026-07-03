@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync } from "fs";
-import { join } from "path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import pg from "pg";
 
 const { Client } = pg;
@@ -16,7 +16,7 @@ const client = new Client({
   connectionString: dbUrl,
   ssl: {
     rejectUnauthorized: false,
-  } as any,
+  },
   connectionTimeoutMillis: 10000,
   query_timeout: 30000,
 });

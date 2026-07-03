@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { db, devices, meters, readings, deviceHealthSamples, sites } from "@sparks/db";
 import { randomUUID, createHash } from "node:crypto";
-import { sql, eq, and } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 
 let testSiteId: string;
 let testDeviceId: string;
@@ -127,17 +127,6 @@ describe("Device Ingestion API", () => {
     });
 
     it("should reject invalid API key", async () => {
-      const payload = {
-        readings: [
-          {
-            meterId: testMeterId,
-            time: new Date(),
-            activeEnergyKwh: "1000.500",
-          },
-        ],
-        timestamp: new Date(),
-      };
-
       const badApiKey = randomUUID();
       const badHash = createHash("sha256").update(badApiKey).digest("hex");
 
@@ -236,7 +225,7 @@ describe("Device Ingestion API", () => {
         .where(eq(devices.id, testDeviceId));
 
       const device = deviceList[0];
-      const site = device && device.siteId
+      const site = device?.siteId
         ? (await db.select().from(sites).where(eq(sites.id, device.siteId)).limit(1))[0]
         : null;
 

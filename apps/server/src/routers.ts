@@ -1,9 +1,20 @@
-import { getDb, sites, siteAccess, billingCyclePolicies, billingPeriods, devices, meters } from "@sparks/db";
+import {
+  getDb,
+  sites,
+  siteAccess,
+  billingCyclePolicies,
+  billingPeriods,
+  devices,
+  meters,
+  tariffProfiles,
+  tariffRates,
+  siteTariffAssignments,
+} from "@sparks/db";
 import { eq, and, desc, isNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { randomBytes, createHash } from "node:crypto";
 import type { AuthContext } from "./middleware";
-import { requireOrg, requireSiteAccess, ForbiddenError } from "./middleware";
+import { requireOrg, requireSiteAccess, ForbiddenError, requirePlatformOperator } from "./middleware";
 import {
   orgCreateInput,
   orgGetInput,
@@ -34,6 +45,14 @@ import {
   billingPeriodsMaterializeInput,
   billingPeriodsUpsertInput,
   billingPeriodsCloseInput,
+  tariffsLibraryListInput,
+  tariffsLibraryGetInput,
+  tariffsProfilesCreateInput,
+  tariffsProfilesUpdateInput,
+  tariffsProfilesAddRateInput,
+  tariffsProfilesListRatesInput,
+  tariffsAssignSetInput,
+  tariffsAssignListInput,
 } from "./validators";
 import { materializePeriods, type BillingPeriodPolicy } from "./billing";
 
@@ -143,7 +162,7 @@ export async function sitesUpdate(ctx: AuthContext, input: unknown) {
   const parsed = sitesUpdateInput.parse(input);
   await requireSiteAccess(ctx, parsed.siteId);
 
-  const updateData: Record<string, unknown> = {};
+  const updateData: Partial<typeof sites.$inferInsert> = {};
   if (parsed.name !== undefined) updateData.name = parsed.name;
   if (parsed.addressLine1 !== undefined) updateData.addressLine1 = parsed.addressLine1;
   if (parsed.city !== undefined) updateData.city = parsed.city;
@@ -153,7 +172,7 @@ export async function sitesUpdate(ctx: AuthContext, input: unknown) {
   if (parsed.status !== undefined) updateData.status = parsed.status;
   updateData.updatedAt = new Date();
 
-  await db.update(sites).set(updateData as any).where(eq(sites.id, parsed.siteId));
+  await db.update(sites).set(updateData).where(eq(sites.id, parsed.siteId));
 
   return { siteId: parsed.siteId, updated: Object.keys(updateData) };
 }
@@ -264,7 +283,7 @@ export async function siteAccessRevoke(ctx: AuthContext, input: unknown) {
 export async function devicesList(ctx: AuthContext, input: unknown) {
   const parsed = devicesListInput.parse(input);
 
-  let rows;
+  let rows: typeof devices.$inferSelect[] = [];
   if (parsed.siteId) {
     await requireSiteAccess(ctx, parsed.siteId);
     rows = await db.query.devices.findMany({
@@ -636,22 +655,22 @@ export async function billingPeriodsUpsert(ctx: AuthContext, input: unknown) {
       .where(eq(billingPeriods.id, existing.id));
 
     return { periodId: existing.id, upserted: "updated" };
-  } else {
-    const periodId = crypto.randomUUID();
-    await db.insert(billingPeriods).values({
-      id: periodId,
-      siteId: parsed.siteId,
-      periodStart: parsed.periodStart,
-      periodEnd: parsed.periodEnd,
-      boundaryInclusivity: "half_open",
-      demandIntervalMinutes,
-      source: parsed.source,
-      label: parsed.label,
-      notes: parsed.notes,
-    });
-
-    return { periodId, upserted: "inserted" };
   }
+
+  const periodId = crypto.randomUUID();
+  await db.insert(billingPeriods).values({
+    id: periodId,
+    siteId: parsed.siteId,
+    periodStart: parsed.periodStart,
+    periodEnd: parsed.periodEnd,
+    boundaryInclusivity: "half_open",
+    demandIntervalMinutes,
+    source: parsed.source,
+    label: parsed.label,
+    notes: parsed.notes,
+  });
+
+  return { periodId, upserted: "inserted" };
 }
 
 export async function billingPeriodsClose(ctx: AuthContext, input: unknown) {
@@ -675,6 +694,249 @@ export async function billingPeriodsClose(ctx: AuthContext, input: unknown) {
   return { periodId: parsed.periodId, status: "closed" };
 }
 
+/* ─────────────── Tariffs Router ─────────────── */
+
+export async function tariffsLibraryList(_ctx: AuthContext, input: unknown) {
+  const parsed = tariffsLibraryListInput.parse(input);
+
+  let query = db.query.tariffProfiles.findMany({
+    where: and(
+      eq(tariffProfiles.source, "library"),
+      isNull(tariffProfiles.organizationId),
+    ),
+  });
+
+  if (parsed.type) {
+    query = db.query.tariffProfiles.findMany({
+      where: and(
+        eq(tariffProfiles.source, "library"),
+        isNull(tariffProfiles.organizationId),
+        eq(tariffProfiles.type, parsed.type),
+      ),
+    });
+  }
+
+  if (parsed.supplyZone) {
+    query = db.query.tariffProfiles.findMany({
+      where: and(
+        eq(tariffProfiles.source, "library"),
+        isNull(tariffProfiles.organizationId),
+        eq(tariffProfiles.supplyZone, parsed.supplyZone),
+      ),
+    });
+  }
+
+  const rows = await query;
+  return { profiles: rows, total: rows.length };
+}
+
+export async function tariffsLibraryGet(_ctx: AuthContext, input: unknown) {
+  const parsed = tariffsLibraryGetInput.parse(input);
+
+  const profile = await db.query.tariffProfiles.findFirst({
+    where: and(
+      eq(tariffProfiles.id, parsed.tariffProfileId),
+      eq(tariffProfiles.source, "library"),
+      isNull(tariffProfiles.organizationId),
+    ),
+  });
+
+  if (!profile) {
+    throw new Error("Tariff profile not found in library");
+  }
+
+  const rates = await db.query.tariffRates.findMany({
+    where: eq(tariffRates.tariffProfileId, profile.id),
+  });
+
+  return { profile, rates };
+}
+
+export async function tariffsProfilesCreate(ctx: AuthContext, input: unknown) {
+  const parsed = tariffsProfilesCreateInput.parse(input);
+
+  if (parsed.source === "library") {
+    await requirePlatformOperator(ctx.userId);
+    if (parsed.organizationId) {
+      throw new ForbiddenError("Library tariffs cannot be organization-scoped");
+    }
+  } else {
+    const orgId = parsed.organizationId || ctx.organizationId;
+    await requireOrg(ctx, orgId);
+  }
+
+  const profileId = randomUUID();
+
+  await db.insert(tariffProfiles).values({
+    id: profileId,
+    organizationId: parsed.source === "custom" ? (parsed.organizationId || ctx.organizationId) : null,
+    name: parsed.name,
+    type: parsed.type,
+    source: parsed.source,
+    supplyZone: parsed.supplyZone,
+    distributor: parsed.distributor,
+    currency: parsed.currency,
+    touSchedule: parsed.touSchedule,
+    effectiveFrom: parsed.effectiveFrom,
+    effectiveTo: parsed.effectiveTo,
+    validatedByAttorney: parsed.validatedByAttorney,
+  });
+
+  return { profileId, created: true };
+}
+
+export async function tariffsProfilesUpdate(ctx: AuthContext, input: unknown) {
+  const parsed = tariffsProfilesUpdateInput.parse(input);
+
+  const profile = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, parsed.tariffProfileId),
+  });
+
+  if (!profile) {
+    throw new Error("Tariff profile not found");
+  }
+
+  if (profile.source === "library") {
+    await requirePlatformOperator(ctx.userId);
+  } else {
+    await requireOrg(ctx, profile.organizationId || "");
+  }
+
+  const updateData: Record<string, unknown> = {};
+  if (parsed.name !== undefined) updateData.name = parsed.name;
+  if (parsed.distributor !== undefined) updateData.distributor = parsed.distributor;
+  if (parsed.touSchedule !== undefined) updateData.touSchedule = parsed.touSchedule;
+  if (parsed.effectiveTo !== undefined) updateData.effectiveTo = parsed.effectiveTo;
+  if (parsed.validatedByAttorney !== undefined) updateData.validatedByAttorney = parsed.validatedByAttorney;
+
+  const updatePayload: Partial<typeof tariffProfiles.$inferInsert> = updateData;
+  await db
+    .update(tariffProfiles)
+    .set(updatePayload)
+    .where(eq(tariffProfiles.id, parsed.tariffProfileId));
+
+  return { profileId: parsed.tariffProfileId, updated: Object.keys(updateData) };
+}
+
+export async function tariffsProfilesAddRate(ctx: AuthContext, input: unknown) {
+  const parsed = tariffsProfilesAddRateInput.parse(input);
+
+  const profile = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, parsed.tariffProfileId),
+  });
+
+  if (!profile) {
+    throw new Error("Tariff profile not found");
+  }
+
+  if (profile.source === "library") {
+    await requirePlatformOperator(ctx.userId);
+  } else {
+    await requireOrg(ctx, profile.organizationId || "");
+  }
+
+  const rateId = randomUUID();
+  const rateValue = Number.parseFloat(parsed.rateValue);
+  const blockThresholdKwh = parsed.blockThresholdKwh ? Number.parseFloat(parsed.blockThresholdKwh) : undefined;
+
+  const ratePayload: typeof tariffRates.$inferInsert = {
+    id: rateId,
+    tariffProfileId: parsed.tariffProfileId,
+    chargeType: parsed.chargeType,
+    unit: parsed.unit,
+    rateValue: rateValue.toString(),
+    season: parsed.season,
+    touPeriod: parsed.touPeriod,
+    blockThresholdKwh: blockThresholdKwh?.toString(),
+  };
+  await db.insert(tariffRates).values(ratePayload);
+
+  return { rateId, created: true };
+}
+
+export async function tariffsProfilesListRates(_ctx: AuthContext, input: unknown) {
+  const parsed = tariffsProfilesListRatesInput.parse(input);
+
+  const profile = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, parsed.tariffProfileId),
+  });
+
+  if (!profile) {
+    throw new Error("Tariff profile not found");
+  }
+
+  const rates = await db.query.tariffRates.findMany({
+    where: eq(tariffRates.tariffProfileId, parsed.tariffProfileId),
+  });
+
+  return { profileId: parsed.tariffProfileId, rates };
+}
+
+export async function tariffsAssignSet(ctx: AuthContext, input: unknown) {
+  const parsed = tariffsAssignSetInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  const profile = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, parsed.tariffProfileId),
+  });
+
+  if (!profile) {
+    throw new Error("Tariff profile not found");
+  }
+
+  if (parsed.role === "legal_ceiling" && !profile.validatedByAttorney) {
+    throw new ForbiddenError(
+      "Cannot assign legal_ceiling tariff without attorney validation (validated_by_attorney must be true)",
+    );
+  }
+
+  const existing = await db.query.siteTariffAssignments.findFirst({
+    where: and(
+      eq(siteTariffAssignments.siteId, parsed.siteId),
+      eq(siteTariffAssignments.role, parsed.role),
+      isNull(siteTariffAssignments.effectiveTo),
+    ),
+  });
+
+  if (existing) {
+    await db
+      .update(siteTariffAssignments)
+      .set({ effectiveTo: new Date() })
+      .where(eq(siteTariffAssignments.id, existing.id));
+  }
+
+  const assignmentId = randomUUID();
+  await db.insert(siteTariffAssignments).values({
+    id: assignmentId,
+    siteId: parsed.siteId,
+    tariffProfileId: parsed.tariffProfileId,
+    role: parsed.role,
+    effectiveFrom: parsed.effectiveFrom,
+    effectiveTo: parsed.effectiveTo,
+  });
+
+  return { assignmentId, assigned: true };
+}
+
+export async function tariffsAssignList(ctx: AuthContext, input: unknown) {
+  const parsed = tariffsAssignListInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  const assignments = await db.query.siteTariffAssignments.findMany({
+    where: eq(siteTariffAssignments.siteId, parsed.siteId),
+  });
+
+  const results = [];
+  for (const assignment of assignments) {
+    const profile = await db.query.tariffProfiles.findFirst({
+      where: eq(tariffProfiles.id, assignment.tariffProfileId),
+    });
+    results.push({ assignment, profile });
+  }
+
+  return { siteId: parsed.siteId, assignments: results };
+}
+
 /* ─────────────── Router Export ─────────────── */
 
 export const appRouter = {
@@ -686,5 +948,10 @@ export const appRouter = {
   billing: {
     policies: { get: billingPoliciesGet, set: billingPoliciesSet },
     periods: { list: billingPeriodsList, materialize: billingPeriodsMaterialize, upsert: billingPeriodsUpsert, close: billingPeriodsClose },
+  },
+  tariffs: {
+    library: { list: tariffsLibraryList, get: tariffsLibraryGet },
+    profiles: { create: tariffsProfilesCreate, update: tariffsProfilesUpdate, addRate: tariffsProfilesAddRate, listRates: tariffsProfilesListRates },
+    assign: { set: tariffsAssignSet, list: tariffsAssignList },
   },
 };

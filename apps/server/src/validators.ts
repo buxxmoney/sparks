@@ -195,6 +195,67 @@ export const billingPeriodsCloseInput = z.object({
   periodId: z.string().uuid(),
 });
 
+/* ─────────────── Tariffs ─────────────── */
+export const tariffsLibraryListInput = z.object({
+  type: z.enum(["landlord_stated", "legal_ceiling"]).optional(),
+  supplyZone: z.string().optional(),
+  limit: z.number().int().positive().default(50).optional(),
+  offset: z.number().int().nonnegative().default(0).optional(),
+});
+
+export const tariffsLibraryGetInput = z.object({
+  tariffProfileId: z.string().uuid(),
+});
+
+export const tariffsProfilesCreateInput = z.object({
+  organizationId: z.string().optional(),
+  name: z.string().min(1).max(255),
+  type: z.enum(["landlord_stated", "legal_ceiling"]),
+  source: z.enum(["library", "custom"]),
+  supplyZone: z.string().max(100).optional(),
+  distributor: z.string().max(255).optional(),
+  currency: z.string().default("ZAR"),
+  touSchedule: z.record(z.any()).optional(),
+  effectiveFrom: z.coerce.date(),
+  effectiveTo: z.coerce.date().optional(),
+  validatedByAttorney: z.boolean().default(false),
+});
+
+export const tariffsProfilesUpdateInput = z.object({
+  tariffProfileId: z.string().uuid(),
+  name: z.string().min(1).max(255).optional(),
+  distributor: z.string().max(255).optional(),
+  touSchedule: z.record(z.any()).optional(),
+  effectiveTo: z.coerce.date().optional(),
+  validatedByAttorney: z.boolean().optional(),
+});
+
+export const tariffsProfilesAddRateInput = z.object({
+  tariffProfileId: z.string().uuid(),
+  chargeType: z.enum(["active_energy", "demand", "reactive_energy", "fixed", "ancillary"]),
+  unit: z.enum(["c_per_kwh", "r_per_kva", "c_per_kvarh", "r_per_day", "r_per_month"]),
+  rateValue: z.string().regex(/^\d+(\.\d{1,6})?$/),
+  season: z.enum(["high", "low", "all"]).default("all"),
+  touPeriod: z.enum(["peak", "standard", "offpeak", "all"]).default("all"),
+  blockThresholdKwh: z.string().regex(/^\d+(\.\d{1,2})?$/).optional(),
+});
+
+export const tariffsProfilesListRatesInput = z.object({
+  tariffProfileId: z.string().uuid(),
+});
+
+export const tariffsAssignSetInput = z.object({
+  siteId: z.string().uuid(),
+  tariffProfileId: z.string().uuid(),
+  role: z.enum(["landlord", "legal_ceiling"]),
+  effectiveFrom: z.coerce.date(),
+  effectiveTo: z.coerce.date().optional(),
+});
+
+export const tariffsAssignListInput = z.object({
+  siteId: z.string().uuid(),
+});
+
 /* ─────────────── Device Ingestion ─────────────── */
 export const ingestReadingsBatchInput = z.object({
   readings: z.array(
@@ -266,3 +327,12 @@ export type BillingPeriodsListInput = z.infer<typeof billingPeriodsListInput>;
 export type BillingPeriodsMaterializeInput = z.infer<typeof billingPeriodsMaterializeInput>;
 export type BillingPeriodsUpsertInput = z.infer<typeof billingPeriodsUpsertInput>;
 export type BillingPeriodsCloseInput = z.infer<typeof billingPeriodsCloseInput>;
+
+export type TariffsLibraryListInput = z.infer<typeof tariffsLibraryListInput>;
+export type TariffsLibraryGetInput = z.infer<typeof tariffsLibraryGetInput>;
+export type TariffsProfilesCreateInput = z.infer<typeof tariffsProfilesCreateInput>;
+export type TariffsProfilesUpdateInput = z.infer<typeof tariffsProfilesUpdateInput>;
+export type TariffsProfilesAddRateInput = z.infer<typeof tariffsProfilesAddRateInput>;
+export type TariffsProfilesListRatesInput = z.infer<typeof tariffsProfilesListRatesInput>;
+export type TariffsAssignSetInput = z.infer<typeof tariffsAssignSetInput>;
+export type TariffsAssignListInput = z.infer<typeof tariffsAssignListInput>;

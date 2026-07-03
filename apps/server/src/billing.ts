@@ -57,7 +57,7 @@ export function* materializePeriods(
   policy: BillingPeriodPolicy,
   rangeStart: Date,
   rangeEnd: Date,
-  _timezone: string = "Africa/Johannesburg",
+  _timezone = "Africa/Johannesburg",
 ): Generator<BillingPeriodCandidate> {
   let current = new Date(rangeStart);
 
@@ -176,7 +176,7 @@ export function* materializePeriods(
     const fiscalPattern = policy.fiscalPattern || "4-4-5";
     const anchorDate = policy.anchorDate || rangeStart;
 
-    const weeksPerPeriod = fiscalPattern.split("-").map((x: string) => parseInt(x));
+    const weeksPerPeriod = fiscalPattern.split("-").map((x: string) => Number.parseInt(x));
 
     let fiscalYear = anchorDate.getUTCFullYear();
     let periodIndex = 0;

@@ -59,7 +59,6 @@ export function createIngestionRouter() {
   router.post("/readings", async (c) => {
     const deviceId = c.req.header("x-device-id");
     const apiKey = c.req.header("x-device-key");
-    const signature = c.req.header("x-signature");
 
     if (!deviceId || !apiKey) {
       return c.json({ error: "Missing x-device-id or x-device-key header" }, 400);
@@ -70,7 +69,8 @@ export function createIngestionRouter() {
       return c.json({ error: "Invalid device credentials" }, 401);
     }
 
-    let parsed;
+    type IngestInput = typeof ingestReadingsBatchInput._output;
+    let parsed: IngestInput;
     try {
       const body = await c.req.json();
       parsed = ingestReadingsBatchInput.parse(body);
@@ -141,7 +141,8 @@ export function createIngestionRouter() {
       return c.json({ error: "Invalid device credentials" }, 401);
     }
 
-    let parsed;
+    type HealthInput = typeof ingestHealthInput._output;
+    let parsed: HealthInput;
     try {
       const body = await c.req.json();
       parsed = ingestHealthInput.parse(body);
@@ -220,10 +221,9 @@ export function createDeviceRouter() {
   });
 
   router.post("/commission", async (c) => {
-    let parsed;
     try {
       const body = await c.req.json();
-      parsed = deviceConfigInput.parse(body);
+      deviceConfigInput.parse(body);
     } catch (err) {
       return c.json({ error: "Invalid request body" }, 400);
     }

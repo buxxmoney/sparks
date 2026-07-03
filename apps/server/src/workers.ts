@@ -41,8 +41,8 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
     return;
   }
 
-  const startTime = new Date(meterReadings[0]!.time);
-  const endTime = new Date(meterReadings[meterReadings.length - 1]!.time);
+  const startTime = new Date(meterReadings[0]?.time || new Date());
+  const endTime = new Date(meterReadings[meterReadings.length - 1]?.time || new Date());
 
   const intervals = computeIntervals(startTime, endTime, intervalMinutes);
 
@@ -63,36 +63,36 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
     let apparentEnergyDelta = "0";
 
     if (intervalReadings.length > 1) {
-      const first = intervalReadings[0]!;
-      const last = intervalReadings[intervalReadings.length - 1]!;
+      const first = intervalReadings[0];
+      const last = intervalReadings[intervalReadings.length - 1];
 
-      if (first.activeEnergyKwh && last.activeEnergyKwh) {
-        const firstVal = parseFloat(first.activeEnergyKwh);
-        const lastVal = parseFloat(last.activeEnergyKwh);
+      if (first?.activeEnergyKwh && last?.activeEnergyKwh) {
+        const firstVal = Number.parseFloat(first.activeEnergyKwh);
+        const lastVal = Number.parseFloat(last.activeEnergyKwh);
         activeEnergyDelta = (lastVal - firstVal).toFixed(3);
       }
-      if (first.reactiveEnergyKvarh && last.reactiveEnergyKvarh) {
-        const firstVal = parseFloat(first.reactiveEnergyKvarh);
-        const lastVal = parseFloat(last.reactiveEnergyKvarh);
+      if (first?.reactiveEnergyKvarh && last?.reactiveEnergyKvarh) {
+        const firstVal = Number.parseFloat(first.reactiveEnergyKvarh);
+        const lastVal = Number.parseFloat(last.reactiveEnergyKvarh);
         reactiveEnergyDelta = (lastVal - firstVal).toFixed(3);
       }
-      if (first.apparentEnergyKvah && last.apparentEnergyKvah) {
-        const firstVal = parseFloat(first.apparentEnergyKvah);
-        const lastVal = parseFloat(last.apparentEnergyKvah);
+      if (first?.apparentEnergyKvah && last?.apparentEnergyKvah) {
+        const firstVal = Number.parseFloat(first.apparentEnergyKvah);
+        const lastVal = Number.parseFloat(last.apparentEnergyKvah);
         apparentEnergyDelta = (lastVal - firstVal).toFixed(3);
       }
     }
 
     const intervalHours = intervalMinutes / 60;
-    const avgDemandKw = (parseFloat(activeEnergyDelta) / intervalHours).toFixed(3);
-    const avgDemandKva = (parseFloat(apparentEnergyDelta) / intervalHours).toFixed(3);
+    const avgDemandKw = (Number.parseFloat(activeEnergyDelta) / intervalHours).toFixed(3);
+    const avgDemandKva = (Number.parseFloat(apparentEnergyDelta) / intervalHours).toFixed(3);
 
     const avgPowerFactor =
       intervalReadings.length > 0
         ? (
             intervalReadings
               .filter((r) => r.powerFactor)
-              .reduce((sum, r) => sum + parseFloat(r.powerFactor!), 0) /
+              .reduce((sum, r) => sum + Number.parseFloat(r.powerFactor || "0"), 0) /
             intervalReadings.filter((r) => r.powerFactor).length
           ).toFixed(4)
         : null;
@@ -196,8 +196,9 @@ export async function detectDataGaps(meterId: string): Promise<void> {
   const gaps: Array<{ start: Date; end: Date; reason: string }> = [];
 
   for (let i = 0; i < meterReadings.length - 1; i++) {
-    const current = meterReadings[i]!;
-    const next = meterReadings[i + 1]!;
+    const current = meterReadings[i];
+    const next = meterReadings[i + 1];
+    if (!current || !next) continue;
 
     const currentSeq = current.seq ? Number(current.seq) : null;
     const nextSeq = next.seq ? Number(next.seq) : null;
@@ -272,7 +273,7 @@ export async function detectDataGaps(meterId: string): Promise<void> {
  */
 export async function evaluateDeviceOffline(
   deviceId: string,
-  thresholdMinutes: number = 15,
+  thresholdMinutes = 15,
 ): Promise<void> {
   const deviceList = await db
     .select()
@@ -283,6 +284,10 @@ export async function evaluateDeviceOffline(
   const device = deviceList[0];
   if (!device) {
     throw new Error(`Device ${deviceId} not found`);
+  }
+
+  if (!device.siteId) {
+    throw new Error(`Device ${deviceId} not associated with a site`);
   }
 
   const siteList = await db
@@ -358,7 +363,7 @@ export async function evaluateDeviceOffline(
     if (offlineAlert) {
       await db
         .update(alerts)
-        .set({ status: "resolved", updatedAt: now })
+        .set({ status: "resolved", resolvedAt: now })
         .where(eq(alerts.id, offlineAlert.id));
     }
   }
