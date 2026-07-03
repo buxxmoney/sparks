@@ -1515,4 +1515,7 @@ export const appRouter = {
     confirm: invoicesConfirm,
     lock: invoicesLock,
   },
+  report: {
+    getPdf: reportGetPdf,
+  },
 };
