@@ -11,6 +11,7 @@ import {
   siteTariffAssignments,
   reconciliations,
   landlordInvoices,
+  invoiceLineItems,
   demandIntervals,
   dataGaps,
 } from "@sparks/db";
@@ -62,6 +63,13 @@ import {
   reconciliationListInput,
   reconciliationListVersionsInput,
   reconciliationFinalizeInput,
+  invoicesCreateUploadInput,
+  invoicesGetInput,
+  invoicesListInput,
+  invoicesListLineItemsInput,
+  invoicesUpdateLineItemInput,
+  invoicesConfirmInput,
+  invoicesLockInput,
 } from "./validators";
 import { materializePeriods, type BillingPeriodPolicy } from "./billing";
 import { generateReconciliation } from "./reconciliation";
@@ -1238,6 +1246,208 @@ export async function reconciliationFinalize(ctx: AuthContext, input: unknown) {
   return { reconId: parsed.reconId, status: "final" };
 }
 
+/* ─────────────── Invoices ─────────────── */
+
+export async function invoicesCreateUpload(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesCreateUploadInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  const billingPeriod = await db.query.billingPeriods.findFirst({
+    where: eq(billingPeriods.id, parsed.billingPeriodId),
+  });
+
+  if (!billingPeriod) {
+    throw new Error("Billing period not found");
+  }
+
+  if (billingPeriod.siteId !== parsed.siteId) {
+    throw new ForbiddenError("Billing period does not belong to this site");
+  }
+
+  const fileHash = randomBytes(32).toString("hex");
+  const fileStorageKey = `invoices/${parsed.siteId}/${parsed.billingPeriodId}/${randomUUID()}.pdf`;
+
+  const result = await db
+    .insert(landlordInvoices)
+    .values({
+      siteId: parsed.siteId,
+      billingPeriodId: parsed.billingPeriodId,
+      billingPeriodStart: billingPeriod.periodStart,
+      billingPeriodEnd: billingPeriod.periodEnd,
+      fileStorageKey,
+      fileHash,
+      status: "uploaded",
+      uploadedByUserId: ctx.userId,
+    })
+    .returning();
+
+  const invoice = result[0];
+
+  const presignedUrl = `https://r2.example.com/presigned?key=${fileStorageKey}&hash=${fileHash}`;
+
+  return {
+    invoiceId: invoice.id,
+    presignedUrl,
+    fileHash,
+  };
+}
+
+export async function invoicesGet(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesGetInput.parse(input);
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, parsed.invoiceId),
+  });
+
+  if (!invoice) {
+    throw new Error("Invoice not found");
+  }
+
+  await requireSiteAccess(ctx, invoice.siteId);
+
+  return invoice;
+}
+
+export async function invoicesList(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesListInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  const invoices = await db.query.landlordInvoices.findMany({
+    where: eq(landlordInvoices.siteId, parsed.siteId),
+    limit: parsed.limit,
+    offset: parsed.offset,
+  });
+
+  const total = (
+    await db.query.landlordInvoices.findMany({
+      where: eq(landlordInvoices.siteId, parsed.siteId),
+    })
+  ).length;
+
+  return { invoices, total };
+}
+
+export async function invoicesListLineItems(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesListLineItemsInput.parse(input);
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, parsed.invoiceId),
+  });
+
+  if (!invoice) {
+    throw new Error("Invoice not found");
+  }
+
+  await requireSiteAccess(ctx, invoice.siteId);
+
+  const lineItems = await db.query.invoiceLineItems.findMany({
+    where: eq(invoiceLineItems.invoiceId, parsed.invoiceId),
+  });
+
+  return { lineItems };
+}
+
+export async function invoicesUpdateLineItem(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesUpdateLineItemInput.parse(input);
+
+  const lineItem = await db.query.invoiceLineItems.findFirst({
+    where: eq(invoiceLineItems.id, parsed.lineItemId),
+  });
+
+  if (!lineItem) {
+    throw new Error("Line item not found");
+  }
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, lineItem.invoiceId),
+  });
+
+  if (!invoice) {
+    throw new Error("Invoice not found");
+  }
+
+  await requireSiteAccess(ctx, invoice.siteId);
+
+  if (invoice.status !== "parsed_pending_confirm") {
+    throw new Error("Invoice must be in parsed_pending_confirm status to update line items");
+  }
+
+  const result = await db
+    .update(invoiceLineItems)
+    .set({
+      confirmedCategory: parsed.confirmedCategory,
+      confirmedValueCents: parsed.confirmedValueCents,
+    })
+    .where(eq(invoiceLineItems.id, parsed.lineItemId))
+    .returning();
+
+  return { lineItem: result[0] };
+}
+
+export async function invoicesConfirm(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesConfirmInput.parse(input);
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, parsed.invoiceId),
+  });
+
+  if (!invoice) {
+    throw new Error("Invoice not found");
+  }
+
+  await requireSiteAccess(ctx, invoice.siteId);
+
+  if (invoice.status !== "parsed_pending_confirm") {
+    throw new Error("Invoice must be in parsed_pending_confirm status to confirm");
+  }
+
+  const result = await db
+    .update(landlordInvoices)
+    .set({
+      status: "confirmed",
+      confirmedActiveCents: parsed.confirmedActiveCents,
+      confirmedDemandCents: parsed.confirmedDemandCents,
+      confirmedReactiveCents: parsed.confirmedReactiveCents,
+      confirmedFixedCents: parsed.confirmedFixedCents,
+      confirmedTotalCents: parsed.confirmedTotalCents,
+      confirmedByUserId: ctx.userId,
+      confirmedAt: new Date(),
+    })
+    .where(eq(landlordInvoices.id, parsed.invoiceId))
+    .returning();
+
+  return { invoice: result[0] };
+}
+
+export async function invoicesLock(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesLockInput.parse(input);
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, parsed.invoiceId),
+  });
+
+  if (!invoice) {
+    throw new Error("Invoice not found");
+  }
+
+  await requireSiteAccess(ctx, invoice.siteId);
+
+  if (invoice.status !== "confirmed") {
+    throw new Error("Invoice must be confirmed before locking");
+  }
+
+  const result = await db
+    .update(landlordInvoices)
+    .set({
+      status: "locked",
+      lockedAt: new Date(),
+    })
+    .where(eq(landlordInvoices.id, parsed.invoiceId))
+    .returning();
+
+  return { invoice: result[0] };
+}
+
 /* ─────────────── Router Export ─────────────── */
 
 export const appRouter = {
@@ -1261,5 +1471,14 @@ export const appRouter = {
     list: reconciliationList,
     listVersions: reconciliationListVersions,
     finalize: reconciliationFinalize,
+  },
+  invoices: {
+    createUpload: invoicesCreateUpload,
+    get: invoicesGet,
+    list: invoicesList,
+    listLineItems: invoicesListLineItems,
+    updateLineItem: invoicesUpdateLineItem,
+    confirm: invoicesConfirm,
+    lock: invoicesLock,
   },
 };

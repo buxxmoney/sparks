@@ -1,5 +1,6 @@
-import { db, meters, readings, demandIntervals, dataGaps, devices, alerts, sites } from "@sparks/db";
+import { db, meters, readings, demandIntervals, dataGaps, devices, alerts, sites, landlordInvoices } from "@sparks/db";
 import { eq, and, asc } from "drizzle-orm";
+import { parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
 
 /**
  * Aggregate readings into demand intervals for a meter.
@@ -366,5 +367,41 @@ export async function evaluateDeviceOffline(
         .set({ status: "resolved", resolvedAt: now })
         .where(eq(alerts.id, offlineAlert.id));
     }
+  }
+}
+
+/**
+ * Parse a landlord invoice PDF using Claude vision + structured tool-use.
+ * Renders PDF to images, calls Claude, extracts line items, validates arithmetic,
+ * flags impermissible add-ons, and persists results.
+ */
+export async function triggerInvoiceParse(invoiceId: string, pdfContent: Buffer): Promise<void> {
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, invoiceId),
+  });
+
+  if (!invoice) {
+    throw new Error(`Invoice ${invoiceId} not found`);
+  }
+
+  if (invoice.status !== "uploaded") {
+    throw new Error(`Invoice ${invoiceId} is not in uploaded status`);
+  }
+
+  try {
+    await db
+      .update(landlordInvoices)
+      .set({ status: "parsing" })
+      .where(eq(landlordInvoices.id, invoiceId));
+
+    const parsed = await parseInvoiceWithClaude(invoiceId, pdfContent);
+    await persistParsedInvoice(invoiceId, parsed);
+  } catch (error) {
+    await db
+      .update(landlordInvoices)
+      .set({ status: "uploaded" })
+      .where(eq(landlordInvoices.id, invoiceId));
+
+    throw error;
   }
 }

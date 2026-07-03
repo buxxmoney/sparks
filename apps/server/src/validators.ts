@@ -279,6 +279,55 @@ export const reconciliationFinalizeInput = z.object({
   reconId: z.string().uuid(),
 });
 
+/* ─────────────── Invoices ─────────────── */
+export const invoicesCreateUploadInput = z.object({
+  siteId: z.string().uuid(),
+  billingPeriodId: z.string().uuid(),
+});
+
+export const invoicesGetInput = z.object({
+  invoiceId: z.string().uuid(),
+});
+
+export const invoicesListInput = z.object({
+  siteId: z.string().uuid(),
+  limit: z.number().int().positive().default(50).optional(),
+  offset: z.number().int().nonnegative().default(0).optional(),
+});
+
+export const invoicesListLineItemsInput = z.object({
+  invoiceId: z.string().uuid(),
+});
+
+export const invoicesUpdateLineItemInput = z.object({
+  lineItemId: z.string().uuid(),
+  confirmedCategory: z.enum([
+    "active",
+    "demand",
+    "reactive",
+    "fixed",
+    "vat",
+    "add_on_metering",
+    "add_on_admin",
+    "add_on_vending",
+    "other",
+  ]),
+  confirmedValueCents: z.number().int().nonnegative(),
+});
+
+export const invoicesConfirmInput = z.object({
+  invoiceId: z.string().uuid(),
+  confirmedActiveCents: z.number().int().nonnegative().nullable(),
+  confirmedDemandCents: z.number().int().nonnegative().nullable(),
+  confirmedReactiveCents: z.number().int().nonnegative().nullable(),
+  confirmedFixedCents: z.number().int().nonnegative().nullable(),
+  confirmedTotalCents: z.number().int().nonnegative(),
+});
+
+export const invoicesLockInput = z.object({
+  invoiceId: z.string().uuid(),
+});
+
 /* ─────────────── Device Ingestion ─────────────── */
 export const ingestReadingsBatchInput = z.object({
   readings: z.array(
@@ -365,3 +414,11 @@ export type ReconciliationGetInput = z.infer<typeof reconciliationGetInput>;
 export type ReconciliationListInput = z.infer<typeof reconciliationListInput>;
 export type ReconciliationListVersionsInput = z.infer<typeof reconciliationListVersionsInput>;
 export type ReconciliationFinalizeInput = z.infer<typeof reconciliationFinalizeInput>;
+
+export type InvoicesCreateUploadInput = z.infer<typeof invoicesCreateUploadInput>;
+export type InvoicesGetInput = z.infer<typeof invoicesGetInput>;
+export type InvoicesListInput = z.infer<typeof invoicesListInput>;
+export type InvoicesListLineItemsInput = z.infer<typeof invoicesListLineItemsInput>;
+export type InvoicesUpdateLineItemInput = z.infer<typeof invoicesUpdateLineItemInput>;
+export type InvoicesConfirmInput = z.infer<typeof invoicesConfirmInput>;
+export type InvoicesLockInput = z.infer<typeof invoicesLockInput>;
