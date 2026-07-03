@@ -1,6 +1,6 @@
 import type { AuthContext } from "./middleware";
 import { getDb, member, organization } from "@sparks/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 export interface SessionMe {
   userId: string;
@@ -26,16 +26,15 @@ export async function sessionMe(authContext: AuthContext): Promise<SessionMe> {
 export async function sessionListMemberships(authContext: AuthContext): Promise<Membership[]> {
   const db = getDb();
 
-  const memberships = await db.query.member.findMany({
-    where: eq(member.userId, authContext.userId),
-    with: {
-      organization: true,
-    },
-  });
+  const memberships = await db
+    .select({
+      organizationId: member.organizationId,
+      organizationName: organization.name,
+      role: member.role,
+    })
+    .from(member)
+    .innerJoin(organization, eq(member.organizationId, organization.id))
+    .where(eq(member.userId, authContext.userId));
 
-  return memberships.map((m) => ({
-    organizationId: m.organizationId,
-    organizationName: m.organization.name,
-    role: m.role,
-  }));
+  return memberships;
 }
