@@ -51,7 +51,7 @@ export function useRPC<T>(method: string, params?: unknown, deps: any[] = []) {
     };
 
     fetchData();
-  }, [method, params, ...deps]);
+  }, [method, ...(deps.length > 0 ? deps : [params])]);
 
   return { data, loading, error };
 }
