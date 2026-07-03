@@ -377,6 +377,7 @@ export const dataGaps = pgTable(
   },
   (t) => ({
     siteIdx: index("data_gaps_site_idx").on(t.siteId, t.gapStart),
+    uniqueGap: uniqueIndex("data_gaps_unique_gap").on(t.meterId, t.gapStart, t.gapEnd),
   }),
 );
 

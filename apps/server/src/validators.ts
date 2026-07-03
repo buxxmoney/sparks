@@ -195,6 +195,40 @@ export const billingPeriodsCloseInput = z.object({
   periodId: z.string().uuid(),
 });
 
+/* ─────────────── Device Ingestion ─────────────── */
+export const ingestReadingsBatchInput = z.object({
+  readings: z.array(
+    z.object({
+      meterId: z.string().uuid(),
+      time: z.coerce.date(),
+      seq: z.union([z.number(), z.bigint()]).optional(),
+      activeEnergyKwh: z.string().optional(),
+      reactiveEnergyKvarh: z.string().optional(),
+      apparentEnergyKvah: z.string().optional(),
+      totalPowerKw: z.string().optional(),
+      totalApparentKva: z.string().optional(),
+      powerFactor: z.string().optional(),
+    })
+  ),
+  timestamp: z.coerce.date(),
+});
+
+export const ingestHealthInput = z.object({
+  deviceId: z.string().uuid(),
+  time: z.coerce.date(),
+  connectivityMode: z.enum(["lte", "wifi"]).optional(),
+  signalRssi: z.number().optional(),
+  upsStatus: z.enum(["on_mains", "charging", "on_battery", "degraded", "unknown"]).optional(),
+  batteryPct: z.number().int().min(0).max(100).optional(),
+  cpuTempC: z.number().optional(),
+  bufferedRecords: z.number().int().optional(),
+});
+
+export const deviceConfigInput = z.object({
+  deviceId: z.string().uuid(),
+  provisioningToken: z.string(),
+});
+
 /* Type exports for use in procedures */
 export type OrgCreateInput = z.infer<typeof orgCreateInput>;
 export type OrgGetInput = z.infer<typeof orgGetInput>;

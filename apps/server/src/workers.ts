@@ -1,0 +1,365 @@
+import { db, meters, readings, demandIntervals, dataGaps, devices, alerts, sites } from "@sparks/db";
+import { eq, and, asc } from "drizzle-orm";
+
+/**
+ * Aggregate readings into demand intervals for a meter.
+ * Computes clock-aligned intervals in UTC.
+ * Derives avg_demand_kw/kva from cumulative energy deltas.
+ */
+export async function aggregateDemandIntervals(meterId: string): Promise<void> {
+  const meterList = await db
+    .select()
+    .from(meters)
+    .where(eq(meters.id, meterId))
+    .limit(1);
+
+  const meter = meterList[0];
+  if (!meter) {
+    throw new Error(`Meter ${meterId} not found`);
+  }
+
+  const siteList = await db
+    .select()
+    .from(sites)
+    .where(eq(sites.id, meter.siteId))
+    .limit(1);
+
+  const site = siteList[0];
+  if (!site) {
+    throw new Error(`Site for meter ${meterId} not found`);
+  }
+
+  const intervalMinutes = site.demandIntervalMinutes;
+
+  const meterReadings = await db
+    .select()
+    .from(readings)
+    .where(eq(readings.meterId, meterId))
+    .orderBy(asc(readings.time));
+
+  if (meterReadings.length === 0) {
+    return;
+  }
+
+  const startTime = new Date(meterReadings[0]!.time);
+  const endTime = new Date(meterReadings[meterReadings.length - 1]!.time);
+
+  const intervals = computeIntervals(startTime, endTime, intervalMinutes);
+
+  for (const interval of intervals) {
+    const intervalReadings = meterReadings.filter(
+      (r) => new Date(r.time) >= interval.start && new Date(r.time) < interval.end,
+    );
+
+    if (intervalReadings.length === 0) {
+      continue;
+    }
+
+    const sampleCount = intervalReadings.length;
+    const expectedSamples = Math.ceil((intervalMinutes * 60) / 60);
+
+    let activeEnergyDelta = "0";
+    let reactiveEnergyDelta = "0";
+    let apparentEnergyDelta = "0";
+
+    if (intervalReadings.length > 1) {
+      const first = intervalReadings[0]!;
+      const last = intervalReadings[intervalReadings.length - 1]!;
+
+      if (first.activeEnergyKwh && last.activeEnergyKwh) {
+        const firstVal = parseFloat(first.activeEnergyKwh);
+        const lastVal = parseFloat(last.activeEnergyKwh);
+        activeEnergyDelta = (lastVal - firstVal).toFixed(3);
+      }
+      if (first.reactiveEnergyKvarh && last.reactiveEnergyKvarh) {
+        const firstVal = parseFloat(first.reactiveEnergyKvarh);
+        const lastVal = parseFloat(last.reactiveEnergyKvarh);
+        reactiveEnergyDelta = (lastVal - firstVal).toFixed(3);
+      }
+      if (first.apparentEnergyKvah && last.apparentEnergyKvah) {
+        const firstVal = parseFloat(first.apparentEnergyKvah);
+        const lastVal = parseFloat(last.apparentEnergyKvah);
+        apparentEnergyDelta = (lastVal - firstVal).toFixed(3);
+      }
+    }
+
+    const intervalHours = intervalMinutes / 60;
+    const avgDemandKw = (parseFloat(activeEnergyDelta) / intervalHours).toFixed(3);
+    const avgDemandKva = (parseFloat(apparentEnergyDelta) / intervalHours).toFixed(3);
+
+    const avgPowerFactor =
+      intervalReadings.length > 0
+        ? (
+            intervalReadings
+              .filter((r) => r.powerFactor)
+              .reduce((sum, r) => sum + parseFloat(r.powerFactor!), 0) /
+            intervalReadings.filter((r) => r.powerFactor).length
+          ).toFixed(4)
+        : null;
+
+    const isComplete = sampleCount >= expectedSamples * 0.9;
+
+    await db
+      .insert(demandIntervals)
+      .values({
+        meterId,
+        siteId: meter.siteId,
+        intervalStart: interval.start,
+        intervalMinutes,
+        activeEnergyKwh: activeEnergyDelta,
+        reactiveEnergyKvarh: reactiveEnergyDelta,
+        avgDemandKw: avgDemandKw,
+        avgDemandKva: avgDemandKva,
+        avgPowerFactor: avgPowerFactor,
+        sampleCount,
+        expectedSamples,
+        isComplete,
+        source: "live",
+      })
+      .onConflictDoUpdate({
+        target: [
+          demandIntervals.meterId,
+          demandIntervals.intervalStart,
+          demandIntervals.intervalMinutes,
+        ],
+        set: {
+          activeEnergyKwh: activeEnergyDelta,
+          reactiveEnergyKvarh: reactiveEnergyDelta,
+          avgDemandKw: avgDemandKw,
+          avgDemandKva: avgDemandKva,
+          avgPowerFactor: avgPowerFactor,
+          sampleCount,
+          expectedSamples,
+          isComplete,
+        },
+      });
+  }
+}
+
+/**
+ * Compute clock-aligned intervals for a time range.
+ * Intervals align to boundaries like 00:00, 00:30, 01:00, etc.
+ */
+function computeIntervals(
+  startTime: Date,
+  endTime: Date,
+  intervalMinutes: number,
+): Array<{ start: Date; end: Date }> {
+  const intervals: Array<{ start: Date; end: Date }> = [];
+
+  let current = alignToInterval(startTime, intervalMinutes);
+
+  while (current < endTime) {
+    const next = new Date(current.getTime() + intervalMinutes * 60 * 1000);
+    intervals.push({ start: new Date(current), end: next });
+    current = next;
+  }
+
+  return intervals;
+}
+
+/**
+ * Align a UTC time to the nearest interval boundary (e.g., aligned to 00:00, 00:30).
+ */
+function alignToInterval(date: Date, intervalMinutes: number): Date {
+  const ms = date.getTime();
+  const intervalMs = intervalMinutes * 60 * 1000;
+  const aligned = Math.floor(ms / intervalMs) * intervalMs;
+  return new Date(aligned);
+}
+
+/**
+ * Detect data gaps based on sequence discontinuity or incomplete intervals.
+ */
+export async function detectDataGaps(meterId: string): Promise<void> {
+  const meterList = await db
+    .select()
+    .from(meters)
+    .where(eq(meters.id, meterId))
+    .limit(1);
+
+  const meter = meterList[0];
+  if (!meter) {
+    throw new Error(`Meter ${meterId} not found`);
+  }
+
+  const meterReadings = await db
+    .select()
+    .from(readings)
+    .where(eq(readings.meterId, meterId))
+    .orderBy(asc(readings.time));
+
+  if (meterReadings.length < 2) {
+    return;
+  }
+
+  const gaps: Array<{ start: Date; end: Date; reason: string }> = [];
+
+  for (let i = 0; i < meterReadings.length - 1; i++) {
+    const current = meterReadings[i]!;
+    const next = meterReadings[i + 1]!;
+
+    const currentSeq = current.seq ? Number(current.seq) : null;
+    const nextSeq = next.seq ? Number(next.seq) : null;
+
+    if (currentSeq && nextSeq && nextSeq - currentSeq > 1) {
+      gaps.push({
+        start: new Date(current.time),
+        end: new Date(next.time),
+        reason: "seq_discontinuity",
+      });
+    }
+  }
+
+  const incompleteIntervals = await db
+    .select()
+    .from(demandIntervals)
+    .where(
+      and(
+        eq(demandIntervals.meterId, meterId),
+        eq(demandIntervals.isComplete, false),
+      )
+    );
+
+  for (const interval of incompleteIntervals) {
+    const intervalStart = new Date(interval.intervalStart);
+    const intervalEnd = new Date(intervalStart.getTime() + interval.intervalMinutes * 60000);
+
+    const existingList = await db
+      .select()
+      .from(dataGaps)
+      .where(
+        and(
+          eq(dataGaps.meterId, meterId),
+          eq(dataGaps.gapStart, intervalStart),
+          eq(dataGaps.gapEnd, intervalEnd),
+        )
+      )
+      .limit(1);
+
+    const existing = existingList[0];
+
+    if (!existing) {
+      gaps.push({
+        start: intervalStart,
+        end: intervalEnd,
+        reason: "incomplete_interval",
+      });
+    }
+  }
+
+  for (const gap of gaps) {
+    const durationMinutes = (gap.end.getTime() - gap.start.getTime()) / (1000 * 60);
+
+    await db
+      .insert(dataGaps)
+      .values({
+        meterId,
+        siteId: meter.siteId,
+        gapStart: gap.start,
+        gapEnd: gap.end,
+        durationMinutes: Math.ceil(durationMinutes),
+        backfilled: false,
+      })
+      .onConflictDoNothing({
+        target: [dataGaps.meterId, dataGaps.gapStart, dataGaps.gapEnd],
+      });
+  }
+}
+
+/**
+ * Evaluate device offline status and create alerts.
+ */
+export async function evaluateDeviceOffline(
+  deviceId: string,
+  thresholdMinutes: number = 15,
+): Promise<void> {
+  const deviceList = await db
+    .select()
+    .from(devices)
+    .where(eq(devices.id, deviceId))
+    .limit(1);
+
+  const device = deviceList[0];
+  if (!device) {
+    throw new Error(`Device ${deviceId} not found`);
+  }
+
+  const siteList = await db
+    .select()
+    .from(sites)
+    .where(eq(sites.id, device.siteId))
+    .limit(1);
+
+  const site = siteList[0];
+  if (!site) {
+    throw new Error(`Site for device ${deviceId} not found`);
+  }
+
+  const now = new Date();
+  const threshold = new Date(now.getTime() - thresholdMinutes * 60 * 1000);
+
+  const lastSeen = device.lastSeenAt ? new Date(device.lastSeenAt) : null;
+  const isOffline = !lastSeen || lastSeen < threshold;
+
+  if (isOffline && device.status !== "offline") {
+    const existingAlertList = await db
+      .select()
+      .from(alerts)
+      .where(
+        and(
+          eq(alerts.deviceId, deviceId),
+          eq(alerts.type, "device_offline"),
+          eq(alerts.status, "open"),
+        )
+      )
+      .limit(1);
+
+    const existingAlert = existingAlertList[0];
+
+    if (!existingAlert) {
+      await db.insert(alerts).values({
+        organizationId: site.organizationId,
+        siteId: site.id,
+        deviceId,
+        type: "device_offline",
+        severity: "critical",
+        title: "Device Offline",
+        message: `Device ${device.serialNumber} has not reported data for ${thresholdMinutes} minutes`,
+        status: "open",
+      });
+    }
+
+    await db
+      .update(devices)
+      .set({ status: "offline", updatedAt: now })
+      .where(eq(devices.id, deviceId));
+  }
+
+  if (!isOffline && device.status === "offline") {
+    await db
+      .update(devices)
+      .set({ status: "online", updatedAt: now })
+      .where(eq(devices.id, deviceId));
+
+    const offlineAlertList = await db
+      .select()
+      .from(alerts)
+      .where(
+        and(
+          eq(alerts.deviceId, deviceId),
+          eq(alerts.type, "device_offline"),
+          eq(alerts.status, "open"),
+        )
+      )
+      .limit(1);
+
+    const offlineAlert = offlineAlertList[0];
+    if (offlineAlert) {
+      await db
+        .update(alerts)
+        .set({ status: "resolved", updatedAt: now })
+        .where(eq(alerts.id, offlineAlert.id));
+    }
+  }
+}
