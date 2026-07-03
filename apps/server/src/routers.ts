@@ -63,6 +63,7 @@ import {
   reconciliationListInput,
   reconciliationListVersionsInput,
   reconciliationFinalizeInput,
+  reportGetPdfInput,
   invoicesCreateUploadInput,
   invoicesGetInput,
   invoicesListInput,
@@ -1244,6 +1245,37 @@ export async function reconciliationFinalize(ctx: AuthContext, input: unknown) {
     .where(eq(reconciliations.id, parsed.reconId));
 
   return { reconId: parsed.reconId, status: "final" };
+}
+
+export async function reportGetPdf(ctx: AuthContext, input: unknown) {
+  const parsed = reportGetPdfInput.parse(input);
+
+  const recon = await db.query.reconciliations.findFirst({
+    where: eq(reconciliations.id, parsed.reconId),
+  });
+
+  if (!recon) {
+    throw new Error("Reconciliation not found");
+  }
+
+  await requireSiteAccess(ctx, recon.siteId);
+
+  if (!recon.pdfStorageKey || !recon.pdfHash) {
+    throw new Error("PDF has not been generated for this reconciliation. Call generateReportPdf first.");
+  }
+
+  // Return signed URL (placeholder - would be integrated with R2/S3 SDK)
+  // For now, return storage key and hash for client to use
+  const presignedUrl = `https://r2.example.com/presigned?key=${encodeURIComponent(recon.pdfStorageKey)}&hash=${recon.pdfHash}&expires=3600`;
+
+  return {
+    reconId: parsed.reconId,
+    pdfStorageKey: recon.pdfStorageKey,
+    pdfHash: recon.pdfHash,
+    presignedUrl,
+    generatedAt: recon.generatedAt,
+    version: recon.version,
+  };
 }
 
 /* ─────────────── Invoices ─────────────── */

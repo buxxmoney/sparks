@@ -38,7 +38,7 @@ async function testWorkflow() {
       userId: ctx.userId,
       role: "owner",
     });
-    console.log(`✅ Access granted\n`);
+    console.log("✅ Access granted\n");
 
     // Step 3: Create billing period
     console.log("📍 Step 3: Creating billing period...");
@@ -81,7 +81,7 @@ async function testWorkflow() {
 
     const invoice1 = await invoicesGet(ctx, { invoiceId });
     console.log(`   Status: ${invoice1.status}`);
-    console.log(`✅ PASSED\n`);
+    console.log("✅ PASSED\n");
 
     // Step 2: Parse (simulate)
     console.log("📝 STEP 2: Simulate PDF Parsing");
@@ -137,7 +137,7 @@ async function testWorkflow() {
     console.log("   - Demand: R5,500.00 (confidence: 0.92)");
     console.log("   - Metering fee: R500.00 (confidence: 0.88) [⚠️ IMPERMISSIBLE]");
     console.log("   Total: R9,000.00");
-    console.log(`✅ PASSED\n`);
+    console.log("✅ PASSED\n");
 
     // Step 3: List line items
     console.log("🔍 STEP 3: List & Review Line Items");
@@ -148,10 +148,11 @@ async function testWorkflow() {
       const impPermissible = item.isImpermissibleAddOn ? " [⚠️  IMPERMISSIBLE]" : "";
       console.log(`   • ${item.rawLabel}`);
       console.log(`     Category: ${item.parsedCategory}`);
-      console.log(`     Value: R${(item.parsedValueCents! / 100).toFixed(2)}`);
+      const value = item.parsedValueCents ? (item.parsedValueCents / 100).toFixed(2) : "—";
+      console.log(`     Value: R${value}`);
       console.log(`     Confidence: ${item.confidence}${impPermissible}`);
     }
-    console.log(`✅ PASSED\n`);
+    console.log("✅ PASSED\n");
 
     // Step 4: Confirm
     console.log("✔️  STEP 4: Confirm Invoice Totals");
@@ -166,8 +167,9 @@ async function testWorkflow() {
 
     console.log(`   Status: ${confirmResult.invoice.status}`);
     console.log(`   Confirmed by: ${confirmResult.invoice.confirmedByUserId}`);
-    console.log(`   Confirmed total: R${(confirmResult.invoice.confirmedTotalCents! / 100).toFixed(2)}`);
-    console.log(`✅ PASSED\n`);
+    const confirmedTotal = confirmResult.invoice.confirmedTotalCents ? (confirmResult.invoice.confirmedTotalCents / 100).toFixed(2) : "—";
+    console.log(`   Confirmed total: R${confirmedTotal}`);
+    console.log("✅ PASSED\n");
 
     // Step 5: Lock
     console.log("🔒 STEP 5: Lock Invoice");
@@ -175,7 +177,7 @@ async function testWorkflow() {
 
     console.log(`   Status: ${lockResult.invoice.status}`);
     console.log(`   Locked at: ${lockResult.invoice.lockedAt}`);
-    console.log(`✅ PASSED\n`);
+    console.log("✅ PASSED\n");
 
     // Step 6: Final verification
     console.log("📊 STEP 6: Verify Final State");
@@ -185,9 +187,10 @@ async function testWorkflow() {
     console.log(`   Status: ${finalInvoice.status}`);
     console.log(`   Period: ${finalInvoice.billingPeriodStart?.toISOString().split("T")[0]} to ${finalInvoice.billingPeriodEnd?.toISOString().split("T")[0]}`);
     console.log(`   Parse Model: ${finalInvoice.parseModel}`);
-    console.log(`   Confirmed Total: R${(finalInvoice.confirmedTotalCents! / 100).toFixed(2)}`);
-    console.log(`   Status: LOCKED ✅`);
-    console.log(`✅ PASSED\n`);
+    const finalTotal = finalInvoice.confirmedTotalCents ? (finalInvoice.confirmedTotalCents / 100).toFixed(2) : "—";
+    console.log(`   Confirmed Total: R${finalTotal}`);
+    console.log("   Status: LOCKED ✅");
+    console.log("✅ PASSED\n");
 
     console.log("═══════════════════════════════════════");
     console.log("   ✨ ALL TESTS PASSED!");
@@ -196,8 +199,8 @@ async function testWorkflow() {
     console.log("📋 Summary:");
     console.log(`   Site: ${siteId}`);
     console.log(`   Invoice: ${invoiceId}`);
-    console.log(`   Status: LOCKED (ready for reconciliation)`);
-    console.log(`   Total: R9,000.00\n`);
+    console.log("   Status: LOCKED (ready for reconciliation)");
+    console.log("   Total: R9,000.00\n");
 
     // Cleanup
     console.log("🧹 Cleaning up test data...");

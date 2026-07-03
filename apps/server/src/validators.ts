@@ -279,6 +279,10 @@ export const reconciliationFinalizeInput = z.object({
   reconId: z.string().uuid(),
 });
 
+export const reportGetPdfInput = z.object({
+  reconId: z.string().uuid(),
+});
+
 /* ─────────────── Invoices ─────────────── */
 export const invoicesCreateUploadInput = z.object({
   siteId: z.string().uuid(),
@@ -414,6 +418,7 @@ export type ReconciliationGetInput = z.infer<typeof reconciliationGetInput>;
 export type ReconciliationListInput = z.infer<typeof reconciliationListInput>;
 export type ReconciliationListVersionsInput = z.infer<typeof reconciliationListVersionsInput>;
 export type ReconciliationFinalizeInput = z.infer<typeof reconciliationFinalizeInput>;
+export type ReportGetPdfInput = z.infer<typeof reportGetPdfInput>;
 
 export type InvoicesCreateUploadInput = z.infer<typeof invoicesCreateUploadInput>;
 export type InvoicesGetInput = z.infer<typeof invoicesGetInput>;

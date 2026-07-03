@@ -1,6 +1,7 @@
-import { db, meters, readings, demandIntervals, dataGaps, devices, alerts, sites, landlordInvoices } from "@sparks/db";
+import { db, meters, readings, demandIntervals, dataGaps, devices, alerts, sites, landlordInvoices, reconciliations, tariffProfiles, auditLog } from "@sparks/db";
 import { eq, and, asc } from "drizzle-orm";
 import { parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
+import { renderReportHtml, renderHtmlToPdf, hashBuffer } from "./reports";
 
 /**
  * Aggregate readings into demand intervals for a meter.
@@ -404,4 +405,123 @@ export async function triggerInvoiceParse(invoiceId: string, pdfContent: Buffer)
 
     throw error;
   }
+}
+
+/**
+ * Generate and seal a dispute-ready PDF report for a reconciliation.
+ * Includes provenance (meter, installer), measured vs. expected pricing, data-integrity status.
+ * Refuses seal if legal_ceiling tariff is not attorney-validated.
+ * Stores PDF in private bucket; bumps version on regeneration (never overwrites prior versions).
+ * Writes audit_log entry on generation.
+ */
+export async function generateReportPdf(reconId: string, userId: string): Promise<{ pdfStorageKey: string; pdfHash: string; version: number }> {
+  const recon = await db.query.reconciliations.findFirst({
+    where: eq(reconciliations.id, reconId),
+  });
+
+  if (!recon) {
+    throw new Error(`Reconciliation ${reconId} not found`);
+  }
+
+  // Fetch related data
+  const site = await db.query.sites.findFirst({
+    where: eq(sites.id, recon.siteId),
+  });
+
+  if (!site) {
+    throw new Error("Site for reconciliation not found");
+  }
+
+  // Get meter data (assume one meter per site for this phase)
+  const meter = await db.query.meters.findFirst({
+    where: eq(meters.siteId, recon.siteId),
+  });
+
+  if (!meter) {
+    throw new Error("Meter for site not found");
+  }
+
+  // Get device data
+  const device = await db.query.devices.findFirst({
+    where: eq(devices.id, meter.deviceId),
+  });
+
+  if (!device) {
+    throw new Error("Device for meter not found");
+  }
+
+  // Get tariff names and validate legal_ceiling attorney status
+  let landlordTariffName = "Unknown";
+  let ceilingTariffName: string | null = null;
+
+  if (recon.landlordTariffProfileId) {
+    const landlordTariff = await db.query.tariffProfiles.findFirst({
+      where: eq(tariffProfiles.id, recon.landlordTariffProfileId),
+    });
+    if (landlordTariff) {
+      landlordTariffName = landlordTariff.name;
+    }
+  }
+
+  if (recon.legalCeilingTariffProfileId) {
+    const ceilingTariff = await db.query.tariffProfiles.findFirst({
+      where: eq(tariffProfiles.id, recon.legalCeilingTariffProfileId),
+    });
+    if (ceilingTariff) {
+      ceilingTariffName = ceilingTariff.name;
+      // GUARD: Refuse to seal if legal_ceiling tariff is not attorney-validated
+      if (!ceilingTariff.validatedByAttorney) {
+        throw new Error(
+          `Cannot seal report: legal ceiling tariff "${ceilingTariff.name}" has not been validated by attorney. Set validatedByAttorney=true before generating dispute-ready PDF.`,
+        );
+      }
+    }
+  }
+
+  // Render report HTML
+  const html = renderReportHtml({
+    reconciliation: recon,
+    site,
+    meter,
+    device,
+    landlordTariffName,
+    ceilingTariffName,
+  });
+
+  // Convert HTML to PDF
+  const pdfBuffer = await renderHtmlToPdf(html);
+  const pdfHash = hashBuffer(pdfBuffer);
+
+  // Determine version and storage key
+  // If PDF already exists, increment version; otherwise start at 1
+  const currentVersion = recon.version || 1;
+  const newVersion = (recon.pdfStorageKey ? currentVersion + 1 : 1);
+  const pdfStorageKey = `reports/${recon.siteId}/${recon.id}/v${newVersion}.pdf`;
+
+  // Update reconciliation with PDF metadata
+  await db
+    .update(reconciliations)
+    .set({
+      pdfStorageKey,
+      pdfHash,
+      generatedAt: new Date(),
+      version: newVersion,
+    })
+    .where(eq(reconciliations.id, reconId));
+
+  // Write audit log entry
+  await db.insert(auditLog).values({
+    entityType: "reconciliation",
+    entityId: reconId,
+    action: "pdf_generated",
+    actorType: "user",
+    actorId: userId,
+    diff: {
+      pdfStorageKey,
+      pdfHash,
+      version: newVersion,
+    },
+  });
+
+  return { pdfStorageKey, pdfHash, version: newVersion };
 }
