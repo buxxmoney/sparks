@@ -74,6 +74,7 @@ import {
 } from "./validators";
 import { materializePeriods, type BillingPeriodPolicy } from "./billing";
 import { generateReconciliation } from "./reconciliation";
+import { sessionMe } from "./procedures";
 
 const db = getDb();
 
@@ -1483,6 +1484,7 @@ export async function invoicesLock(ctx: AuthContext, input: unknown) {
 /* ─────────────── Router Export ─────────────── */
 
 export const appRouter = {
+  session: { me: sessionMe },
   org: { create: orgCreate, get: orgGet, listMembers: orgListMembers, invite: orgInvite, setMemberRole: orgSetMemberRole },
   sites: { list: sitesList, get: sitesGet, create: sitesCreate, update: sitesUpdate, setDefaultDemandInterval: sitesSetDefaultDemandInterval, delete: sitesDelete },
   siteAccess: { list: siteAccessList, grant: siteAccessGrant, revoke: siteAccessRevoke },

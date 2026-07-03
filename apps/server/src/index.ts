@@ -86,6 +86,13 @@ app.post("/rpc/call", async (c) => {
       organizationId: params?.organizationId || "", // Will be extracted from params or user's default org
     };
 
+    // Check if this is a procedure that doesn't require organization ID
+    const allowWithoutOrg = method === "session.me";
+
+    if (!authContext.organizationId && !allowWithoutOrg && method !== "session.listMemberships") {
+      return c.json({ error: "Organization ID required" }, 400);
+    }
+
     // Call the handler
     const result = await handler(authContext, params);
 

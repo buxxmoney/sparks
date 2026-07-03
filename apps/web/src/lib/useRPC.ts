@@ -6,6 +6,12 @@ export function useRPC<T>(method: string, params?: unknown, deps: any[] = []) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Don't fetch if params are undefined (indicates dependencies aren't ready)
+    if (params === undefined) {
+      setLoading(false);
+      return;
+    }
+
     const fetchData = async () => {
       setLoading(true);
       setError(null);

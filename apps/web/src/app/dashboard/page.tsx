@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useSession } from "@/lib/useSession";
 import { useRPC } from "@/lib/useRPC";
+import { useOrganization } from "@/lib/useOrganization";
+import { signOut } from "@/lib/api";
 
 interface Site {
   id: string;
@@ -18,7 +20,7 @@ interface Site {
 export default function DashboardPage() {
   const router = useRouter();
   const { session, loading: sessionLoading, error: sessionError } = useSession();
-  const [organizationId, setOrganizationId] = useState<string | null>(null);
+  const { organizationId, loading: orgLoading, error: orgError } = useOrganization();
 
   // Fetch sites when we have the organization ID
   const { data: sitesData, loading: sitesLoading, error: sitesError } = useRPC<{
@@ -34,12 +36,6 @@ export default function DashboardPage() {
     if (!sessionLoading && !session) {
       router.push("/auth/login");
       return;
-    }
-
-    // TODO: Get organization ID from session or user context
-    // For now, use a placeholder
-    if (session?.user) {
-      setOrganizationId("placeholder-org-id");
     }
   }, [session, sessionLoading, router]);
 
@@ -63,10 +59,7 @@ export default function DashboardPage() {
         <h1>Dashboard</h1>
         <button
           onClick={async () => {
-            await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/api/auth/signout`, {
-              method: "POST",
-              credentials: "include",
-            });
+            await signOut();
             router.push("/auth/login");
           }}
           className="btn btn-secondary"

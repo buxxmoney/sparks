@@ -11,9 +11,12 @@ export interface Membership {
 }
 
 export async function sessionMe(authContext: AuthContext): Promise<SessionMe> {
+  // For now, return empty org ID if not set - this allows the frontend to call this
+  // before selecting an organization. In the future, this would query the user's
+  // default organization from better-auth or return their only organization.
   return {
     userId: authContext.userId,
-    organizationId: authContext.organizationId,
+    organizationId: authContext.organizationId || "default-org",
   };
 }
 
