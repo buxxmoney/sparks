@@ -1,15 +1,21 @@
 import { db } from "@sparks/db";
 import { betterAuth } from "better-auth";
-
-// Placeholder - better-auth will be configured in Phase 2
-// This should integrate with the @sparks/db Drizzle schema
+import { drizzleAdapter } from "better-auth/adapters/drizzle";
 
 export const auth = betterAuth({
-  database: {
-    db: db as unknown as object, // Typed in Phase 2
-    type: "drizzle",
-  },
-  secret: process.env.BETTER_AUTH_SECRET,
+  database: drizzleAdapter(db as any, {
+    provider: "pg",
+  }),
+  secret: process.env.BETTER_AUTH_SECRET || "dev-secret-change-in-production",
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3001",
   appName: "Sparks",
+  trustedOrigins: [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+  ],
+  emailAndPassword: {
+    enabled: true,
+  },
 });
