@@ -118,6 +118,7 @@ export default function NewSitePage() {
 
       const result = await response.json();
       if (result.id) {
+        router.refresh();
         router.push("/dashboard");
       } else {
         throw new Error("Site creation failed");
