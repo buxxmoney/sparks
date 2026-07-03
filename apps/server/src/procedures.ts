@@ -1,6 +1,7 @@
 import type { AuthContext } from "./middleware";
 import { getDb, member, organization } from "@sparks/db";
 import { eq, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 
 export interface SessionMe {
   userId: string;
@@ -37,4 +38,39 @@ export async function sessionListMemberships(authContext: AuthContext): Promise<
     .where(eq(member.userId, authContext.userId));
 
   return memberships;
+}
+
+export interface CreateOrganizationInput {
+  name: string;
+}
+
+export interface CreateOrganizationResult {
+  organizationId: string;
+  organizationName: string;
+}
+
+export async function sessionCreateOrganization(
+  authContext: AuthContext,
+  input: CreateOrganizationInput,
+): Promise<CreateOrganizationResult> {
+  const db = getDb();
+
+  const orgId = randomUUID();
+
+  await db.insert(organization).values({
+    id: orgId,
+    name: input.name,
+  });
+
+  await db.insert(member).values({
+    id: randomUUID(),
+    organizationId: orgId,
+    userId: authContext.userId,
+    role: "owner",
+  });
+
+  return {
+    organizationId: orgId,
+    organizationName: input.name,
+  };
 }

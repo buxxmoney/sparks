@@ -88,8 +88,9 @@ app.post("/rpc/call", async (c) => {
 
     // Check if this is a procedure that doesn't require organization ID
     const allowWithoutOrg = method === "session.me";
+    const methodsAllowedWithoutOrg = ["session.listMemberships", "session.createOrganization"];
 
-    if (!authContext.organizationId && !allowWithoutOrg && method !== "session.listMemberships") {
+    if (!authContext.organizationId && !allowWithoutOrg && !methodsAllowedWithoutOrg.includes(method)) {
       return c.json({ error: "Organization ID required" }, 400);
     }
 

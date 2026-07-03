@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { setSelectedOrganization } from "@/lib/useOrganizationContext";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -48,7 +49,30 @@ export default function SignupPage() {
         return;
       }
 
-      router.push("/auth/org-selector");
+      // Create organization for new user
+      const orgResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          method: "session.createOrganization",
+          params: {
+            name: `${email.split("@")[0]}'s Organization`,
+          },
+        }),
+      });
+
+      if (!orgResponse.ok) {
+        const data = await orgResponse.json();
+        setError(data.error || "Failed to create organization");
+        return;
+      }
+
+      const orgData = await orgResponse.json();
+      setSelectedOrganization(orgData.organizationId);
+      router.push("/dashboard");
     } catch (err) {
       setError("An error occurred. Please try again.");
     } finally {
