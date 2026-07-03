@@ -14,12 +14,94 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-/* ─────────────── Better-Auth Tables (referenced, not redefined) ─────────────── */
-// better-auth manages: user, session, account, verification, organization, member, invitation
-// We reference these in foreign keys but don't redefine them here.
-// Type stubs for reference:
-export type User = { id: string; isPlatformOperator?: boolean };
-export type Organization = { id: string };
+/* ─────────────── Better-Auth Tables ─────────────── */
+export const user = pgTable("user", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  email: text("email").unique(),
+  emailVerified: boolean("emailVerified"),
+  image: text("image"),
+  createdAt: timestamp("createdAt").defaultNow(),
+  updatedAt: timestamp("updatedAt").defaultNow(),
+});
+
+export const session = pgTable("session", {
+  id: text("id").primaryKey(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  token: text("token").unique().notNull(),
+  createdAt: timestamp("createdAt").defaultNow(),
+  updatedAt: timestamp("updatedAt").defaultNow(),
+  ipAddress: text("ipAddress"),
+  userAgent: text("userAgent"),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+});
+
+export const account = pgTable("account", {
+  id: text("id").primaryKey(),
+  accountId: text("accountId").notNull(),
+  providerId: text("providerId").notNull(),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  accessToken: text("accessToken"),
+  refreshToken: text("refreshToken"),
+  idToken: text("idToken"),
+  expiresAt: timestamp("expiresAt"),
+  password: text("password"),
+  createdAt: timestamp("createdAt").defaultNow(),
+  updatedAt: timestamp("updatedAt").defaultNow(),
+});
+
+export const verification = pgTable("verification", {
+  id: text("id").primaryKey(),
+  identifier: text("identifier").notNull(),
+  value: text("value").notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow(),
+  updatedAt: timestamp("updatedAt").defaultNow(),
+});
+
+export const organization = pgTable("organization", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug"),
+  logo: text("logo"),
+  createdAt: timestamp("createdAt").defaultNow(),
+  metadata: jsonb("metadata"),
+});
+
+export const member = pgTable("member", {
+  id: text("id").primaryKey(),
+  organizationId: text("organizationId")
+    .notNull()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  role: text("role").notNull(),
+  createdAt: timestamp("createdAt").defaultNow(),
+});
+
+export const invitation = pgTable("invitation", {
+  id: text("id").primaryKey(),
+  organizationId: text("organizationId")
+    .notNull()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  email: text("email").notNull(),
+  role: text("role"),
+  status: text("status").notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  invitedBy: text("invitedBy")
+    .notNull()
+    .references(() => user.id),
+  createdAt: timestamp("createdAt").defaultNow(),
+});
+
+/* ─────────────── Type stubs for reference ─────────────── */
+export type User = typeof user.$inferSelect;
+export type NewUser = typeof user.$inferInsert;
 
 /* ─────────────── Enums ─────────────── */
 export const siteRole = pgEnum("site_role", ["owner", "site_manager"]);

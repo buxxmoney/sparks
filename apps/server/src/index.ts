@@ -15,6 +15,8 @@ app.use(
       "http://127.0.0.1:3000",
       "http://localhost:3001",
       "http://127.0.0.1:3001",
+      "http://localhost:3002",
+      "http://127.0.0.1:3002",
     ],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization", "x-session-id", "x-user-id", "x-organization-id"],
@@ -51,15 +53,17 @@ app.post("/rpc/call", async (c) => {
     }
 
     // Get auth context from better-auth session
-    // TODO: Verify this works with better-auth v1.6.0 Hono integration
     let session: any = null;
     try {
       session = await auth.api.getSession({ headers: c.req.raw.headers });
     } catch (e) {
-      // Fallback: check for manual session headers (for testing)
+      // getSession may not throw, just fall through
+    }
+
+    // Fallback: check for manual session headers (for testing)
+    if (!session) {
       const userId = c.req.header("x-user-id");
       const sessionId = c.req.header("x-session-id");
-      const organizationId = c.req.header("x-organization-id");
 
       if (userId && sessionId) {
         session = {

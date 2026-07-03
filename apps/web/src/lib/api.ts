@@ -13,7 +13,7 @@ export const apiClient = createClient({
 
 export async function getSessionData() {
   try {
-    const response = await fetch(`${getApiUrl()}/api/auth/session`, {
+    const response = await fetch(`${getApiUrl()}/api/auth/get-session`, {
       credentials: "include",
     });
 
