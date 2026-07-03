@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getSelectedOrganization } from "./useOrganizationContext";
 
 export function useRPC<T>(method: string, params?: unknown, deps: any[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -6,9 +7,10 @@ export function useRPC<T>(method: string, params?: unknown, deps: any[] = []) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // For session.me, allow undefined params since it doesn't need them
+    // For session.me and session.listMemberships, allow undefined params since they don't need them
     // For other methods, undefined params means we're not ready yet
-    const shouldSkip = params === undefined && method !== "session.me";
+    const allowedWithoutParams = ["session.me", "session.listMemberships"];
+    const shouldSkip = params === undefined && !allowedWithoutParams.includes(method);
 
     if (shouldSkip) {
       setData(null);
@@ -21,13 +23,20 @@ export function useRPC<T>(method: string, params?: unknown, deps: any[] = []) {
       setError(null);
 
       try {
+        const orgId = getSelectedOrganization();
+        const headers: HeadersInit = {
+          "Content-Type": "application/json",
+        };
+
+        if (orgId) {
+          headers["x-organization-id"] = orgId;
+        }
+
         const response = await fetch(
           `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`,
           {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
+            headers,
             credentials: "include",
             body: JSON.stringify({
               method,

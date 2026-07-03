@@ -1,4 +1,5 @@
 import { createClient, type RPCClientOptions } from "@sparks/api";
+import { clearSelectedOrganization } from "./useOrganizationContext";
 
 const getApiUrl = () => {
   if (typeof window === "undefined") {
@@ -35,5 +36,8 @@ export async function signOut() {
     });
   } catch {
     // ignore
+  } finally {
+    // Clear selected organization from localStorage
+    clearSelectedOrganization();
   }
 }

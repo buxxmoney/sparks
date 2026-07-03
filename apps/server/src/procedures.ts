@@ -1,4 +1,6 @@
 import type { AuthContext } from "./middleware";
+import { getDb, member, organization } from "@sparks/db";
+import { eq } from "drizzle-orm";
 
 export interface SessionMe {
   userId: string;
@@ -7,6 +9,7 @@ export interface SessionMe {
 
 export interface Membership {
   organizationId: string;
+  organizationName: string;
   role: string;
 }
 
@@ -20,8 +23,19 @@ export async function sessionMe(authContext: AuthContext): Promise<SessionMe> {
   };
 }
 
-export async function sessionListMemberships(): Promise<Membership[]> {
-  // TODO: Query member table from better-auth to get all org memberships
-  // This will be implemented once better-auth member table is fully integrated
-  return [];
+export async function sessionListMemberships(authContext: AuthContext): Promise<Membership[]> {
+  const db = getDb();
+
+  const memberships = await db.query.member.findMany({
+    where: eq(member.userId, authContext.userId),
+    with: {
+      organization: true,
+    },
+  });
+
+  return memberships.map((m) => ({
+    organizationId: m.organizationId,
+    organizationName: m.organization.name,
+    role: m.role,
+  }));
 }
