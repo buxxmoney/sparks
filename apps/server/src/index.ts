@@ -80,10 +80,12 @@ app.post("/rpc/call", async (c) => {
     }
 
     // Build auth context
+    // Try to get organizationId from header first (preferred), then from params
+    const orgIdFromHeader = c.req.header("x-organization-id");
     const authContext = {
       userId: session.user.id,
       sessionId: session.session?.id || "",
-      organizationId: params?.organizationId || "", // Will be extracted from params or user's default org
+      organizationId: orgIdFromHeader || params?.organizationId || "", // Will be extracted from header, params, or user's default org
     };
 
     // Check if this is a procedure that doesn't require organization ID
