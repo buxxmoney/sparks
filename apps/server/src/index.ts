@@ -75,7 +75,7 @@ app.post("/rpc/call", async (c) => {
     }
 
     if (!session?.user) {
-      console.error("No session found, headers:", c.req.raw.headers);
+      console.error("No session found");
       return c.json({ error: "Unauthorized" }, 401);
     }
 
@@ -91,7 +91,7 @@ app.post("/rpc/call", async (c) => {
 
     return c.json(result);
   } catch (error: any) {
-    console.error("oRPC error:", error);
+    console.error("oRPC error:", error?.message || String(error));
 
     if (error.name === "UnauthorizedError") {
       return c.json({ error: error.message }, 401);

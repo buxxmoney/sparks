@@ -29,7 +29,7 @@ export async function getSessionData() {
 
 export async function signOut() {
   try {
-    await fetch(`${getApiUrl()}/api/auth/signout`, {
+    await fetch(`${getApiUrl()}/api/auth/sign-out`, {
       method: "POST",
       credentials: "include",
     });
