@@ -2,13 +2,35 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Building2, ChevronRight } from "lucide-react";
+import { Stack } from "@astryxdesign/core/Stack";
+import { Text } from "@astryxdesign/core/Text";
+import { Badge } from "@astryxdesign/core/Badge";
+import { Button } from "@astryxdesign/core/Button";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Skeleton } from "@astryxdesign/core/Skeleton";
+import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { setSelectedOrganization } from "@/lib/useOrganizationContext";
+import { getSessionData } from "@/lib/api";
+import { client } from "@/lib/client";
+import { AuthShell } from "@/components/AuthShell";
 
 interface Membership {
   organizationId: string;
   organizationName: string;
   role: string;
 }
+
+const iconTileStyle: React.CSSProperties = {
+  display: "inline-flex",
+  width: 40,
+  height: 40,
+  flexShrink: 0,
+  alignItems: "center",
+  justifyContent: "center",
+  borderRadius: 10,
+  background: "color-mix(in srgb, currentColor 10%, transparent)",
+};
 
 export default function OrgSelectorPage() {
   const router = useRouter();
@@ -20,44 +42,15 @@ export default function OrgSelectorPage() {
   useEffect(() => {
     const loadMemberships = async () => {
       try {
-        // First check if user is authenticated
-        const sessionResponse = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/api/auth/get-session`,
-          {
-            credentials: "include",
-          },
-        );
-
-        if (!sessionResponse.ok) {
+        const session = await getSessionData();
+        if (!session) {
           router.push("/auth/login");
           return;
         }
 
-        // Fetch user's organization memberships
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            credentials: "include",
-            body: JSON.stringify({
-              method: "session.listMemberships",
-              params: {},
-            }),
-          },
-        );
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || "Failed to load organizations");
-        }
-
-        const data = await response.json();
+        const data = await client.session.listMemberships();
         setMemberships(data);
 
-        // If only one organization, auto-select it
         if (data.length === 1) {
           setSelectedOrganization(data[0].organizationId);
           router.push("/dashboard");
@@ -73,101 +66,53 @@ export default function OrgSelectorPage() {
     loadMemberships();
   }, [router]);
 
-  const handleSelectOrg = async (orgId: string) => {
+  const handleSelectOrg = (orgId: string) => {
     setSelecting(true);
-    try {
-      setSelectedOrganization(orgId);
-      router.push("/dashboard");
-    } catch (err) {
-      setError("Failed to select organization");
-      setSelecting(false);
-    }
+    setSelectedOrganization(orgId);
+    router.push("/dashboard");
   };
 
-  if (loading) {
-    return (
-      <div className="page-container">
-        <div style={{ textAlign: "center", marginTop: "4rem" }}>
-          <p>Loading organizations...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="page-container">
-        <div style={{ maxWidth: "400px", margin: "4rem auto" }}>
-          <div className="content-card">
-            <div className="alert alert-danger">{error}</div>
-            <button onClick={() => router.push("/auth/login")} className="btn btn-secondary">
-              Back to Login
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (memberships.length === 0) {
-    return (
-      <div className="page-container">
-        <div style={{ maxWidth: "400px", margin: "4rem auto" }}>
-          <div className="content-card">
-            <h1 style={{ marginBottom: "2rem" }}>No Organizations</h1>
-            <div className="alert alert-info">
-              You don't have access to any organizations yet. Please contact an administrator.
-            </div>
-            <button onClick={() => router.push("/auth/login")} className="btn btn-secondary">
-              Back to Login
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="page-container">
-      <div style={{ maxWidth: "600px", margin: "4rem auto" }}>
-        <div className="content-card">
-          <h1 style={{ marginBottom: "2rem" }}>Select Organization</h1>
-
-          <div className="grid grid-cols-1">
-            {memberships.map((membership) => (
-              <button
-                key={membership.organizationId}
-                onClick={() => handleSelectOrg(membership.organizationId)}
-                disabled={selecting}
-                style={{
-                  padding: "1rem",
-                  border: "1px solid #ddd",
-                  borderRadius: "4px",
-                  textAlign: "left",
-                  cursor: selecting ? "not-allowed" : "pointer",
-                  transition: "all 0.2s ease",
-                  opacity: selecting ? 0.6 : 1,
-                }}
-                onMouseEnter={(e) => {
-                  if (!selecting) {
-                    e.currentTarget.style.borderColor = "#0066cc";
-                    e.currentTarget.style.backgroundColor = "#f0f4ff";
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = "#ddd";
-                  e.currentTarget.style.backgroundColor = "transparent";
-                }}
-              >
-                <h3 style={{ marginBottom: "0.25rem" }}>{membership.organizationName}</h3>
-                <p style={{ marginBottom: "0", color: "#6c757d", fontSize: "0.875rem" }}>
-                  Role: {membership.role}
-                </p>
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
+    <AuthShell title="Select organization" subtitle="Choose which account to work in">
+      {loading ? (
+        <Stack gap={3}>
+          <Skeleton height={64} />
+          <Skeleton height={64} />
+        </Stack>
+      ) : error ? (
+        <Stack gap={4}>
+          <Banner status="error" title={error} />
+          <Button label="Back to login" variant="secondary" onClick={() => router.push("/auth/login")} />
+        </Stack>
+      ) : memberships.length === 0 ? (
+        <Stack gap={4}>
+          <Banner status="info" title="You don't have access to any organizations yet. Please contact an administrator." />
+          <Button label="Back to login" variant="secondary" onClick={() => router.push("/auth/login")} />
+        </Stack>
+      ) : (
+        <Stack gap={3}>
+          {memberships.map((m) => (
+            <ClickableCard
+              key={m.organizationId}
+              label={m.organizationName}
+              onClick={() => handleSelectOrg(m.organizationId)}
+              isDisabled={selecting}
+              padding={4}
+            >
+              <Stack direction="horizontal" gap={3} align="center">
+                <span style={iconTileStyle}>
+                  <Building2 size={20} />
+                </span>
+                <Stack gap={1} width="100%">
+                  <Text weight="semibold">{m.organizationName}</Text>
+                  <Badge label={`Role: ${m.role}`} />
+                </Stack>
+                <ChevronRight size={20} style={{ opacity: 0.4, flexShrink: 0 }} />
+              </Stack>
+            </ClickableCard>
+          ))}
+        </Stack>
+      )}
+    </AuthShell>
   );
 }

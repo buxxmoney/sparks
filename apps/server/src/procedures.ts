@@ -1,11 +1,16 @@
+import { getDb, member, organization, user } from "@sparks/db";
+import { and, eq } from "drizzle-orm";
+import { auth } from "./auth";
 import type { AuthContext } from "./middleware";
-import { getDb, member, organization } from "@sparks/db";
-import { eq, sql } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
 
 export interface SessionMe {
   userId: string;
   organizationId: string;
+  isPlatformOperator: boolean;
+  /** The caller's org role in the selected org ("owner" | "member" | …), or null. */
+  orgRole: string | null;
+  /** Optional mobile number for SMS notifications. */
+  phone: string | null;
 }
 
 export interface Membership {
@@ -15,12 +20,34 @@ export interface Membership {
 }
 
 export async function sessionMe(authContext: AuthContext): Promise<SessionMe> {
-  // For now, return empty org ID if not set - this allows the frontend to call this
-  // before selecting an organization. In the future, this would query the user's
-  // default organization from better-auth or return their only organization.
+  // Returns the caller's selected organization. If none is selected yet, fall
+  // back to their first membership so a freshly-signed-up user has a home org.
+  const db = getDb();
+  let organizationId = authContext.organizationId;
+  if (!organizationId) {
+    const first = await db.query.member.findFirst({
+      where: eq(member.userId, authContext.userId),
+    });
+    organizationId = first?.organizationId || "";
+  }
+  const row = await db.query.user.findFirst({
+    where: eq(user.id, authContext.userId),
+    columns: { isPlatformOperator: true, phone: true },
+  });
+  const membership = organizationId
+    ? await db.query.member.findFirst({
+        where: and(
+          eq(member.userId, authContext.userId),
+          eq(member.organizationId, organizationId),
+        ),
+      })
+    : null;
   return {
     userId: authContext.userId,
-    organizationId: authContext.organizationId || "default-org",
+    organizationId,
+    isPlatformOperator: row?.isPlatformOperator ?? false,
+    orgRole: membership?.role ?? null,
+    phone: row?.phone ?? null,
   };
 }
 
@@ -49,28 +76,36 @@ export interface CreateOrganizationResult {
   organizationName: string;
 }
 
+/**
+ * Create an organization for the current user via the better-auth organization
+ * plugin (org = Account). The plugin transactionally creates the `organization`
+ * row AND an owner `member` row — no hand-rolled inserts. Called as a trusted
+ * server action (userId from the validated session context).
+ */
 export async function sessionCreateOrganization(
   authContext: AuthContext,
   input: CreateOrganizationInput,
 ): Promise<CreateOrganizationResult> {
-  const db = getDb();
+  const slug = `${input.name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 40)}-${crypto.randomUUID().slice(0, 8)}`;
 
-  const orgId = randomUUID();
-
-  await db.insert(organization).values({
-    id: orgId,
-    name: input.name,
+  const org = await auth.api.createOrganization({
+    body: {
+      name: input.name,
+      slug,
+      userId: authContext.userId,
+    },
   });
 
-  await db.insert(member).values({
-    id: randomUUID(),
-    organizationId: orgId,
-    userId: authContext.userId,
-    role: "owner",
-  });
+  if (!org) {
+    throw new Error("Organization creation failed");
+  }
 
   return {
-    organizationId: orgId,
-    organizationName: input.name,
+    organizationId: org.id,
+    organizationName: org.name,
   };
 }

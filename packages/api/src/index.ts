@@ -1,4 +1,3 @@
-// API package - holds shared oRPC client and types
-// Will be implemented in Phase 2 when oRPC router is finalized
-
-export { createClient } from "./client";
+// API package — the shared, fully-typed oRPC client for the Sparks server.
+export { createSparksClient } from "./client";
+export type { SparksClient, CreateClientOptions } from "./client";

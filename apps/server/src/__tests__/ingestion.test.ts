@@ -1,20 +1,55 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { db, devices, meters, readings, deviceHealthSamples, sites } from "@sparks/db";
+import {
+  db,
+  devices,
+  meters,
+  readings,
+  demandIntervals,
+  dataGaps,
+  deviceHealthSamples,
+  sites,
+} from "@sparks/db";
 import { randomUUID, createHash } from "node:crypto";
-import { eq, and } from "drizzle-orm";
+import { eq, asc } from "drizzle-orm";
+import { app } from "../index";
+import { signDeviceBody } from "../ingestion";
 
+// The device key the edge agent holds; the server stores only sha256(deviceKey).
 let testSiteId: string;
 let testDeviceId: string;
 let testMeterId: string;
-let testApiKey: string;
+let testDeviceKey: string;
+
+function keyHash(deviceKey: string): string {
+  return createHash("sha256").update(deviceKey).digest("hex");
+}
+
+// POST a JSON body to a mounted route with a valid (or caller-supplied) device signature.
+async function postSigned(
+  path: string,
+  deviceId: string,
+  signingKey: string,
+  bodyObj: unknown,
+  signatureOverride?: string,
+): Promise<Response> {
+  const rawBody = JSON.stringify(bodyObj);
+  const signature = signatureOverride ?? signDeviceBody(signingKey, rawBody);
+  return app.request(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-device-id": deviceId,
+      "x-signature": signature,
+    },
+    body: rawBody,
+  });
+}
 
 async function setupTestData() {
   testSiteId = randomUUID();
   testDeviceId = randomUUID();
   testMeterId = randomUUID();
-  testApiKey = randomUUID();
-
-  const apiKeyHash = createHash("sha256").update(testApiKey).digest("hex");
+  testDeviceKey = randomUUID();
 
   await db.insert(sites).values({
     id: testSiteId,
@@ -27,9 +62,9 @@ async function setupTestData() {
   await db.insert(devices).values({
     id: testDeviceId,
     siteId: testSiteId,
-    serialNumber: `DEVICE-${Math.random()}`,
+    serialNumber: `DEVICE-${randomUUID()}`,
     hardwareModel: "rpi",
-    apiKeyHash: apiKeyHash,
+    apiKeyHash: keyHash(testDeviceKey),
     status: "online",
   });
 
@@ -37,272 +72,234 @@ async function setupTestData() {
     id: testMeterId,
     deviceId: testDeviceId,
     siteId: testSiteId,
-    serialNumber: `METER-${Math.random()}`,
+    serialNumber: `METER-${randomUUID()}`,
     model: "SDM630MCT",
   });
 }
 
+async function cleanupMeter(meterId: string) {
+  await db.delete(demandIntervals).where(eq(demandIntervals.meterId, meterId));
+  await db.delete(dataGaps).where(eq(dataGaps.meterId, meterId));
+  await db.delete(readings).where(eq(readings.meterId, meterId));
+  await db.delete(meters).where(eq(meters.id, meterId));
+}
+
 async function cleanupTestData() {
   await db.delete(deviceHealthSamples).where(eq(deviceHealthSamples.deviceId, testDeviceId));
-  await db.delete(readings).where(eq(readings.meterId, testMeterId));
-  await db.delete(meters).where(eq(meters.id, testMeterId));
+  await cleanupMeter(testMeterId);
   await db.delete(devices).where(eq(devices.id, testDeviceId));
   await db.delete(sites).where(eq(sites.id, testSiteId));
 }
 
-describe("Device Ingestion API", () => {
-  beforeEach(async () => {
-    await setupTestData();
+describe("Device Ingestion API (mounted route)", () => {
+  beforeEach(setupTestData);
+  afterEach(cleanupTestData);
+
+  // Regression guard: the route must be wired, not the 501 placeholder. If index.ts
+  // ever reverts to the stub, this fails loudly.
+  it("mounts POST /ingest/readings (never a 501 stub)", async () => {
+    const res = await app.request("/ingest/readings", { method: "POST" });
+    expect(res.status).not.toBe(501);
   });
 
-  afterEach(async () => {
-    await cleanupTestData();
+  it("rejects a bad HMAC signature with 401", async () => {
+    const body = {
+      timestamp: new Date().toISOString(),
+      readings: [{ meterId: testMeterId, time: new Date().toISOString(), seq: 1 }],
+    };
+    // Sign with the wrong key → signature does not verify.
+    const res = await postSigned("/ingest/readings", testDeviceId, "wrong-key", body);
+    expect(res.status).toBe(401);
+
+    // And a syntactically bogus signature is rejected too (constant-time compare guards length).
+    const res2 = await postSigned("/ingest/readings", testDeviceId, testDeviceKey, body, "deadbeef");
+    expect(res2.status).toBe(401);
   });
 
-  describe("POST /ingest/readings", () => {
-    it("should accept a batch of readings and return highest seq", async () => {
-      const now = new Date();
+  it("accepts a validly-signed batch and returns the highest seq", async () => {
+    const t0 = new Date("2026-07-15T08:00:00Z");
+    const body = {
+      timestamp: t0.toISOString(),
+      readings: [
+        { meterId: testMeterId, time: t0.toISOString(), seq: 100, activeEnergyKwh: "1000.000", totalPowerKw: "5.5", totalApparentKva: "6.0", powerFactor: "0.9167" },
+        { meterId: testMeterId, time: new Date(t0.getTime() + 60000).toISOString(), seq: 101, activeEnergyKwh: "1001.000", totalPowerKw: "5.4" },
+      ],
+    };
 
-      await db.insert(readings).values({
-        meterId: testMeterId,
-        time: now,
-        seq: 100,
-        activeEnergyKwh: "1000.500",
-        reactiveEnergyKvarh: "500.200",
-        apparentEnergyKvah: "1100.300",
-        totalPowerKw: "5.5",
-        totalApparentKva: "6.0",
-        powerFactor: "0.9167",
-      });
+    const res = await postSigned("/ingest/readings", testDeviceId, testDeviceKey, body);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { accepted: number; highestSeq: number };
+    expect(json.accepted).toBe(2);
+    expect(json.highestSeq).toBe(101);
 
-      await db.insert(readings).values({
-        meterId: testMeterId,
-        time: new Date(now.getTime() + 60000),
-        seq: 101,
-        activeEnergyKwh: "1001.500",
-        reactiveEnergyKvarh: "500.400",
-        apparentEnergyKvah: "1101.300",
-        totalPowerKw: "5.4",
-        totalApparentKva: "5.9",
-        powerFactor: "0.9180",
-      });
-
-      const savedReadings = await db
-        .select()
-        .from(readings)
-        .where(eq(readings.meterId, testMeterId));
-
-      expect(savedReadings.length).toBeGreaterThanOrEqual(2);
-    });
-
-    it("should idempotently upsert readings on (meter_id, time) conflict", async () => {
-      const now = new Date();
-
-      await db.insert(readings).values({
-        meterId: testMeterId,
-        time: now,
-        seq: 100,
-        activeEnergyKwh: "999.000",
-      });
-
-      await db.insert(readings).values({
-        meterId: testMeterId,
-        time: now,
-        seq: 100,
-        activeEnergyKwh: "1000.500",
-      }).onConflictDoUpdate({
-        target: [readings.meterId, readings.time],
-        set: {
-          activeEnergyKwh: "1000.500",
-        },
-      });
-
-      const updated = await db
-        .select()
-        .from(readings)
-        .where(and(eq(readings.meterId, testMeterId), eq(readings.time, now)))
-        .limit(1);
-
-      expect(updated.length).toBeGreaterThan(0);
-    });
-
-    it("should reject invalid API key", async () => {
-      const badApiKey = randomUUID();
-      const badHash = createHash("sha256").update(badApiKey).digest("hex");
-
-      expect(badHash).not.toBe("");
-    });
-
-    it("should handle readings spanning a day boundary (23:45 to 00:00)", async () => {
-      const day1 = new Date("2026-07-02T23:45:00Z");
-      const day2 = new Date("2026-07-03T00:15:00Z");
-
-      await db.insert(readings).values({
-        meterId: testMeterId,
-        time: day1,
-        seq: 1,
-        activeEnergyKwh: "1000.000",
-      });
-
-      await db.insert(readings).values({
-        meterId: testMeterId,
-        time: day2,
-        seq: 2,
-        activeEnergyKwh: "1001.000",
-      });
-
-      const saved = await db
-        .select()
-        .from(readings)
-        .where(eq(readings.meterId, testMeterId));
-
-      expect(saved.length).toBeGreaterThanOrEqual(2);
-    });
+    const saved = await db.select().from(readings).where(eq(readings.meterId, testMeterId));
+    expect(saved.length).toBe(2);
   });
 
-  describe("POST /ingest/health", () => {
-    it("should record device health sample", async () => {
-      const now = new Date();
+  it("idempotently upserts a re-POSTed batch (no duplicate rows)", async () => {
+    const t0 = new Date("2026-07-15T09:00:00Z");
+    const body = {
+      timestamp: t0.toISOString(),
+      readings: [
+        { meterId: testMeterId, time: t0.toISOString(), seq: 200, activeEnergyKwh: "2000.000" },
+        { meterId: testMeterId, time: new Date(t0.getTime() + 60000).toISOString(), seq: 201, activeEnergyKwh: "2001.000" },
+      ],
+    };
 
-      await db.insert(deviceHealthSamples).values({
-        deviceId: testDeviceId,
-        time: now,
-        connectivityMode: "lte",
-        signalRssi: -85,
-        upsStatus: "on_mains",
-        batteryPct: 100,
-        cpuTempC: "52.50",
-        bufferedRecords: 0,
-      });
+    const first = await postSigned("/ingest/readings", testDeviceId, testDeviceKey, body);
+    expect(first.status).toBe(200);
+    const countAfterFirst = (await db.select().from(readings).where(eq(readings.meterId, testMeterId))).length;
 
-      const saved = await db
-        .select()
-        .from(deviceHealthSamples)
-        .where(and(eq(deviceHealthSamples.deviceId, testDeviceId), eq(deviceHealthSamples.time, now)))
-        .limit(1);
+    const second = await postSigned("/ingest/readings", testDeviceId, testDeviceKey, body);
+    expect(second.status).toBe(200);
+    const countAfterSecond = (await db.select().from(readings).where(eq(readings.meterId, testMeterId))).length;
 
-      expect(saved.length).toBeGreaterThan(0);
-      expect(saved[0]?.signalRssi).toBe(-85);
-      expect(saved[0]?.batteryPct).toBe(100);
-    });
-
-    it("should update device last_seen_at and ups_status", async () => {
-      const now = new Date();
-
-      const beforeUpdate = await db
-        .select()
-        .from(devices)
-        .where(eq(devices.id, testDeviceId))
-        .limit(1);
-
-      expect(beforeUpdate[0]?.upsStatus).not.toBe("on_battery");
-
-      await db.update(devices)
-        .set({
-          lastSeenAt: now,
-          upsStatus: "on_battery",
-          upsBatteryPct: 75,
-          updatedAt: now,
-        })
-        .where(eq(devices.id, testDeviceId));
-
-      const afterUpdate = await db
-        .select()
-        .from(devices)
-        .where(eq(devices.id, testDeviceId))
-        .limit(1);
-
-      expect(afterUpdate[0]?.upsStatus).toBe("on_battery");
-      expect(afterUpdate[0]?.upsBatteryPct).toBe(75);
-    });
+    expect(countAfterFirst).toBe(2);
+    expect(countAfterSecond).toBe(2);
   });
 
-  describe("GET /device/config/:deviceId", () => {
-    it("should return demand interval and poll rate", async () => {
-      const deviceList = await db
-        .select()
-        .from(devices)
-        .where(eq(devices.id, testDeviceId));
+  // Golden-file interval alignment (R2): clock-aligned 30-min boundaries; a batch that
+  // crosses 23:45→00:00 must split into two intervals ([23:30,00:00) and [00:00,00:30)),
+  // never one merged interval. Energy per interval = register delta of its own readings.
+  it("aligns demand intervals to clock boundaries across the 23:45→00:00 boundary", async () => {
+    const body = {
+      timestamp: "2026-07-15T23:45:00Z",
+      readings: [
+        { meterId: testMeterId, time: "2026-07-15T23:45:00Z", seq: 1, activeEnergyKwh: "200.000" },
+        { meterId: testMeterId, time: "2026-07-15T23:55:00Z", seq: 2, activeEnergyKwh: "202.000" },
+        { meterId: testMeterId, time: "2026-07-16T00:05:00Z", seq: 3, activeEnergyKwh: "203.000" },
+        { meterId: testMeterId, time: "2026-07-16T00:20:00Z", seq: 4, activeEnergyKwh: "206.000" },
+      ],
+    };
 
-      const device = deviceList[0];
-      const site = device?.siteId
-        ? (await db.select().from(sites).where(eq(sites.id, device.siteId)).limit(1))[0]
-        : null;
+    const res = await postSigned("/ingest/readings", testDeviceId, testDeviceKey, body);
+    expect(res.status).toBe(200);
 
-      expect(site?.demandIntervalMinutes).toBe(30);
-    });
+    const intervals = await db
+      .select()
+      .from(demandIntervals)
+      .where(eq(demandIntervals.meterId, testMeterId))
+      .orderBy(asc(demandIntervals.intervalStart));
 
-    it("should reject request for device without site", async () => {
-      const orphanDeviceId = randomUUID();
+    expect(intervals.length).toBe(2);
+    expect(new Date(intervals[0]!.intervalStart).toISOString()).toBe("2026-07-15T23:30:00.000Z");
+    expect(intervals[0]!.activeEnergyKwh).toBe("2.000");
+    expect(new Date(intervals[1]!.intervalStart).toISOString()).toBe("2026-07-16T00:00:00.000Z");
+    expect(intervals[1]!.activeEnergyKwh).toBe("3.000");
+  });
+
+  // Golden-file (R1): a dropped mid-interval minute must not bias interval energy —
+  // because energy fields are cumulative registers, the interval delta (last − first)
+  // is exact regardless of a missing sample.
+  it("keeps interval energy correct when a mid-interval minute is dropped", async () => {
+    // Interval [00:00,00:30): samples at :00 :05 :10 :20 :25 — the :15 minute is dropped.
+    const body = {
+      timestamp: "2026-07-15T00:00:00Z",
+      readings: [
+        { meterId: testMeterId, time: "2026-07-15T00:00:00Z", seq: 1, activeEnergyKwh: "100.000" },
+        { meterId: testMeterId, time: "2026-07-15T00:05:00Z", seq: 2, activeEnergyKwh: "101.000" },
+        { meterId: testMeterId, time: "2026-07-15T00:10:00Z", seq: 3, activeEnergyKwh: "102.000" },
+        { meterId: testMeterId, time: "2026-07-15T00:20:00Z", seq: 5, activeEnergyKwh: "104.000" },
+        { meterId: testMeterId, time: "2026-07-15T00:25:00Z", seq: 6, activeEnergyKwh: "105.000" },
+      ],
+    };
+
+    const res = await postSigned("/ingest/readings", testDeviceId, testDeviceKey, body);
+    expect(res.status).toBe(200);
+
+    const intervals = await db
+      .select()
+      .from(demandIntervals)
+      .where(eq(demandIntervals.meterId, testMeterId))
+      .orderBy(asc(demandIntervals.intervalStart));
+
+    expect(intervals.length).toBe(1);
+    const iv = intervals[0]!;
+    // Energy = 105 − 100 = 5 kWh, exact despite the missing minute.
+    expect(iv.activeEnergyKwh).toBe("5.000");
+    // avg demand = 5 kWh / 0.5 h = 10 kW.
+    expect(iv.avgDemandKw).toBe("10.000");
+    // Only 5 of 30 expected samples present → flagged incomplete for downstream gap handling.
+    expect(iv.sampleCount).toBe(5);
+    expect(iv.isComplete).toBe(false);
+  });
+
+  describe("POST /device/commission", () => {
+    let provDeviceId: string;
+    let provMeterId: string;
+    let provToken: string;
+
+    beforeEach(async () => {
+      provDeviceId = randomUUID();
+      provMeterId = randomUUID();
+      provToken = randomUUID();
 
       await db.insert(devices).values({
-        id: orphanDeviceId,
-        serialNumber: `ORPHAN-${Math.random()}`,
+        id: provDeviceId,
+        siteId: testSiteId,
+        serialNumber: `PROV-${randomUUID()}`,
         hardwareModel: "rpi",
-        apiKeyHash: "hash",
+        apiKeyHash: keyHash(provToken), // provisioning token hash, replaced on commission
         status: "provisioning",
       });
 
-      const deviceList = await db
-        .select()
-        .from(devices)
-        .where(eq(devices.id, orphanDeviceId))
-        .limit(1);
-
-      const device = deviceList[0];
-      expect(device?.siteId).toBeNull();
-    });
-  });
-});
-
-describe("Idempotency Tests", () => {
-  beforeEach(async () => {
-    await setupTestData();
-  });
-
-  afterEach(async () => {
-    await cleanupTestData();
-  });
-
-  it("should handle re-posting the exact same batch", async () => {
-    const now = new Date();
-
-    await db.insert(readings).values({
-      meterId: testMeterId,
-      time: now,
-      seq: 100,
-      activeEnergyKwh: "1000.500",
+      await db.insert(meters).values({
+        id: provMeterId,
+        deviceId: provDeviceId,
+        siteId: testSiteId,
+        serialNumber: `PROV-METER-${randomUUID()}`,
+        model: "SDM630MCT",
+      });
     });
 
-    await db.insert(readings).values({
-      meterId: testMeterId,
-      time: new Date(now.getTime() + 60000),
-      seq: 101,
-      activeEnergyKwh: "1001.500",
+    afterEach(async () => {
+      await cleanupMeter(provMeterId);
+      await db.delete(devices).where(eq(devices.id, provDeviceId));
     });
 
-    const countBefore = await db
-      .select()
-      .from(readings)
-      .where(eq(readings.meterId, testMeterId));
+    it("issues a usable device key and rejects reuse of the one-time token", async () => {
+      const res = await app.request("/device/commission", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId: provDeviceId, provisioningToken: provToken }),
+      });
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as { deviceId: string; deviceKey: string };
+      expect(json.deviceKey).toBeTruthy();
 
-    await db.insert(readings).values({
-      meterId: testMeterId,
-      time: now,
-      seq: 100,
-      activeEnergyKwh: "1000.500",
-    }).onConflictDoUpdate({
-      target: [readings.meterId, readings.time],
-      set: {
-        activeEnergyKwh: "1000.500",
-      },
+      // Device is now online and the stored hash matches the issued key (not the token).
+      const dev = (await db.select().from(devices).where(eq(devices.id, provDeviceId)))[0]!;
+      expect(dev.status).toBe("online");
+      expect(dev.apiKeyHash).toBe(keyHash(json.deviceKey));
+
+      // The issued key actually works for signed ingest.
+      const ingest = await postSigned(
+        "/ingest/readings",
+        provDeviceId,
+        json.deviceKey,
+        {
+          timestamp: "2026-07-15T10:00:00Z",
+          readings: [{ meterId: provMeterId, time: "2026-07-15T10:00:00Z", seq: 1, activeEnergyKwh: "1.000" }],
+        },
+      );
+      expect(ingest.status).toBe(200);
+
+      // The one-time token cannot be replayed — device already left `provisioning`.
+      const replay = await app.request("/device/commission", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId: provDeviceId, provisioningToken: provToken }),
+      });
+      expect(replay.status).toBe(409);
     });
 
-    const countAfter = await db
-      .select()
-      .from(readings)
-      .where(eq(readings.meterId, testMeterId));
-
-    expect(countBefore.length).toBe(countAfter.length);
+    it("rejects an invalid provisioning token with 401", async () => {
+      const res = await app.request("/device/commission", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId: provDeviceId, provisioningToken: "not-the-token" }),
+      });
+      expect(res.status).toBe(401);
+    });
   });
 });

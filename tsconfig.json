@@ -28,7 +28,8 @@
     "paths": {
       "@sparks/db": ["packages/db/src"],
       "@sparks/api": ["packages/api/src"],
-      "@sparks/ui": ["packages/ui/src"]
+      "@sparks/ui": ["packages/ui/src"],
+      "@sparks/server": ["apps/server/src"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx"],

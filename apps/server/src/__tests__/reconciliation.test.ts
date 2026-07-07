@@ -1,24 +1,73 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
-  getDb,
-  sites,
-  siteAccess,
   billingPeriods,
+  dataGaps,
+  demandIntervals,
+  devices,
+  getDb,
+  landlordInvoices,
+  meters,
+  reconciliations,
+  siteAccess,
+  siteTariffAssignments,
+  sites,
   tariffProfiles,
   tariffRates,
-  siteTariffAssignments,
-  landlordInvoices,
-  demandIntervals,
-  dataGaps,
-  meters,
-  devices,
-  reconciliations,
 } from "@sparks/db";
 import { eq } from "drizzle-orm";
 import type { AuthContext } from "../middleware";
-import { reconciliationGenerate, reconciliationGet, reconciliationList, reconciliationListVersions, reconciliationFinalize } from "../routers";
+import { buildComponentComparison } from "../reconciliation";
+import {
+  reconciliationFinalize,
+  reconciliationGenerate,
+  reconciliationGet,
+  reconciliationList,
+  reconciliationListVersions,
+} from "../routers";
+import type { PricingBreakdown } from "../tariffs";
 
 const db = getDb();
+
+describe("Component comparison (charged vs expected per component)", () => {
+  const landlord: PricingBreakdown = {
+    activeEnergyCents: 300000,
+    demandCents: 550000,
+    reactiveEnergyCents: 0,
+    fixedCents: 0,
+    ancillaryCents: 0,
+    totalCents: 850000,
+    details: [],
+  };
+
+  it("computes per-component charged, expected, and discrepancy", () => {
+    const rows = buildComponentComparison(landlord, null, {
+      confirmedActiveCents: 350000, // overcharged by 50000
+      confirmedDemandCents: 550000, // exact
+      confirmedReactiveCents: 0,
+      confirmedFixedCents: 10000, // charged but tariff expects 0
+    });
+    const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
+    expect(byKey.active.discrepancyVsLandlordCents).toBe(50000);
+    expect(byKey.demand.discrepancyVsLandlordCents).toBe(0);
+    expect(byKey.reactive.discrepancyVsLandlordCents).toBe(0);
+    expect(byKey.fixed.chargedCents).toBe(10000);
+    expect(byKey.fixed.discrepancyVsLandlordCents).toBe(10000);
+  });
+
+  it("folds ancillary into the fixed expected bucket and handles null charges", () => {
+    const withAncillary: PricingBreakdown = { ...landlord, fixedCents: 5000, ancillaryCents: 2000 };
+    const rows = buildComponentComparison(withAncillary, null, {
+      confirmedActiveCents: null,
+      confirmedDemandCents: null,
+      confirmedReactiveCents: null,
+      confirmedFixedCents: null,
+    });
+    const fixed = rows.find((r) => r.key === "fixed");
+    expect(fixed?.expectedLandlordCents).toBe(7000); // 5000 fixed + 2000 ancillary
+    expect(fixed?.chargedCents).toBe(0); // null → 0
+    expect(fixed?.discrepancyVsLandlordCents).toBe(-7000);
+  });
+});
 
 describe("Reconciliation Engine", () => {
   const orgId = "test-org-recon";
@@ -150,7 +199,9 @@ describe("Reconciliation Engine", () => {
       intervals.push({
         meterId,
         siteId,
-        intervalStart: new Date(`2026-01-${String(Math.floor(i / 24) + 1).padStart(2, "0")}T${String(i % 24).padStart(2, "0")}:00:00Z`),
+        intervalStart: new Date(
+          `2026-01-${String(Math.floor(i / 24) + 1).padStart(2, "0")}T${String(i % 24).padStart(2, "0")}:00:00Z`,
+        ),
         intervalMinutes: 60,
         activeEnergyKwh: "50", // 50 kWh per interval
         reactiveEnergyKvarh: "10",
@@ -166,24 +217,22 @@ describe("Reconciliation Engine", () => {
     await db.insert(demandIntervals).values(intervals);
 
     // Create invoice for the billing period (with a known overcharge)
-    await db
-      .insert(landlordInvoices)
-      .values({
-        siteId,
-        billingPeriodId,
-        billingPeriodStart: new Date("2026-01-01T00:00:00Z"),
-        billingPeriodEnd: new Date("2026-02-01T00:00:00Z"),
-        fileStorageKey: "test-invoice-jan.pdf",
-        fileHash: "test-hash",
-        status: "locked",
-        confirmedActiveCents: 300000, // 3000 R = R3000 (should be R30 at 2.50/kWh for 1200 kWh)
-        confirmedDemandCents: 132000, // 1320 R = R1320 (should be R5500 at R100/kVA for 55 kVA)
-        confirmedFixedCents: 50000, // R500 fixed
-        confirmedTotalCents: 482000, // R4820
-        confirmedByUserId: siteOwnerUserId,
-        confirmedAt: new Date(),
-        lockedAt: new Date(),
-      });
+    await db.insert(landlordInvoices).values({
+      siteId,
+      billingPeriodId,
+      billingPeriodStart: new Date("2026-01-01T00:00:00Z"),
+      billingPeriodEnd: new Date("2026-02-01T00:00:00Z"),
+      fileStorageKey: "test-invoice-jan.pdf",
+      fileHash: "test-hash",
+      status: "locked",
+      confirmedActiveCents: 300000, // 3000 R = R3000 (should be R30 at 2.50/kWh for 1200 kWh)
+      confirmedDemandCents: 132000, // 1320 R = R1320 (should be R5500 at R100/kVA for 55 kVA)
+      confirmedFixedCents: 50000, // R500 fixed
+      confirmedTotalCents: 482000, // R4820
+      confirmedByUserId: siteOwnerUserId,
+      confirmedAt: new Date(),
+      lockedAt: new Date(),
+    });
   });
 
   afterEach(async () => {
@@ -381,18 +430,16 @@ describe("Reconciliation Engine", () => {
 
     it("refuses to finalize if invoice is not locked", async () => {
       // Create a new invoice that is not locked (not used in this test - the original invoice is locked)
-      await db
-        .insert(landlordInvoices)
-        .values({
-          siteId,
-          billingPeriodId: billingPeriodId,
-          billingPeriodStart: new Date("2026-01-01T00:00:00Z"),
-          billingPeriodEnd: new Date("2026-02-01T00:00:00Z"),
-          fileStorageKey: "test-invoice-unlocked.pdf",
-          fileHash: "test-hash-2",
-          status: "parsed_pending_confirm",
-          confirmedTotalCents: null,
-        });
+      await db.insert(landlordInvoices).values({
+        siteId,
+        billingPeriodId: billingPeriodId,
+        billingPeriodStart: new Date("2026-01-01T00:00:00Z"),
+        billingPeriodEnd: new Date("2026-02-01T00:00:00Z"),
+        fileStorageKey: "test-invoice-unlocked.pdf",
+        fileHash: "test-hash-2",
+        status: "parsed_pending_confirm",
+        confirmedTotalCents: null,
+      });
 
       // Update the existing reconciliation to point to the unlocked invoice
       const genResult = await reconciliationGenerate(siteOwnerCtx, {
@@ -442,24 +489,22 @@ describe("Reconciliation Engine", () => {
         .returning();
 
       // Create invoice for this period
-      await db
-        .insert(landlordInvoices)
-        .values({
-          siteId,
-          billingPeriodId: inclusivePeriodResult[0].id,
-          billingPeriodStart: new Date("2026-03-01T00:00:00Z"),
-          billingPeriodEnd: new Date("2026-04-01T00:00:00Z"),
-          fileStorageKey: "test-invoice-inclusive.pdf",
-          fileHash: "test-hash-3",
-          status: "locked",
-          confirmedActiveCents: 300000,
-          confirmedDemandCents: 132000,
-          confirmedFixedCents: 50000,
-          confirmedTotalCents: 482000,
-          confirmedByUserId: siteOwnerUserId,
-          confirmedAt: new Date(),
-          lockedAt: new Date(),
-        });
+      await db.insert(landlordInvoices).values({
+        siteId,
+        billingPeriodId: inclusivePeriodResult[0].id,
+        billingPeriodStart: new Date("2026-03-01T00:00:00Z"),
+        billingPeriodEnd: new Date("2026-04-01T00:00:00Z"),
+        fileStorageKey: "test-invoice-inclusive.pdf",
+        fileHash: "test-hash-3",
+        status: "locked",
+        confirmedActiveCents: 300000,
+        confirmedDemandCents: 132000,
+        confirmedFixedCents: 50000,
+        confirmedTotalCents: 482000,
+        confirmedByUserId: siteOwnerUserId,
+        confirmedAt: new Date(),
+        lockedAt: new Date(),
+      });
 
       // Create intervals for this period
       const intervals = [];
@@ -494,51 +539,326 @@ describe("Reconciliation Engine", () => {
     });
   });
 
-  describe("Tariff Effective Date Change", () => {
-    it("handles tariff effective date change within period", async () => {
-      // Create a second tariff effective from mid-period
-      const midPeriodTariffResult = await db
-        .insert(tariffProfiles)
+  describe("Data gap period scoping (R5)", () => {
+    it("counts only gaps inside the billing period", async () => {
+      // A gap inside January (in-period) and one in March (out-of-period). Only
+      // the in-period gap should flag THIS period's integrity.
+      await db.insert(dataGaps).values([
+        {
+          meterId,
+          siteId,
+          gapStart: new Date("2026-01-10T00:00:00Z"),
+          gapEnd: new Date("2026-01-10T01:00:00Z"),
+          durationMinutes: 60,
+          backfilled: false,
+          detectedAt: new Date(),
+        },
+        {
+          meterId,
+          siteId,
+          gapStart: new Date("2026-03-10T00:00:00Z"),
+          gapEnd: new Date("2026-03-10T05:00:00Z"),
+          durationMinutes: 300,
+          backfilled: false,
+          detectedAt: new Date(),
+        },
+      ]);
+
+      const result = await reconciliationGenerate(siteOwnerCtx, { billingPeriodId });
+      const recon = await db.query.reconciliations.findFirst({
+        where: eq(reconciliations.id, result.reconId),
+      });
+
+      expect(recon?.dataIntegrityStatus).toBe("gaps_present");
+      expect(recon?.gapCount).toBe(1); // only the January gap
+      expect(recon?.gapMinutesTotal).toBe(60); // the March gap (300 min) is excluded
+    });
+  });
+
+  describe("Locked-invoice guard (R5)", () => {
+    it("refuses to generate when the invoice is not locked", async () => {
+      // Add an unlocked invoice for a fresh period with no locked invoice.
+      const periodResult = await db
+        .insert(billingPeriods)
         .values({
-          organizationId: orgId,
-          name: "Mid-Period Tariff",
-          type: "landlord_stated",
-          source: "custom",
-          currency: "ZAR",
-          effectiveFrom: new Date("2026-01-15"),
+          siteId,
+          periodStart: new Date("2026-05-01T00:00:00Z"),
+          periodEnd: new Date("2026-06-01T00:00:00Z"),
+          boundaryInclusivity: "half_open",
+          demandIntervalMinutes: 30,
+          label: "May 2026",
+          status: "open",
         })
         .returning();
 
-      const midPeriodTariffId = midPeriodTariffResult[0].id;
+      await db.insert(landlordInvoices).values({
+        siteId,
+        billingPeriodId: periodResult[0].id,
+        billingPeriodStart: new Date("2026-05-01T00:00:00Z"),
+        billingPeriodEnd: new Date("2026-06-01T00:00:00Z"),
+        fileStorageKey: "unlocked.pdf",
+        fileHash: "hash-unlocked",
+        status: "parsed_pending_confirm",
+        confirmedTotalCents: null,
+      });
 
-      // Add rates to the new tariff (with different rates)
+      try {
+        await reconciliationGenerate(siteOwnerCtx, { billingPeriodId: periodResult[0].id });
+        expect.unreachable("Should have thrown");
+      } catch (e: unknown) {
+        expect((e as Error).message).toContain("locked");
+      }
+    });
+  });
+
+  describe("Effective-dated tariff split (R5)", () => {
+    it("splits a period crossing a tariff change and prices each slice at its own rate", async () => {
+      // A 20 Jan → 20 Feb period. The beforeEach landlord tariff (effective from
+      // 2026-01-01: R2.50/kWh, R100/kVA) covers the January slice; a second
+      // assignment effective 2026-02-01 (R3.00/kWh, R120/kVA) covers February.
+      const febTariff = await db
+        .insert(tariffProfiles)
+        .values({
+          organizationId: orgId,
+          name: "Feb Tariff",
+          type: "landlord_stated",
+          source: "custom",
+          currency: "ZAR",
+          effectiveFrom: new Date("2026-02-01"),
+        })
+        .returning();
+      const febTariffId = febTariff[0].id;
+
       await db.insert(tariffRates).values([
         {
-          tariffProfileId: midPeriodTariffId,
+          tariffProfileId: febTariffId,
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: "3.00", // R3.00 per kWh (increased)
+          rateValue: "3.00",
           season: "all",
           touPeriod: "all",
         },
         {
-          tariffProfileId: midPeriodTariffId,
+          tariffProfileId: febTariffId,
           chargeType: "demand",
           unit: "r_per_kva",
-          rateValue: "120", // R120 per kVA (increased)
+          rateValue: "120",
           season: "all",
           touPeriod: "all",
         },
       ]);
 
-      // For this test, we use the first tariff since the effective date logic is in the data model
-      // The reconciliation should use the tariff that's assigned at the time of generation
-      const result = await reconciliationGenerate(siteOwnerCtx, {
-        billingPeriodId,
+      await db.insert(siteTariffAssignments).values({
+        siteId,
+        tariffProfileId: febTariffId,
+        role: "landlord",
+        effectiveFrom: new Date("2026-02-01"),
       });
 
-      expect(result.reconId).toBeDefined();
-      expect(result.status).toBe("draft");
+      const crossPeriod = await db
+        .insert(billingPeriods)
+        .values({
+          siteId,
+          periodStart: new Date("2026-01-20T00:00:00Z"),
+          periodEnd: new Date("2026-02-20T00:00:00Z"),
+          boundaryInclusivity: "half_open",
+          demandIntervalMinutes: 30,
+          label: "20 Jan → 20 Feb",
+          status: "open",
+        })
+        .returning();
+      const crossPeriodId = crossPeriod[0].id;
+
+      // Two intervals in the January slice, two in the February slice.
+      await db.insert(demandIntervals).values([
+        {
+          meterId,
+          siteId,
+          intervalStart: new Date("2026-01-25T10:00:00Z"),
+          intervalMinutes: 60,
+          activeEnergyKwh: "100",
+          reactiveEnergyKvarh: "0",
+          avgDemandKw: "45",
+          avgDemandKva: "50",
+          avgPowerFactor: "0.9",
+          sampleCount: 60,
+          expectedSamples: 60,
+          isComplete: true,
+          source: "live" as const,
+        },
+        {
+          meterId,
+          siteId,
+          intervalStart: new Date("2026-01-26T10:00:00Z"),
+          intervalMinutes: 60,
+          activeEnergyKwh: "100",
+          reactiveEnergyKvarh: "0",
+          avgDemandKw: "45",
+          avgDemandKva: "50",
+          avgPowerFactor: "0.9",
+          sampleCount: 60,
+          expectedSamples: 60,
+          isComplete: true,
+          source: "live" as const,
+        },
+        {
+          meterId,
+          siteId,
+          intervalStart: new Date("2026-02-05T10:00:00Z"),
+          intervalMinutes: 60,
+          activeEnergyKwh: "100",
+          reactiveEnergyKvarh: "0",
+          avgDemandKw: "55",
+          avgDemandKva: "60",
+          avgPowerFactor: "0.9",
+          sampleCount: 60,
+          expectedSamples: 60,
+          isComplete: true,
+          source: "live" as const,
+        },
+        {
+          meterId,
+          siteId,
+          intervalStart: new Date("2026-02-06T10:00:00Z"),
+          intervalMinutes: 60,
+          activeEnergyKwh: "100",
+          reactiveEnergyKvarh: "0",
+          avgDemandKw: "55",
+          avgDemandKva: "60",
+          avgPowerFactor: "0.9",
+          sampleCount: 60,
+          expectedSamples: 60,
+          isComplete: true,
+          source: "live" as const,
+        },
+      ]);
+
+      await db.insert(landlordInvoices).values({
+        siteId,
+        billingPeriodId: crossPeriodId,
+        billingPeriodStart: new Date("2026-01-20T00:00:00Z"),
+        billingPeriodEnd: new Date("2026-02-20T00:00:00Z"),
+        fileStorageKey: "cross.pdf",
+        fileHash: "hash-cross",
+        status: "locked",
+        confirmedActiveCents: 0,
+        confirmedDemandCents: 0,
+        confirmedFixedCents: 0,
+        confirmedTotalCents: 0,
+        confirmedByUserId: siteOwnerUserId,
+        confirmedAt: new Date(),
+        lockedAt: new Date(),
+      });
+
+      const result = await reconciliationGenerate(siteOwnerCtx, { billingPeriodId: crossPeriodId });
+      const recon = await db.query.reconciliations.findFirst({
+        where: eq(reconciliations.id, result.reconId),
+      });
+
+      // Jan slice: 200 kWh * 2.50 = R500 (50000c) + max demand 50 * R100 = R5000 (500000c)
+      // Feb slice: 200 kWh * 3.00 = R600 (60000c) + max demand 60 * R120 = R7200 (720000c)
+      expect(recon?.expectedLandlordCents).toBe(50000 + 500000 + 60000 + 720000);
+      // The stored FK is the profile effective at the period start (January's tariff).
+      expect(recon?.landlordTariffProfileId).toBe(landlordTariffId);
+    });
+  });
+
+  describe("Boundary edge interval (R5)", () => {
+    async function seedEdgePeriod(
+      inclusivity: "half_open" | "inclusive",
+      start: string,
+      end: string,
+    ) {
+      const period = await db
+        .insert(billingPeriods)
+        .values({
+          siteId,
+          periodStart: new Date(start),
+          periodEnd: new Date(end),
+          boundaryInclusivity: inclusivity,
+          demandIntervalMinutes: 30,
+          label: `edge ${inclusivity}`,
+          status: "open",
+        })
+        .returning();
+
+      await db.insert(demandIntervals).values([
+        // One interval well inside the period, one exactly at the period end.
+        {
+          meterId,
+          siteId,
+          intervalStart: new Date(start),
+          intervalMinutes: 60,
+          activeEnergyKwh: "100",
+          reactiveEnergyKvarh: "0",
+          avgDemandKw: "40",
+          avgDemandKva: "45",
+          avgPowerFactor: "0.9",
+          sampleCount: 60,
+          expectedSamples: 60,
+          isComplete: true,
+          source: "live" as const,
+        },
+        {
+          meterId,
+          siteId,
+          intervalStart: new Date(end),
+          intervalMinutes: 60,
+          activeEnergyKwh: "100",
+          reactiveEnergyKvarh: "0",
+          avgDemandKw: "40",
+          avgDemandKva: "45",
+          avgPowerFactor: "0.9",
+          sampleCount: 60,
+          expectedSamples: 60,
+          isComplete: true,
+          source: "live" as const,
+        },
+      ]);
+
+      await db.insert(landlordInvoices).values({
+        siteId,
+        billingPeriodId: period[0].id,
+        billingPeriodStart: new Date(start),
+        billingPeriodEnd: new Date(end),
+        fileStorageKey: `edge-${inclusivity}.pdf`,
+        fileHash: `hash-${inclusivity}`,
+        status: "locked",
+        confirmedTotalCents: 0,
+        confirmedByUserId: siteOwnerUserId,
+        confirmedAt: new Date(),
+        lockedAt: new Date(),
+      });
+
+      return period[0].id;
+    }
+
+    it("excludes the interval at period end for half-open but includes it for inclusive", async () => {
+      const halfOpenId = await seedEdgePeriod(
+        "half_open",
+        "2026-09-01T00:00:00Z",
+        "2026-10-01T00:00:00Z",
+      );
+      const inclusiveId = await seedEdgePeriod(
+        "inclusive",
+        "2026-11-01T00:00:00Z",
+        "2026-12-01T00:00:00Z",
+      );
+
+      const halfOpen = await reconciliationGenerate(siteOwnerCtx, { billingPeriodId: halfOpenId });
+      const inclusive = await reconciliationGenerate(siteOwnerCtx, {
+        billingPeriodId: inclusiveId,
+      });
+
+      const reconHalfOpen = await db.query.reconciliations.findFirst({
+        where: eq(reconciliations.id, halfOpen.reconId),
+      });
+      const reconInclusive = await db.query.reconciliations.findFirst({
+        where: eq(reconciliations.id, inclusive.reconId),
+      });
+
+      expect(Number(reconHalfOpen?.measuredActiveKwh)).toBe(100); // edge interval excluded
+      expect(Number(reconInclusive?.measuredActiveKwh)).toBe(200); // edge interval included
     });
   });
 });

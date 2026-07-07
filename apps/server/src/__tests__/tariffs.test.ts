@@ -1,18 +1,25 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDb, sites, siteAccess, tariffProfiles, tariffRates, siteTariffAssignments } from "@sparks/db";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+  getDb,
+  siteAccess,
+  siteTariffAssignments,
+  sites,
+  tariffProfiles,
+  tariffRates,
+} from "@sparks/db";
 import { eq } from "drizzle-orm";
 import type { AuthContext } from "../middleware";
-import { priceUsage, type TariffProfile, type UsageData } from "../tariffs";
 import {
-  tariffsLibraryList,
-  tariffsLibraryGet,
-  tariffsProfilesCreate,
-  tariffsProfilesUpdate,
-  tariffsProfilesAddRate,
-  tariffsProfilesListRates,
-  tariffsAssignSet,
   tariffsAssignList,
+  tariffsAssignSet,
+  tariffsLibraryGet,
+  tariffsLibraryList,
+  tariffsProfilesAddRate,
+  tariffsProfilesCreate,
+  tariffsProfilesListRates,
+  tariffsProfilesUpdate,
 } from "../routers";
+import { type TariffProfile, type UsageData, priceUsage } from "../tariffs";
 
 const db = getDb();
 
@@ -197,6 +204,160 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     const result = priceUsage(usage, profile);
     expect(result.activeEnergyCents).toBe(23340); // 100 kWh * 2.334 R/kWh * 100 cents/R
   });
+
+  it("splits active energy across peak/standard/offpeak TOU bands", () => {
+    // Three intervals on a weekday (2024-03-05 is a Tuesday), timezone UTC so the
+    // schedule hours map directly. hour 8 → peak, hour 12 → standard, hour 2 →
+    // offpeak (unmapped default). March is low season here — irrelevant, all
+    // rates are season "all", so only the TOU band drives the rate.
+    const usage: UsageData = {
+      activeKwh: 300,
+      maxDemandKva: 0,
+      reactiveKvarh: 0,
+      timezone: "UTC",
+      intervalStarts: [
+        new Date("2024-03-05T08:00:00Z"),
+        new Date("2024-03-05T12:00:00Z"),
+        new Date("2024-03-05T02:00:00Z"),
+      ],
+      intervalActiveKwh: [120, 100, 80],
+    };
+
+    const profile: TariffProfile = {
+      touSchedule: { weekday: { "8": "peak", "12": "standard" } },
+      rates: [
+        {
+          chargeType: "active_energy",
+          unit: "c_per_kwh",
+          rateValue: 3,
+          season: "all",
+          touPeriod: "peak",
+        },
+        {
+          chargeType: "active_energy",
+          unit: "c_per_kwh",
+          rateValue: 2,
+          season: "all",
+          touPeriod: "standard",
+        },
+        {
+          chargeType: "active_energy",
+          unit: "c_per_kwh",
+          rateValue: 1,
+          season: "all",
+          touPeriod: "offpeak",
+        },
+      ],
+    };
+
+    const result = priceUsage(usage, profile);
+    // peak 120*3=360R, standard 100*2=200R, offpeak 80*1=80R
+    expect(result.activeEnergyCents).toBe(36000 + 20000 + 8000);
+    expect(result.totalCents).toBe(64000);
+    expect(result.details.length).toBe(3);
+    expect(result.activeEnergyCents).toBeGreaterThan(0); // non-"all" tariff no longer 0
+  });
+
+  it("prices seasonal (high/low) active energy at each season's rate", () => {
+    // One interval in July (SA high season), one in March (low season).
+    const usage: UsageData = {
+      activeKwh: 150,
+      maxDemandKva: 0,
+      reactiveKvarh: 0,
+      timezone: "UTC",
+      intervalStarts: [new Date("2024-07-10T10:00:00Z"), new Date("2024-03-10T10:00:00Z")],
+      intervalActiveKwh: [100, 50],
+    };
+
+    const profile: TariffProfile = {
+      rates: [
+        {
+          chargeType: "active_energy",
+          unit: "c_per_kwh",
+          rateValue: 5,
+          season: "high",
+          touPeriod: "all",
+        },
+        {
+          chargeType: "active_energy",
+          unit: "c_per_kwh",
+          rateValue: 2,
+          season: "low",
+          touPeriod: "all",
+        },
+      ],
+    };
+
+    const result = priceUsage(usage, profile);
+    // high 100*5=500R, low 50*2=100R
+    expect(result.activeEnergyCents).toBe(50000 + 10000);
+    expect(result.totalCents).toBe(60000);
+    expect(result.activeEnergyCents).toBeGreaterThan(0); // non-"all" tariff no longer 0
+  });
+
+  it("selects the seasonal demand rate present in the period", () => {
+    // Period sits entirely in July (high season). Only the high-season demand
+    // rate should apply; the low-season variant is excluded.
+    const usage: UsageData = {
+      activeKwh: 0,
+      maxDemandKva: 20,
+      reactiveKvarh: 0,
+      timezone: "UTC",
+      intervalStarts: [new Date("2024-07-10T10:00:00Z")],
+      intervalActiveKwh: [0],
+    };
+
+    const profile: TariffProfile = {
+      rates: [
+        {
+          chargeType: "demand",
+          unit: "r_per_kva",
+          rateValue: 30,
+          season: "high",
+          touPeriod: "all",
+        },
+        { chargeType: "demand", unit: "r_per_kva", rateValue: 10, season: "low", touPeriod: "all" },
+      ],
+    };
+
+    const result = priceUsage(usage, profile);
+    expect(result.demandCents).toBe(60000); // 20 kVA * 30 R/kVA (high only)
+    expect(result.details.length).toBe(1);
+  });
+
+  it("tiers active energy across inclining block thresholds", () => {
+    const usage: UsageData = {
+      activeKwh: 700,
+      maxDemandKva: 0,
+      reactiveKvarh: 0,
+    };
+
+    const profile: TariffProfile = {
+      rates: [
+        {
+          chargeType: "active_energy",
+          unit: "c_per_kwh",
+          rateValue: 1.5,
+          season: "all",
+          touPeriod: "all",
+          blockThresholdKwh: 500,
+        },
+        {
+          chargeType: "active_energy",
+          unit: "c_per_kwh",
+          rateValue: 2.5,
+          season: "all",
+          touPeriod: "all",
+        },
+      ],
+    };
+
+    const result = priceUsage(usage, profile);
+    // 0–500 @1.5 = 750R; 500–700 @2.5 = 500R
+    expect(result.activeEnergyCents).toBe(75000 + 50000);
+    expect(result.totalCents).toBe(125000);
+    expect(result.details.length).toBe(2);
+  });
 });
 
 describe("Tariff Routers", () => {
@@ -361,7 +522,7 @@ describe("Tariff Routers", () => {
         where: eq(tariffRates.tariffProfileId, profileId),
       });
       expect(rates.length).toBe(1);
-      expect(Number(rates[0].rateValue)).toBe(2.50);
+      expect(Number(rates[0].rateValue)).toBe(2.5);
     });
 
     it("lists rates for a profile", async () => {

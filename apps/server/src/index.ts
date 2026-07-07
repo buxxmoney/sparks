@@ -1,25 +1,50 @@
+// Load apps/server/.env (RESEND_API_KEY, EMAIL_FROM, WEB_URL, …) before any
+// module that reads process.env. The dev server runs via tsx/Node which does NOT
+// auto-load .env (unlike Bun); dotenv does not override vars already set by the
+// launch config, so the inline DATABASE_URL/secret still win.
+import "dotenv/config";
+import { serve } from "@hono/node-server";
+import { RPCHandler } from "@orpc/server/fetch";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { serve } from "@hono/node-server";
 import { auth } from "./auth";
-import { appRouter } from "./routers";
+import { createDeviceRouter, createIngestionRouter } from "./ingestion";
+import { ForbiddenError, UnauthorizedError, requireSession } from "./middleware";
+import type { ORPCContext } from "./orpc";
+import { appRouter } from "./router.orpc";
+import { getObject, objectExists, verifyObjectToken } from "./storage";
+
+// Re-export the router type so the typed client (packages/api) can consume it.
+export type { AppRouter } from "./router.orpc";
+
+// Exported so tests can drive the fully-wired app via `app.request(...)` without
+// opening a socket (a listener is only started under Node below).
+export { app };
 
 const app = new Hono();
+
+// Allowed browser origins: the localhost dev ports plus any production web
+// origin(s) from WEB_ORIGINS (comma-separated), e.g. "https://app.sparksmetering.com".
+const corsOrigins = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3001",
+  "http://localhost:3002",
+  "http://127.0.0.1:3002",
+  ...(process.env.WEB_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+];
 
 // CORS middleware
 app.use(
   "*",
   cors({
-    origin: [
-      "http://localhost:3000",
-      "http://127.0.0.1:3000",
-      "http://localhost:3001",
-      "http://127.0.0.1:3001",
-      "http://localhost:3002",
-      "http://127.0.0.1:3002",
-    ],
+    origin: corsOrigins,
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "x-session-id", "x-user-id", "x-organization-id"],
+    allowHeaders: ["Content-Type", "Authorization", "x-organization-id"],
     credentials: true,
   }),
 );
@@ -32,92 +57,62 @@ app.on(["GET", "POST"], "/api/auth/**", async (c) => {
   return auth.handler(c.req.raw);
 });
 
-// oRPC routes
-app.post("/rpc/call", async (c) => {
+// oRPC routes — the typed client posts to /rpc/<namespace>/<procedure>.
+// The auth context is built by the layered middleware's requireSession (real
+// better-auth session; identity-header spoof only under NODE_ENV==='test').
+const rpcHandler = new RPCHandler(appRouter);
+
+app.all("/rpc/*", async (c) => {
+  let context: ORPCContext;
   try {
-    const { method, params } = await c.req.json();
-
-    if (!method) {
-      return c.json({ error: "Missing method" }, 400);
-    }
-
-    // Parse the method path (e.g., "sites.list" -> ["sites", "list"])
-    const methodParts = method.split(".");
-    let handler: any = appRouter;
-
-    for (const part of methodParts) {
-      handler = handler[part];
-      if (!handler) {
-        return c.json({ error: `Method not found: ${method}` }, 404);
-      }
-    }
-
-    // Get auth context from better-auth session
-    let session: any = null;
-    try {
-      session = await auth.api.getSession({ headers: c.req.raw.headers });
-    } catch (e) {
-      // getSession may not throw, just fall through
-    }
-
-    // Fallback: check for manual session headers (for testing)
-    if (!session) {
-      const userId = c.req.header("x-user-id");
-      const sessionId = c.req.header("x-session-id");
-
-      if (userId && sessionId) {
-        session = {
-          user: { id: userId },
-          session: { id: sessionId },
-        };
-        console.log("Using fallback session headers for testing");
-      }
-    }
-
-    if (!session?.user) {
-      console.error("No session found");
-      return c.json({ error: "Unauthorized" }, 401);
-    }
-
-    // Build auth context
-    // Try to get organizationId from header first (preferred), then from params
-    const orgIdFromHeader = c.req.header("x-organization-id");
-    const authContext = {
-      userId: session.user.id,
-      sessionId: session.session?.id || "",
-      organizationId: orgIdFromHeader || params?.organizationId || "", // Will be extracted from header, params, or user's default org
-    };
-
-    // Check if this is a procedure that doesn't require organization ID
-    const allowWithoutOrg = method === "session.me";
-    const methodsAllowedWithoutOrg = ["session.listMemberships", "session.createOrganization"];
-
-    if (!authContext.organizationId && !allowWithoutOrg && !methodsAllowedWithoutOrg.includes(method)) {
-      return c.json({ error: "Organization ID required" }, 400);
-    }
-
-    // Call the handler
-    const result = await handler(authContext, params);
-
-    return c.json(result);
-  } catch (error: any) {
-    console.error("oRPC error:", error?.message || String(error));
-
-    if (error.name === "UnauthorizedError") {
-      return c.json({ error: error.message }, 401);
-    }
-
-    if (error.name === "ForbiddenError") {
-      return c.json({ error: error.message }, 403);
-    }
-
-    return c.json({ error: error.message || "Internal server error" }, 500);
+    context = { auth: await requireSession(c) };
+  } catch (err) {
+    if (err instanceof UnauthorizedError) return c.json({ error: err.message }, 401);
+    if (err instanceof ForbiddenError) return c.json({ error: err.message }, 403);
+    throw err;
   }
+
+  const { matched, response } = await rpcHandler.handle(c.req.raw, {
+    prefix: "/rpc",
+    context,
+  });
+
+  if (matched) return response;
+  return c.json({ error: "Not found" }, 404);
 });
 
-// Device ingestion API (mounted at /ingest/*)
-// Placeholder - will be implemented in Phase 3
-app.post("/ingest/*", (c) => c.json({ error: "Not yet implemented" }, 501));
+// Device-facing HTTP (docs/02 §4.2) — plain Hono routes, device HMAC auth, NOT oRPC.
+//   POST /ingest/readings   POST /ingest/health
+//   GET  /device/config/:deviceId   POST /device/commission
+app.route("/ingest", createIngestionRouter());
+app.route("/device", createDeviceRouter());
+
+// Sealed-PDF download (docs/02 §4.2). Capability URL: the signed token minted by
+// report.getPdf IS the access grant (site-access was checked when minting), so
+// no session is needed here — the browser opens the URL directly. Streams the
+// stored bytes from object storage.
+app.get("/reports/file", async (c) => {
+  const key = c.req.query("key");
+  const expires = Number(c.req.query("expires"));
+  const token = c.req.query("token");
+  if (!key || !token || !Number.isFinite(expires)) {
+    return c.json({ error: "Missing or malformed signed-URL parameters" }, 400);
+  }
+  if (!verifyObjectToken(key, expires, token)) {
+    return c.json({ error: "Invalid or expired download link" }, 403);
+  }
+  if (!(await objectExists(key))) {
+    return c.json({ error: "Report not found" }, 404);
+  }
+  const bytes = await getObject(key);
+  return new Response(new Uint8Array(bytes), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="${key.split("/").pop() ?? "report.pdf"}"`,
+    },
+  });
+});
 
 // 404 handler
 app.notFound((c) => c.json({ error: "Not found" }, 404));
@@ -133,9 +128,9 @@ if (typeof Bun === "undefined") {
       fetch: app.fetch,
       port: port,
     },
-    (info) => {
+    () => {
       console.log(`Server running on http://localhost:${port}`);
-    }
+    },
   );
 }
 

@@ -1,9 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { AuthShell } from "@/components/AuthShell";
+import { client } from "@/lib/client";
+import { clearSelectedOrganization, setSelectedOrganization } from "@/lib/useOrganizationContext";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { Link } from "@astryxdesign/core/Link";
+import { Stack } from "@astryxdesign/core/Stack";
+import { TextInput } from "@astryxdesign/core/TextInput";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { setSelectedOrganization } from "@/lib/useOrganizationContext";
+import { useState } from "react";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -30,18 +36,15 @@ export default function SignupPage() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/api/auth/sign-up/email`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/api/auth/sign-up/email`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ email, password, name: email.split("@")[0] }),
         },
-        credentials: "include",
-        body: JSON.stringify({
-          email,
-          password,
-          name: email.split("@")[0],
-        }),
-      });
+      );
 
       if (!response.ok) {
         const data = await response.json();
@@ -49,30 +52,17 @@ export default function SignupPage() {
         return;
       }
 
-      // Create organization for new user
-      const orgResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify({
-          method: "session.createOrganization",
-          params: {
-            name: `${email.split("@")[0]}'s Organization`,
-          },
-        }),
+      // A brand-new user belongs to no org yet. Clear any stale org id left in
+      // localStorage from a previous session, so the createOrganization RPC below
+      // doesn't send an x-organization-id the new user isn't a member of (→ 403).
+      clearSelectedOrganization();
+
+      const orgData = await client.session.createOrganization({
+        name: `${email.split("@")[0]}'s Organization`,
       });
-
-      if (!orgResponse.ok) {
-        const data = await orgResponse.json();
-        setError(data.error || "Failed to create organization");
-        return;
-      }
-
-      const orgData = await orgResponse.json();
       setSelectedOrganization(orgData.organizationId);
-      router.push("/dashboard");
+      const next = new URLSearchParams(window.location.search).get("next");
+      router.push(next && next.startsWith("/") ? next : "/dashboard");
     } catch (err) {
       setError("An error occurred. Please try again.");
     } finally {
@@ -81,66 +71,53 @@ export default function SignupPage() {
   };
 
   return (
-    <div className="page-container">
-      <div style={{ maxWidth: "400px", margin: "4rem auto" }}>
-        <div className="content-card">
-          <h1 style={{ textAlign: "center", marginBottom: "2rem" }}>Create Account</h1>
-
-          {error && <div className="alert alert-danger">{error}</div>}
-
-          <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label className="form-label">Email Address</label>
-              <input
-                type="email"
-                className="form-input"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                disabled={loading}
-              />
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">Password</label>
-              <input
-                type="password"
-                className="form-input"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                disabled={loading}
-              />
-              <div style={{ fontSize: "0.875rem", color: "#6c757d", marginTop: "0.25rem" }}>
-                At least 8 characters
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">Confirm Password</label>
-              <input
-                type="password"
-                className="form-input"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                required
-                disabled={loading}
-              />
-            </div>
-
-            <button type="submit" className="btn btn-primary" style={{ width: "100%", marginTop: "1.5rem" }} disabled={loading}>
-              {loading ? "Creating account..." : "Create Account"}
-            </button>
-          </form>
-
-          <div style={{ marginTop: "1.5rem", textAlign: "center", color: "#6c757d" }}>
-            Already have an account?{" "}
-            <Link href="/auth/login" style={{ color: "#0066cc", fontWeight: "500" }}>
-              Sign in
-            </Link>
+    <AuthShell
+      title="Create your account"
+      subtitle="Start reconciling your electricity bills"
+      footer={
+        <>
+          Already have an account? <Link href="/auth/login">Sign in</Link>
+        </>
+      }
+    >
+      <form onSubmit={handleSubmit}>
+        <Stack gap={5}>
+          {error ? <Banner status="error" title={error} /> : null}
+          <TextInput
+            label="Email address"
+            type="email"
+            value={email}
+            onChange={(v) => setEmail(v)}
+            isDisabled={loading}
+            width="100%"
+          />
+          <TextInput
+            label="Password"
+            type="password"
+            description="At least 8 characters"
+            value={password}
+            onChange={(v) => setPassword(v)}
+            isDisabled={loading}
+            width="100%"
+          />
+          <TextInput
+            label="Confirm password"
+            type="password"
+            value={confirmPassword}
+            onChange={(v) => setConfirmPassword(v)}
+            isDisabled={loading}
+            width="100%"
+          />
+          <div style={{ display: "grid" }}>
+            <Button
+              label={loading ? "Creating account…" : "Create account"}
+              type="submit"
+              variant="primary"
+              isLoading={loading}
+            />
           </div>
-        </div>
-      </div>
-    </div>
+        </Stack>
+      </form>
+    </AuthShell>
   );
 }

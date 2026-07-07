@@ -7,13 +7,23 @@
     "dev": "bun run src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
     "check": "tsc --noEmit",
+    "test": "NODE_ENV=test bun test",
     "start": "bun dist/index.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1079.0",
+    "@aws-sdk/s3-request-presigner": "^3.1079.0",
+    "@hono/node-server": "^1.19.14",
+    "@orpc/client": "^1.14.6",
+    "@orpc/server": "^1.14.6",
     "@sparks/db": "workspace:*",
     "better-auth": "^1.6.0",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.30.10",
     "hono": "^4.0.0",
-    "playwright": "^1.40.0"
+    "playwright": "^1.40.0",
+    "resend": "^6.17.1",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

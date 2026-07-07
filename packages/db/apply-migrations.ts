@@ -12,11 +12,11 @@ if (!dbUrl) {
 
 console.log(`Connecting to: ${dbUrl.split("@")[1] || "database"}`);
 
+// Local Postgres (e.g. a test DB) does not speak SSL; only force SSL for remote hosts.
+const isLocal = /(localhost|127\.0\.0\.1)/.test(dbUrl);
 const client = new Client({
   connectionString: dbUrl,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: isLocal ? false : { rejectUnauthorized: false },
   connectionTimeoutMillis: 10000,
   query_timeout: 30000,
 });

@@ -2,9 +2,8 @@
 const nextConfig = {
   reactStrictMode: true,
   transpilePackages: ["@sparks/server", "@sparks/api"],
-  experimental: {
-    serverComponentsExternalPackages: ["@sparks/db"],
-  },
+  // Renamed from experimental.serverComponentsExternalPackages in Next 15.
+  serverExternalPackages: ["@sparks/db"],
 };
 
-module.exports = nextConfig;
+export default nextConfig;

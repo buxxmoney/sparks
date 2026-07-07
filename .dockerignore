@@ -1,0 +1,17 @@
+# Keep the build context small and never bake local install output or secrets in.
+node_modules
+**/node_modules
+.git
+.turbo
+**/.turbo
+apps/web/.next
+apps/web/out
+**/*.tsbuildinfo
+**/dist
+# Secrets: env is injected by the host (Railway/Render vars), never copied in.
+.env
+.env.*
+!.env.example
+# Local scratch / logs
+*.log
+.DS_Store

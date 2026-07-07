@@ -23,6 +23,11 @@ export const user = pgTable("user", {
   image: text("image"),
   createdAt: timestamp("createdAt").defaultNow(),
   updatedAt: timestamp("updatedAt").defaultNow(),
+  // Platform-operator (internal cross-tenant admin) flag. Declared to better-auth
+  // as an additionalField (see apps/server/src/auth.ts); gates requirePlatformOperator.
+  isPlatformOperator: boolean("is_platform_operator").notNull().default(false),
+  // Optional mobile number for the SMS outcome nudge (set at set-password + Settings).
+  phone: text("phone"),
 });
 
 export const session = pgTable("session", {
@@ -105,6 +110,7 @@ export type NewUser = typeof user.$inferInsert;
 
 /* ─────────────── Enums ─────────────── */
 export const siteRole = pgEnum("site_role", ["owner", "site_manager"]);
+export const siteInviteStatus = pgEnum("site_invite_status", ["pending", "accepted", "cancelled"]);
 export const billingRecurrence = pgEnum("billing_recurrence", [
   "calendar_month",
   "day_of_month",
@@ -231,11 +237,39 @@ export const siteAccess = pgTable(
         onDelete: "cascade",
       }),
     userId: text("user_id").notNull(),
-    role: siteRole("role").notNull(),
+    // Per-site level: viewer | editor | site_admin (see middleware.normalizeSiteLevel).
+    role: text("role").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     uq: uniqueIndex("site_access_uq").on(t.siteId, t.userId),
+  }),
+);
+
+/* Site-scoped invitations (Slice 4): an org-owner invites someone by email to a
+   specific site. On accept the invitee becomes an org member (non-owner) and gets
+   a site_access grant for that site. */
+export const siteInvitations = pgTable(
+  "site_invitations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    siteId: uuid("site_id")
+      .notNull()
+      .references(() => sites.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").notNull(),
+    email: text("email").notNull(),
+    // Per-site level: viewer | editor | site_admin (see middleware.normalizeSiteLevel).
+    role: text("role").notNull().default("viewer"),
+    token: text("token").notNull().unique(),
+    invitedByUserId: text("invited_by_user_id").notNull(),
+    status: siteInviteStatus("status").notNull().default("pending"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    acceptedByUserId: text("accepted_by_user_id"),
+  },
+  (t) => ({
+    siteIdx: index("site_invitations_site_idx").on(t.siteId, t.status),
   }),
 );
 
@@ -562,6 +596,8 @@ export const landlordInvoices = pgTable(
     confirmedByUserId: text("confirmed_by_user_id"),
     confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
     lockedAt: timestamp("locked_at", { withTimezone: true }),
+    // Set when the customer explicitly clicks "Send to Sparks for review".
+    reviewRequestedAt: timestamp("review_requested_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -582,7 +618,22 @@ export const invoiceLineItems = pgTable(
     confidence: numeric("confidence", { precision: 4, scale: 3 }),
     confirmedCategory: lineCategory("confirmed_category"),
     confirmedValueCents: integer("confirmed_value_cents"),
+    // Human-confirmed grouping (editable in review) — the parser's utility/
+    // supply_group/component are a suggestion; these override for reconciliation.
+    confirmedUtility: text("confirmed_utility"),
+    confirmedSupplyGroup: text("confirmed_supply_group"),
+    confirmedComponent: text("confirmed_component"),
     isImpermissibleAddOn: boolean("is_impermissible_add_on").notNull().default(false),
+    // Canonical grouping (Slice: grouped parsing) — utility + supply group + the
+    // physical unit/quantity/rate the line was billed on. `component` is derived
+    // from the unit (kWh→active_energy, kVA→demand, …) so grouping survives any
+    // landlord's invoice format.
+    utility: text("utility"),
+    supplyGroup: text("supply_group"),
+    unit: text("unit"),
+    quantity: numeric("quantity", { precision: 14, scale: 4 }),
+    rate: numeric("rate", { precision: 14, scale: 6 }),
+    component: text("component"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -636,6 +687,13 @@ export const reconciliations = pgTable(
     gapMinutesTotal: integer("gap_minutes_total").notNull().default(0),
     breakdown: jsonb("breakdown"),
     status: reconStatus("status").notNull().default("draft"),
+    // Sparks QA workflow. A newly generated recon is 'provisional' — the customer
+    // sees the numbers immediately but the sealed dispute PDF only unlocks once an
+    // operator signs it off ('reviewed'); 'flagged' means QA found a problem.
+    reviewStatus: text("review_status").notNull().default("provisional"),
+    reviewedByUserId: text("reviewed_by_user_id"),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewNote: text("review_note"),
     version: integer("version").notNull().default(1),
     pdfStorageKey: text("pdf_storage_key"),
     pdfHash: text("pdf_hash"),
@@ -687,6 +745,8 @@ export const alertDeliveries = pgTable(
     status: deliveryStatus("status").notNull().default("pending"),
     providerRef: text("provider_ref"),
     sentAt: timestamp("sent_at", { withTimezone: true }),
+    // Per-recipient read state for the in-app inbox (app-channel rows only).
+    readAt: timestamp("read_at", { withTimezone: true }),
   },
   (t) => ({
     alertIdx: index("alert_deliv_idx").on(t.alertId),

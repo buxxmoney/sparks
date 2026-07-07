@@ -1,21 +1,25 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
-  getDb,
-  sites,
-  siteAccess,
+  auditLog,
   billingPeriods,
+  dataGaps,
+  demandIntervals,
+  devices,
+  getDb,
+  landlordInvoices,
+  meters,
+  reconciliations,
+  siteAccess,
+  siteTariffAssignments,
+  sites,
   tariffProfiles,
   tariffRates,
-  siteTariffAssignments,
-  landlordInvoices,
-  demandIntervals,
-  dataGaps,
-  meters,
-  devices,
-  reconciliations,
-  auditLog,
 } from "@sparks/db";
 import { eq } from "drizzle-orm";
+import type { AuthContext } from "../middleware";
+import { hashBuffer } from "../reports";
+import { reconciliationGeneratePdf, reportGetPdf } from "../routers";
+import { getObject } from "../storage";
 import { generateReportPdf } from "../workers";
 
 const db = getDb();
@@ -198,7 +202,9 @@ describe("Report PDF Generation", () => {
       intervals.push({
         meterId,
         siteId,
-        intervalStart: new Date(`2026-01-${String(Math.floor(i / 24) + 1).padStart(2, "0")}T${String(i % 24).padStart(2, "0")}:00:00Z`),
+        intervalStart: new Date(
+          `2026-01-${String(Math.floor(i / 24) + 1).padStart(2, "0")}T${String(i % 24).padStart(2, "0")}:00:00Z`,
+        ),
         intervalMinutes: 60,
         activeEnergyKwh: "50",
         reactiveEnergyKvarh: "10",
@@ -460,6 +466,98 @@ describe("Report PDF Generation", () => {
       expect(updated?.pdfHash).toBe(result.pdfHash);
       expect(updated?.version).toBe(result.version);
       expect(updated?.generatedAt).toBeDefined();
+    });
+
+    it("persists retrievable bytes whose sha256 matches the stored pdf_hash", async () => {
+      const result = await generateReportPdf(reconId, userId);
+      // The bytes are actually in object storage (not silently discarded), and the
+      // stored hash is honest — the R6 end-to-end integrity guarantee.
+      const stored = await getObject(result.pdfStorageKey);
+      expect(stored.length).toBeGreaterThan(0);
+      expect(hashBuffer(stored)).toBe(result.pdfHash);
+    });
+  });
+
+  describe("reconciliation.generatePdf procedure (R6)", () => {
+    const ownerCtx: AuthContext = { userId, sessionId: "sess-reports", organizationId: orgId };
+
+    // The sealed PDF is gated on Sparks QA sign-off (review_status='reviewed').
+    const signOff = () =>
+      getDb()
+        .update(reconciliations)
+        .set({ reviewStatus: "reviewed" })
+        .where(eq(reconciliations.id, reconId));
+
+    it("refuses to seal a reconciliation still under Sparks review (provisional)", async () => {
+      await getDb()
+        .update(reconciliations)
+        .set({ reviewStatus: "provisional" })
+        .where(eq(reconciliations.id, reconId));
+      try {
+        await reconciliationGeneratePdf(ownerCtx, { reconId });
+        expect.unreachable("Should have refused a provisional reconciliation");
+      } catch (e: unknown) {
+        expect((e as Error).message).toContain("under Sparks review");
+      }
+    });
+
+    it("generates a sealed PDF through the procedure and getPdf returns a signed URL", async () => {
+      await signOff();
+      const result = await reconciliationGeneratePdf(ownerCtx, { reconId });
+      expect(result.pdfHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(result.version).toBe(1);
+
+      // Downloadable bytes match the stored hash (end-to-end seal integrity).
+      const stored = await getObject(result.pdfStorageKey);
+      expect(hashBuffer(stored)).toBe(result.pdfHash);
+
+      // report.getPdf only yields a URL once the PDF exists.
+      const pdf = await reportGetPdf(ownerCtx, { reconId });
+      expect(pdf.pdfHash).toBe(result.pdfHash);
+      expect(pdf.presignedUrl).toContain("/reports/file");
+      expect(pdf.presignedUrl).toContain("token=");
+    });
+
+    it("report.getPdf refuses before a PDF has been generated", async () => {
+      try {
+        await reportGetPdf(ownerCtx, { reconId });
+        expect.unreachable("Should have thrown");
+      } catch (e: unknown) {
+        expect((e as Error).message).toContain("generatePdf");
+      }
+    });
+
+    it("denies a user without access to the site", async () => {
+      const outsiderCtx: AuthContext = {
+        userId: "outsider-reports",
+        sessionId: "sess-outsider",
+        organizationId: "other-org",
+      };
+      try {
+        await reconciliationGeneratePdf(outsiderCtx, { reconId });
+        expect.unreachable("Should have thrown");
+      } catch (e: unknown) {
+        expect(e).toBeDefined();
+      }
+    });
+
+    it("serves the sealed PDF over the signed /reports/file route with matching bytes", async () => {
+      const { app } = await import("../index");
+      await signOff();
+      const gen = await reconciliationGeneratePdf(ownerCtx, { reconId });
+      const { presignedUrl } = await reportGetPdf(ownerCtx, { reconId });
+
+      const res = await app.request(presignedUrl);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("application/pdf");
+      const downloaded = Buffer.from(await res.arrayBuffer());
+      // The downloaded bytes are the sealed PDF and their hash matches what was stored.
+      expect(hashBuffer(downloaded)).toBe(gen.pdfHash);
+
+      // A tampered signature is rejected.
+      const tampered = presignedUrl.replace(/token=[a-f0-9]+/, "token=deadbeef");
+      const denied = await app.request(tampered);
+      expect(denied.status).toBe(403);
     });
   });
 });

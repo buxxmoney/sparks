@@ -1,66 +1,44 @@
-import { useEffect, useState } from "react";
-import { getSelectedOrganization } from "./useOrganizationContext";
+import { useCallback, useEffect, useState } from "react";
 
-export function useRPC<T>(method: string, params?: unknown, deps: any[] = []) {
+/**
+ * Runs a typed oRPC client call and tracks loading/error/data, re-running when
+ * `deps` change. Pass `null` as the fetcher when the call isn't ready yet
+ * (e.g. an id hasn't loaded) — the hook stays idle without firing.
+ *
+ * Usage:
+ *   const { data, loading, error, refetch } = useRPC(
+ *     orgId ? () => client.sites.list({ organizationId: orgId }) : null,
+ *     [orgId],
+ *   );
+ */
+export function useRPC<T>(fetcher: (() => Promise<T>) | null, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(fetcher !== null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // For session.me and session.listMemberships, allow undefined params since they don't need them
-    // For other methods, undefined params means we're not ready yet
-    const allowedWithoutParams = ["session.me", "session.listMemberships"];
-    const shouldSkip = params === undefined && !allowedWithoutParams.includes(method);
+  const isReady = fetcher !== null;
 
-    if (shouldSkip) {
+  const run = useCallback(async () => {
+    if (!fetcher) {
       setData(null);
       setLoading(false);
       return;
     }
+    setLoading(true);
+    setError(null);
+    try {
+      setData(await fetcher());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady, ...deps]);
 
-    const fetchData = async () => {
-      setLoading(true);
-      setError(null);
+  useEffect(() => {
+    run();
+  }, [run]);
 
-      try {
-        const orgId = getSelectedOrganization();
-        const headers: HeadersInit = {
-          "Content-Type": "application/json",
-        };
-
-        if (orgId) {
-          headers["x-organization-id"] = orgId;
-        }
-
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`,
-          {
-            method: "POST",
-            headers,
-            credentials: "include",
-            body: JSON.stringify({
-              method,
-              params,
-            }),
-          },
-        );
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || `HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        setData(result);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown error");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
-  }, [method, ...(deps.length > 0 ? deps : [params])]);
-
-  return { data, loading, error };
+  return { data, loading, error, refetch: run };
 }

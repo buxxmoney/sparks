@@ -1,28 +1,27 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
-  getDb,
-  sites,
-  siteAccess,
   billingPeriods,
-  landlordInvoices,
+  demandIntervals,
+  devices,
+  getDb,
   invoiceLineItems,
+  landlordInvoices,
+  meters,
+  reconciliations,
+  siteAccess,
+  siteTariffAssignments,
+  sites,
   tariffProfiles,
   tariffRates,
-  siteTariffAssignments,
-  reconciliations,
-  devices,
-  meters,
-  demandIntervals,
 } from "@sparks/db";
-import { eq } from "drizzle-orm";
 import type { AuthContext } from "../middleware";
 import {
+  invoicesConfirm,
   invoicesCreateUpload,
   invoicesGet,
   invoicesListLineItems,
-  invoicesUpdateLineItem,
-  invoicesConfirm,
   invoicesLock,
+  invoicesUpdateLineItem,
   reconciliationGenerate,
   reconciliationGet,
 } from "../routers";
@@ -262,9 +261,7 @@ describe("Invoice End-to-End Workflow", () => {
     });
 
     expect(lineItemsResult.lineItems.length).toBe(2);
-    expect(lineItemsResult.lineItems[0].rawLabel).toBe(
-      "Active Energy 1200 kWh @ R2.50",
-    );
+    expect(lineItemsResult.lineItems[0].rawLabel).toBe("Active Energy 1200 kWh @ R2.50");
     expect(lineItemsResult.lineItems[0].parsedValueCents).toBe(300000);
     expect(lineItemsResult.lineItems[1].parsedCategory).toBe("demand");
     console.log("✅ Line items verified");
@@ -333,48 +330,21 @@ describe("Invoice End-to-End Workflow", () => {
     expect(recon.expectedLandlordCents).toBeDefined();
     console.log("✅ Reconciliation verified with measured data");
 
-    console.log(
-      "\n✨ END-TO-END WORKFLOW COMPLETE: upload → parse → confirm → lock → reconcile",
-    );
+    console.log("\n✨ END-TO-END WORKFLOW COMPLETE: upload → parse → confirm → lock → reconcile");
   });
 
   it("rejects reconciliation without locked invoice", async () => {
-    // Create invoice but don't lock it
-    const uploadResult = await invoicesCreateUpload(siteOwnerCtx, {
+    // Create an invoice but leave it unlocked (still parsed_pending_confirm).
+    await invoicesCreateUpload(siteOwnerCtx, {
       siteId,
       billingPeriodId,
     });
 
-    const invoiceId = uploadResult.invoiceId;
-
-    // Try to generate reconciliation (should work - it creates draft)
-    const reconResult = await reconciliationGenerate(siteOwnerCtx, {
-      billingPeriodId,
-    });
-
-    expect(reconResult.status).toBe("draft");
-
-    // But if we try to finalize, it should reject
+    // R5 guard: reconciliation must not be generated against an unlocked invoice —
+    // only a locked invoice's confirmed totals are dispute-grade.
     try {
-      // This should fail because invoice is not locked
-      await db
-        .update(reconciliations)
-        .set({
-          invoiceId,
-          status: "final",
-        })
-        .where(eq(reconciliations.id, reconResult.reconId));
-
-      // In real scenario, reconciliationFinalize checks invoice.status
-      const invoice = await db.query.landlordInvoices.findFirst({
-        where: eq(landlordInvoices.id, invoiceId),
-      });
-
-      if (invoice?.status !== "locked") {
-        throw new Error("Invoice must be locked before finalizing reconciliation");
-      }
-
-      expect.unreachable();
+      await reconciliationGenerate(siteOwnerCtx, { billingPeriodId });
+      expect.unreachable("Should have thrown because the invoice is not locked");
     } catch (e) {
       expect((e as Error).message).toContain("locked");
     }

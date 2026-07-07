@@ -1,368 +1,284 @@
 "use client";
 
-import { useParams, useRouter } from "next/navigation";
-import Link from "next/link";
-import { useState, useEffect } from "react";
+import { type GroupedLine, InvoiceReview, type ReviewLine } from "@/components/invoice-review";
+import { client } from "@/lib/client";
 import { useRPC } from "@/lib/useRPC";
+import { Badge } from "@astryxdesign/core/Badge";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
+import { Heading } from "@astryxdesign/core/Heading";
+import { Link } from "@astryxdesign/core/Link";
+import { Skeleton } from "@astryxdesign/core/Skeleton";
+import { Stack } from "@astryxdesign/core/Stack";
+import { Text } from "@astryxdesign/core/Text";
+import { ArrowLeft, CalendarRange, RotateCcw, Scale } from "lucide-react";
+import { useParams } from "next/navigation";
+import { useEffect, useState } from "react";
 
-interface LineItem {
-  id: string;
-  parsedCategory: string;
-  parsedValueCents: number;
-  confidence: number;
-  confirmedCategory?: string;
-  confirmedValueCents?: number;
+type BadgeVariant = "neutral" | "success" | "warning";
+
+function fmtDate(d: string | Date) {
+  return new Date(d).toLocaleDateString();
 }
 
-interface Invoice {
-  id: string;
-  status: string;
-  billingPeriodStart: string;
-  billingPeriodEnd: string;
-  confirmedActiveCents?: number;
-  confirmedDemandCents?: number;
-  confirmedReactiveCents?: number;
-  confirmedFixedCents?: number;
-  confirmedTotalCents?: number;
+// The stored period is half-open [start, end); show the INCLUSIVE dates the user
+// recognises from the invoice (end = stored end − 1 day) as YYYY-MM-DD.
+function toDateInput(d: string | Date, dayOffset = 0): string {
+  const dt = new Date(d);
+  dt.setUTCDate(dt.getUTCDate() + dayOffset);
+  return dt.toISOString().slice(0, 10);
+}
+
+function fmtRand(cents: number) {
+  return `R ${(cents / 100).toFixed(2)}`;
 }
 
 export default function InvoiceDetailPage() {
   const params = useParams();
-  const router = useRouter();
   const siteId = params.siteId as string;
   const invoiceId = params.invoiceId as string;
 
-  const [lineItems, setLineItems] = useState<LineItem[]>([]);
+  const [lines, setLines] = useState<ReviewLine[]>([]);
   const [error, setError] = useState("");
-  const [confirmLoading, setConfirmLoading] = useState(false);
-  const [lockLoading, setLockLoading] = useState(false);
+  const [sendLoading, setSendLoading] = useState(false);
+  const [reopenLoading, setReopenLoading] = useState(false);
+  const [sentMsg, setSentMsg] = useState("");
+  const [sentReconId, setSentReconId] = useState<string | null>(null);
 
-  const { data: invoice, loading: invoiceLoading } = useRPC<Invoice>(
-    "invoices.get",
-    { invoiceId },
-    [invoiceId],
-  );
+  // Editable billing period (read from the invoice; shown as inclusive dates).
+  const [periodStart, setPeriodStart] = useState("");
+  const [periodEnd, setPeriodEnd] = useState("");
+  const [periodMsg, setPeriodMsg] = useState<"idle" | "saving" | "saved">("idle");
+
+  const {
+    data: invoice,
+    loading: invoiceLoading,
+    refetch: refetchInvoice,
+  } = useRPC(() => client.invoices.get({ invoiceId }), [invoiceId]);
+  const { data: site } = useRPC(() => client.sites.get({ siteId }), [siteId]);
+  // Viewers are read-only; editors and above can send for review / reopen.
+  const canAct = site ? site.myLevel !== "viewer" : false;
+
+  useEffect(() => {
+    if (invoice) {
+      setPeriodStart(toDateInput(invoice.billingPeriodStart));
+      setPeriodEnd(toDateInput(invoice.billingPeriodEnd, -1)); // stored end is exclusive
+    }
+  }, [invoice]);
+
+  const savePeriod = async () => {
+    setPeriodMsg("saving");
+    setError("");
+    try {
+      await client.invoices.setPeriod({
+        invoiceId,
+        periodStart: new Date(periodStart),
+        periodEnd: new Date(periodEnd),
+      });
+      await refetchInvoice();
+      setPeriodMsg("saved");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update the billing period");
+      setPeriodMsg("idle");
+    }
+  };
 
   useEffect(() => {
     if (invoice && invoice.status === "parsed_pending_confirm") {
       const fetchLineItems = async () => {
         try {
-          const response = await fetch(
-            `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              credentials: "include",
-              body: JSON.stringify({
-                method: "invoices.listLineItems",
-                params: { invoiceId },
-              }),
-            },
+          const data = await client.invoices.listLineItems({ invoiceId });
+          setLines(
+            data.lineItems.map((li) => ({
+              id: li.id,
+              rawLabel: li.rawLabel,
+              // Prefer any previously-confirmed grouping (e.g. after a Reopen).
+              component: li.confirmedComponent ?? li.component ?? "other",
+              utility: li.confirmedUtility ?? li.utility ?? "other",
+              supplyGroup: li.confirmedSupplyGroup ?? li.supplyGroup ?? "unknown",
+              unit: li.unit ?? null,
+              quantity:
+                li.quantity !== null && li.quantity !== undefined ? Number(li.quantity) : null,
+              rate: li.rate !== null && li.rate !== undefined ? Number(li.rate) : null,
+              valueCents: li.confirmedValueCents ?? li.parsedValueCents ?? 0,
+            })),
           );
-
-          if (response.ok) {
-            const data = await response.json();
-            setLineItems(data.lineItems || []);
-          }
         } catch (err) {
           console.error("Failed to load line items", err);
         }
       };
-
       fetchLineItems();
     }
   }, [invoice, invoiceId]);
 
-  const handleLineItemChange = (itemId: string, field: string, value: any) => {
-    setLineItems((items) =>
-      items.map((item) => (item.id === itemId ? { ...item, [field]: value } : item)),
-    );
-  };
-
-  const handleConfirm = async () => {
-    setConfirmLoading(true);
+  // "Send to Sparks for review": pin the parser's numbers (confirm + freeze +
+  // generate the provisional reconciliation) and flag it for the QA queue. Sparks
+  // corrects the grouping and verifies; the customer just waits to hear back.
+  const handleSend = async (grouped: GroupedLine[], note: string) => {
+    setSendLoading(true);
     setError("");
-
+    setSentMsg("");
     try {
-      // Update all line items
-      for (const item of lineItems) {
-        if (item.confirmedCategory || item.confirmedValueCents) {
-          await fetch(
-            `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              credentials: "include",
-              body: JSON.stringify({
-                method: "invoices.updateLineItem",
-                params: {
-                  lineItemId: item.id,
-                  confirmedCategory: item.confirmedCategory,
-                  confirmedValueCents: item.confirmedValueCents,
-                },
-              }),
-            },
-          );
-        }
-      }
-
-      // Calculate totals
-      let totalCents = 0;
-      let activeCents = 0;
-      let demandCents = 0;
-      let reactiveCents = 0;
-      let fixedCents = 0;
-
-      for (const item of lineItems) {
-        const value = item.confirmedValueCents || item.parsedValueCents;
-        const category = item.confirmedCategory || item.parsedCategory;
-
-        if (category === "active_energy") activeCents += value;
-        else if (category === "demand") demandCents += value;
-        else if (category === "reactive_energy") reactiveCents += value;
-        else if (category === "fixed") fixedCents += value;
-
-        totalCents += value;
-      }
-
-      // Confirm invoice
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            method: "invoices.confirm",
-            params: {
-              invoiceId,
-              confirmedActiveCents: activeCents,
-              confirmedDemandCents: demandCents,
-              confirmedReactiveCents: reactiveCents,
-              confirmedFixedCents: fixedCents,
-              confirmedTotalCents: totalCents,
-            },
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        setError(data.error || "Confirmation failed");
-        return;
-      }
-
-      // Refresh invoice data
-      router.refresh();
+      const data = await client.invoices.confirmReconcile({ invoiceId, lines: grouped });
+      await client.invoices.requestReview({ invoiceId, note: note || undefined });
+      setSentReconId(data.reconId);
+      setSentMsg("Sent to Sparks — our team will review your bill and get back to you.");
+      await refetchInvoice();
     } catch (err) {
-      setError("Failed to confirm invoice");
+      setError(err instanceof Error ? err.message : "Failed to send for review");
     } finally {
-      setConfirmLoading(false);
+      setSendLoading(false);
     }
   };
 
-  const handleLock = async () => {
-    setLockLoading(true);
+  const handleReopen = async () => {
+    setReopenLoading(true);
     setError("");
-
     try {
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc/call`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            method: "invoices.lock",
-            params: { invoiceId },
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        setError(data.error || "Lock failed");
-        return;
-      }
-
-      router.refresh();
+      await client.invoices.reopen({ invoiceId });
+      await refetchInvoice();
     } catch (err) {
-      setError("Failed to lock invoice");
+      setError(err instanceof Error ? err.message : "Failed to reopen invoice");
     } finally {
-      setLockLoading(false);
+      setReopenLoading(false);
     }
   };
 
   if (invoiceLoading) {
     return (
-      <div className="page-container">
-        <p>Loading invoice...</p>
-      </div>
+      <Stack gap={5}>
+        <Skeleton height={32} width={220} />
+        <Skeleton height={180} />
+      </Stack>
     );
   }
 
   if (!invoice) {
-    return (
-      <div className="page-container">
-        <div className="alert alert-danger">Invoice not found</div>
-      </div>
-    );
+    return <Banner status="error" title="Invoice not found" />;
   }
 
-  const isNeedsReview = invoice.status === "uploaded";
   const isPendingConfirm = invoice.status === "parsed_pending_confirm";
   const isConfirmed = invoice.status === "confirmed";
   const isLocked = invoice.status === "locked";
+  const statusVariant: BadgeVariant = isLocked || isConfirmed ? "success" : "warning";
 
   return (
-    <div className="page-container">
-      <Link href={`/sites/${siteId}/invoices`} style={{ color: "#0066cc", marginBottom: "1rem", display: "inline-block" }}>
-        ← Back to Invoices
-      </Link>
-
-      <div className="flex-between" style={{ marginBottom: "2rem" }}>
-        <h1>Invoice Review</h1>
-        <span className="badge badge-primary">{invoice.status}</span>
-      </div>
-
-      {error && <div className="alert alert-danger">{error}</div>}
-
-      <div className="content-card">
-        <h2 style={{ marginBottom: "1rem" }}>Billing Period</h2>
-        <p>
-          {new Date(invoice.billingPeriodStart).toLocaleDateString()} -{" "}
-          {new Date(invoice.billingPeriodEnd).toLocaleDateString()}
-        </p>
-      </div>
-
-      {isPendingConfirm && (
-        <div className="content-card">
-          <h2 style={{ marginBottom: "1rem" }}>Review Line Items</h2>
-
-          <div className="alert alert-info">
-            Review the parsed line items below. Items with low confidence (&lt; 80%) are highlighted.
-          </div>
-
-          {lineItems.length > 0 ? (
-            <table style={{ marginTop: "1rem" }}>
-              <thead>
-                <tr>
-                  <th>Category</th>
-                  <th>Confidence</th>
-                  <th>Value</th>
-                  <th>Corrected Category</th>
-                  <th>Corrected Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {lineItems.map((item) => (
-                  <tr
-                    key={item.id}
-                    style={{
-                      backgroundColor: item.confidence < 80 ? "#fff3cd" : "transparent",
-                    }}
-                  >
-                    <td>{item.parsedCategory}</td>
-                    <td>
-                      <div style={{ width: "100px" }}>
-                        <div style={{ background: "#ddd", height: "4px", borderRadius: "2px", overflow: "hidden" }}>
-                          <div
-                            style={{
-                              background: item.confidence < 80 ? "#ffc107" : "#28a745",
-                              height: "100%",
-                              width: `${item.confidence}%`,
-                            }}
-                          />
-                        </div>
-                        <small>{item.confidence}%</small>
-                      </div>
-                    </td>
-                    <td>R {(item.parsedValueCents / 100).toFixed(2)}</td>
-                    <td>
-                      <select
-                        className="form-select"
-                        value={item.confirmedCategory || ""}
-                        onChange={(e) => handleLineItemChange(item.id, "confirmedCategory", e.target.value)}
-                        style={{ width: "150px" }}
-                      >
-                        <option value="">Use parsed</option>
-                        <option value="active_energy">Active Energy</option>
-                        <option value="demand">Demand</option>
-                        <option value="reactive_energy">Reactive Energy</option>
-                        <option value="fixed">Fixed</option>
-                        <option value="ancillary">Ancillary</option>
-                      </select>
-                    </td>
-                    <td>
-                      <input
-                        type="number"
-                        className="form-input"
-                        value={item.confirmedValueCents || ""}
-                        onChange={(e) => handleLineItemChange(item.id, "confirmedValueCents", parseInt(e.target.value) || 0)}
-                        placeholder="Cents"
-                        style={{ width: "100px" }}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p>No line items found.</p>
-          )}
-
-          <div style={{ marginTop: "2rem", display: "flex", gap: "1rem" }}>
-            <button onClick={handleConfirm} className="btn btn-success" disabled={confirmLoading}>
-              {confirmLoading ? "Confirming..." : "Confirm & Lock"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {isConfirmed && (
-        <div className="content-card">
-          <h2 style={{ marginBottom: "1rem" }}>Confirmed Amounts</h2>
-          <div className="grid grid-cols-2">
-            <div>
-              <p style={{ color: "#6c757d" }}>Active Energy</p>
-              <p>R {(invoice.confirmedActiveCents! / 100).toFixed(2)}</p>
-            </div>
-            <div>
-              <p style={{ color: "#6c757d" }}>Demand</p>
-              <p>R {(invoice.confirmedDemandCents! / 100).toFixed(2)}</p>
-            </div>
-            <div>
-              <p style={{ color: "#6c757d" }}>Reactive Energy</p>
-              <p>R {(invoice.confirmedReactiveCents! / 100).toFixed(2)}</p>
-            </div>
-            <div>
-              <p style={{ color: "#6c757d" }}>Fixed</p>
-              <p>R {(invoice.confirmedFixedCents! / 100).toFixed(2)}</p>
-            </div>
-          </div>
-
-          <div style={{ marginTop: "1.5rem", paddingTop: "1.5rem", borderTop: "1px solid #ddd" }}>
-            <p style={{ fontSize: "1.25rem", fontWeight: "600" }}>
-              Total: R {(invoice.confirmedTotalCents! / 100).toFixed(2)}
-            </p>
-          </div>
-
-          <div style={{ marginTop: "2rem", display: "flex", gap: "1rem" }}>
-            <button onClick={handleLock} className="btn btn-success" disabled={lockLoading}>
-              {lockLoading ? "Locking..." : "Lock Invoice"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {isLocked && (
-        <div className="content-card">
-          <div className="alert alert-success">Invoice is locked and ready for reconciliation.</div>
-          <Link href={`/sites/${siteId}/reconciliation`} className="btn btn-primary">
-            View Reconciliation
+    <Stack gap={5}>
+      <Stack direction="horizontal" justify="between" align="end" wrap="wrap" gap={3}>
+        <Stack gap={2}>
+          <Link href={`/sites/${siteId}/invoices`}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <ArrowLeft size={16} /> Back to invoices
+            </span>
           </Link>
-        </div>
-      )}
-    </div>
+          <Heading level={2}>Invoice review</Heading>
+        </Stack>
+        <Badge variant={statusVariant} label={invoice.status.replace(/_/g, " ")} />
+      </Stack>
+
+      {error ? <Banner status="error" title={error} /> : null}
+
+      <Card padding={5}>
+        <Stack gap={3}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <CalendarRange size={16} color="hsl(221 83% 45%)" />
+            <Text weight="semibold">Billing period</Text>
+            <Text type="supporting">— read from the invoice; fix it here if it's wrong</Text>
+          </span>
+          {isPendingConfirm ? (
+            <Stack direction="horizontal" gap={3} align="end" wrap="wrap">
+              <Stack gap={1}>
+                <Text type="supporting">From</Text>
+                <input
+                  type="date"
+                  value={periodStart}
+                  onChange={(e) => {
+                    setPeriodStart(e.target.value);
+                    setPeriodMsg("idle");
+                  }}
+                />
+              </Stack>
+              <Stack gap={1}>
+                <Text type="supporting">To (last day billed)</Text>
+                <input
+                  type="date"
+                  value={periodEnd}
+                  onChange={(e) => {
+                    setPeriodEnd(e.target.value);
+                    setPeriodMsg("idle");
+                  }}
+                />
+              </Stack>
+              <Button
+                label={periodMsg === "saving" ? "Saving…" : "Save period"}
+                variant="secondary"
+                isLoading={periodMsg === "saving"}
+                onClick={savePeriod}
+              />
+              {periodMsg === "saved" ? <Text type="supporting">Saved.</Text> : null}
+            </Stack>
+          ) : (
+            <Text>
+              {fmtDate(invoice.billingPeriodStart)} –{" "}
+              {fmtDate(toDateInput(invoice.billingPeriodEnd, -1))}
+            </Text>
+          )}
+        </Stack>
+      </Card>
+
+      {isPendingConfirm ? (
+        <Card padding={5}>
+          <Stack gap={4}>
+            <Text weight="semibold">Your electricity charges</Text>
+            {lines.length > 0 ? (
+              <InvoiceReview
+                lines={lines}
+                onSend={handleSend}
+                sendLoading={sendLoading}
+                canSend={canAct}
+              />
+            ) : (
+              <Text type="supporting">No line items found.</Text>
+            )}
+          </Stack>
+        </Card>
+      ) : null}
+
+      {(isConfirmed || isLocked) && !isPendingConfirm ? (
+        <Card padding={5}>
+          <Stack gap={4}>
+            <Banner
+              status="success"
+              title={sentMsg || "Sent to Sparks — our team is reviewing your bill."}
+              description="We'll check the charges against your meter and get back to you. Your reconciliation is provisional until we've verified it."
+            />
+            <Heading level={4}>
+              Reconcilable total: {fmtRand(invoice.confirmedTotalCents ?? 0)}
+            </Heading>
+            <Stack direction="horizontal" gap={3} wrap="wrap">
+              <Button
+                label="View reconciliation"
+                variant="primary"
+                icon={<Scale size={16} />}
+                href={
+                  sentReconId
+                    ? `/sites/${siteId}/reconciliation/${sentReconId}`
+                    : `/sites/${siteId}/reconciliation`
+                }
+              />
+              <Button
+                label={reopenLoading ? "Reopening…" : "Reopen"}
+                variant="secondary"
+                icon={<RotateCcw size={16} />}
+                isLoading={reopenLoading}
+                onClick={handleReopen}
+                isDisabled={!isLocked || !canAct}
+              />
+            </Stack>
+          </Stack>
+        </Card>
+      ) : null}
+    </Stack>
   );
 }

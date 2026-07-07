@@ -1,57 +1,27 @@
-export interface RPCClientOptions {
+import { createORPCClient } from "@orpc/client";
+import { RPCLink } from "@orpc/client/fetch";
+import type { RouterClient } from "@orpc/server";
+import type { AppRouter } from "@sparks/server";
+
+// Fully-typed client for the Sparks oRPC API, shared by web and (later) mobile.
+// Calls look like `client.sites.list({ organizationId })` with end-to-end types
+// inferred from the server procedures — a wrong input or output access fails tsc.
+export type SparksClient = RouterClient<AppRouter>;
+
+export interface CreateClientOptions {
+  /** Base URL of the server, e.g. http://localhost:3001 (no trailing /rpc). */
   baseUrl: string;
-  headers?: Record<string, string>;
+  /** Extra headers evaluated on every call (e.g. the selected organization id). */
+  headers?: () => Record<string, string>;
 }
 
-export interface AuthHeaders {
-  "x-session-id"?: string;
-  "x-user-id"?: string;
-  "x-organization-id"?: string;
-}
+export function createSparksClient(options: CreateClientOptions): SparksClient {
+  const link = new RPCLink({
+    url: `${options.baseUrl.replace(/\/$/, "")}/rpc`,
+    headers: options.headers,
+    // Include cookies so the better-auth session travels with every request.
+    fetch: (request, init) => globalThis.fetch(request, { ...init, credentials: "include" }),
+  });
 
-export class RPCClient {
-  private baseUrl: string;
-  private defaultHeaders: Record<string, string> = {};
-
-  constructor(options: RPCClientOptions) {
-    this.baseUrl = options.baseUrl;
-    this.defaultHeaders = options.headers || {};
-  }
-
-  async call<T = unknown>(
-    procedure: string,
-    input?: unknown,
-    authHeaders?: AuthHeaders,
-  ): Promise<T> {
-    const url = new URL("/rpc/call", this.baseUrl);
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      ...this.defaultHeaders,
-      ...(authHeaders || {}),
-    };
-
-    const response = await fetch(url.toString(), {
-      method: "POST",
-      headers,
-      credentials: "include",
-      body: JSON.stringify({
-        method: procedure,
-        params: input,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => null);
-      throw new Error(
-        `RPC call failed: ${procedure} - ${response.status} ${response.statusText}: ${errorData?.message || ""}`,
-      );
-    }
-
-    return response.json();
-  }
-}
-
-export function createClient(options: RPCClientOptions) {
-  return new RPCClient(options);
+  return createORPCClient<SparksClient>(link);
 }

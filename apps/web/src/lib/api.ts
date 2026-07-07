@@ -1,16 +1,7 @@
-import { createClient, type RPCClientOptions } from "@sparks/api";
 import { clearSelectedOrganization } from "./useOrganizationContext";
 
-const getApiUrl = () => {
-  if (typeof window === "undefined") {
-    return process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-  }
-  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-};
-
-export const apiClient = createClient({
-  baseUrl: getApiUrl(),
-});
+const getApiUrl = () =>
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 export async function getSessionData() {
   try {
