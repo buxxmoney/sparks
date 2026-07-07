@@ -1,6 +1,6 @@
-import { chromium } from "playwright";
 import { createHash } from "node:crypto";
-import type { Reconciliation, Site, Meter, Device } from "@sparks/db";
+import type { Device, Meter, Reconciliation, Site } from "@sparks/db";
+import { chromium } from "playwright";
 
 export interface ReportData {
   reconciliation: Reconciliation;
@@ -38,6 +38,48 @@ export function renderReportHtml(data: ReportData): string {
     return Number(val).toFixed(decimals);
   };
 
+  // Component-by-component comparison, persisted in the reconciliation breakdown.
+  const components =
+    (
+      recon.breakdown as {
+        components?: Array<{
+          label: string;
+          chargedCents: number;
+          expectedLandlordCents: number;
+          discrepancyVsLandlordCents: number;
+        }>;
+      } | null
+    )?.components ?? [];
+  const componentRows = components
+    .map((c) => {
+      const d = c.discrepancyVsLandlordCents;
+      const cls = d > 0 ? "negative" : d < 0 ? "positive" : "";
+      return `<tr>
+        <td>${c.label}</td>
+        <td>${formatCents(c.chargedCents)}</td>
+        <td>${formatCents(c.expectedLandlordCents)}</td>
+        <td class="${cls}">${d > 0 ? "+" : ""}${formatCents(d)}</td>
+      </tr>`;
+    })
+    .join("");
+  const componentSection = components.length
+    ? `<div class="section">
+      <h2>Charge-by-charge comparison</h2>
+      <table class="pricing-table">
+        <thead><tr><th>Component</th><th>Charged</th><th>Expected (landlord tariff)</th><th>Discrepancy</th></tr></thead>
+        <tbody>${componentRows}
+          <tr class="discrepancy">
+            <td>Total</td>
+            <td>${formatCents(recon.chargedTotalCents)}</td>
+            <td>${formatCents(recon.expectedLandlordCents)}</td>
+            <td class="${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "negative" : "positive"}">${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "+" : ""}${formatCents(recon.discrepancyVsLandlordCents)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="font-size:11px;color:#777;margin-top:8px;">A positive discrepancy indicates the amount charged exceeds what the meter reading priced at the landlord tariff supports.</p>
+    </div>`
+    : "";
+
   const gapsText =
     recon.dataIntegrityStatus === "gaps_present"
       ? `⚠ Data contains ${recon.gapCount} gap(s) totaling ${recon.gapMinutesTotal} minutes. Measured data may understate actual usage.`
@@ -59,6 +101,25 @@ export function renderReportHtml(data: ReportData): string {
       background: #fff;
     }
     .container { max-width: 900px; margin: 0 auto; }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding-bottom: 16px;
+      margin-bottom: 20px;
+      border-bottom: 2px solid #0b1220;
+    }
+    .brand .mark {
+      width: 40px;
+      height: 40px;
+      border-radius: 9px;
+      background: #0b1220;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .brand .wordmark { font-size: 20px; font-weight: 700; color: #0b1220; letter-spacing: -0.01em; }
+    .brand .tagline { font-size: 11px; color: #888; margin-top: 1px; }
     h1 { font-size: 24px; margin: 0 0 10px 0; color: #1a1a1a; }
     .subtitle { color: #666; font-size: 14px; margin-bottom: 20px; }
     .section {
@@ -157,6 +218,18 @@ export function renderReportHtml(data: ReportData): string {
 </head>
 <body>
   <div class="container">
+    <div class="brand">
+      <span class="mark">
+        <svg width="26" height="26" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6 24 H15.5 C18.2 24 18.6 37 22 37 C25.4 37 25 11 28.5 11 C32 11 31.8 24 34.5 24 H42"
+            stroke="#3b82f6" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <span>
+        <div class="wordmark">Sparks</div>
+        <div class="tagline">Energy Reconciliation</div>
+      </span>
+    </div>
     <h1>Electricity Reconciliation Report</h1>
     <div class="subtitle">Dispute-ready report with measured vs. billed reconciliation</div>
 
@@ -274,7 +347,9 @@ export function renderReportHtml(data: ReportData): string {
               ${recon.discrepancyVsLandlordCents ? (recon.discrepancyVsLandlordCents < 0 ? "−" : "+") : ""}${formatCents(Math.abs(recon.discrepancyVsLandlordCents || 0))}
             </td>
           </tr>
-          ${ceilingTariffName ? `
+          ${
+            ceilingTariffName
+              ? `
           <tr>
             <td>Legal Ceiling (${ceilingTariffName})</td>
             <td>${formatCents(recon.expectedCeilingCents)}</td>
@@ -283,10 +358,14 @@ export function renderReportHtml(data: ReportData): string {
               ${recon.discrepancyVsCeilingCents ? (recon.discrepancyVsCeilingCents < 0 ? "−" : "+") : ""}${formatCents(Math.abs(recon.discrepancyVsCeilingCents || 0))}
             </td>
           </tr>
-          ` : ""}
+          `
+              : ""
+          }
         </tbody>
       </table>
     </div>
+
+    ${componentSection}
 
     <!-- Data Integrity -->
     <div class="section">
@@ -334,7 +413,10 @@ export async function renderHtmlToPdf(html: string): Promise<Buffer> {
   try {
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: "networkidle" });
-    const pdfBuffer = await page.pdf({ format: "A4", margin: { top: 20, bottom: 20, left: 20, right: 20 } });
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      margin: { top: 20, bottom: 20, left: 20, right: 20 },
+    });
     await page.close();
     return pdfBuffer;
   } finally {

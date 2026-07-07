@@ -1,7 +1,21 @@
-import { db, meters, readings, demandIntervals, dataGaps, devices, alerts, sites, landlordInvoices, reconciliations, tariffProfiles, auditLog } from "@sparks/db";
-import { eq, and, asc } from "drizzle-orm";
+import {
+  alerts,
+  auditLog,
+  dataGaps,
+  db,
+  demandIntervals,
+  devices,
+  landlordInvoices,
+  meters,
+  readings,
+  reconciliations,
+  sites,
+  tariffProfiles,
+} from "@sparks/db";
+import { and, asc, eq } from "drizzle-orm";
 import { parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
-import { renderReportHtml, renderHtmlToPdf, hashBuffer } from "./reports";
+import { hashBuffer, renderHtmlToPdf, renderReportHtml } from "./reports";
+import { putObject } from "./storage";
 
 /**
  * Aggregate readings into demand intervals for a meter.
@@ -9,22 +23,14 @@ import { renderReportHtml, renderHtmlToPdf, hashBuffer } from "./reports";
  * Derives avg_demand_kw/kva from cumulative energy deltas.
  */
 export async function aggregateDemandIntervals(meterId: string): Promise<void> {
-  const meterList = await db
-    .select()
-    .from(meters)
-    .where(eq(meters.id, meterId))
-    .limit(1);
+  const meterList = await db.select().from(meters).where(eq(meters.id, meterId)).limit(1);
 
   const meter = meterList[0];
   if (!meter) {
     throw new Error(`Meter ${meterId} not found`);
   }
 
-  const siteList = await db
-    .select()
-    .from(sites)
-    .where(eq(sites.id, meter.siteId))
-    .limit(1);
+  const siteList = await db.select().from(sites).where(eq(sites.id, meter.siteId)).limit(1);
 
   const site = siteList[0];
   if (!site) {
@@ -174,11 +180,7 @@ function alignToInterval(date: Date, intervalMinutes: number): Date {
  * Detect data gaps based on sequence discontinuity or incomplete intervals.
  */
 export async function detectDataGaps(meterId: string): Promise<void> {
-  const meterList = await db
-    .select()
-    .from(meters)
-    .where(eq(meters.id, meterId))
-    .limit(1);
+  const meterList = await db.select().from(meters).where(eq(meters.id, meterId)).limit(1);
 
   const meter = meterList[0];
   if (!meter) {
@@ -217,12 +219,7 @@ export async function detectDataGaps(meterId: string): Promise<void> {
   const incompleteIntervals = await db
     .select()
     .from(demandIntervals)
-    .where(
-      and(
-        eq(demandIntervals.meterId, meterId),
-        eq(demandIntervals.isComplete, false),
-      )
-    );
+    .where(and(eq(demandIntervals.meterId, meterId), eq(demandIntervals.isComplete, false)));
 
   for (const interval of incompleteIntervals) {
     const intervalStart = new Date(interval.intervalStart);
@@ -236,7 +233,7 @@ export async function detectDataGaps(meterId: string): Promise<void> {
           eq(dataGaps.meterId, meterId),
           eq(dataGaps.gapStart, intervalStart),
           eq(dataGaps.gapEnd, intervalEnd),
-        )
+        ),
       )
       .limit(1);
 
@@ -277,11 +274,7 @@ export async function evaluateDeviceOffline(
   deviceId: string,
   thresholdMinutes = 15,
 ): Promise<void> {
-  const deviceList = await db
-    .select()
-    .from(devices)
-    .where(eq(devices.id, deviceId))
-    .limit(1);
+  const deviceList = await db.select().from(devices).where(eq(devices.id, deviceId)).limit(1);
 
   const device = deviceList[0];
   if (!device) {
@@ -292,11 +285,7 @@ export async function evaluateDeviceOffline(
     throw new Error(`Device ${deviceId} not associated with a site`);
   }
 
-  const siteList = await db
-    .select()
-    .from(sites)
-    .where(eq(sites.id, device.siteId))
-    .limit(1);
+  const siteList = await db.select().from(sites).where(eq(sites.id, device.siteId)).limit(1);
 
   const site = siteList[0];
   if (!site) {
@@ -318,7 +307,7 @@ export async function evaluateDeviceOffline(
           eq(alerts.deviceId, deviceId),
           eq(alerts.type, "device_offline"),
           eq(alerts.status, "open"),
-        )
+        ),
       )
       .limit(1);
 
@@ -357,7 +346,7 @@ export async function evaluateDeviceOffline(
           eq(alerts.deviceId, deviceId),
           eq(alerts.type, "device_offline"),
           eq(alerts.status, "open"),
-        )
+        ),
       )
       .limit(1);
 
@@ -395,7 +384,7 @@ export async function triggerInvoiceParse(invoiceId: string, pdfContent: Buffer)
       .set({ status: "parsing" })
       .where(eq(landlordInvoices.id, invoiceId));
 
-    const parsed = await parseInvoiceWithClaude(invoiceId, pdfContent);
+    const parsed = await parseInvoiceWithClaude(pdfContent);
     await persistParsedInvoice(invoiceId, parsed);
   } catch (error) {
     await db
@@ -414,7 +403,10 @@ export async function triggerInvoiceParse(invoiceId: string, pdfContent: Buffer)
  * Stores PDF in private bucket; bumps version on regeneration (never overwrites prior versions).
  * Writes audit_log entry on generation.
  */
-export async function generateReportPdf(reconId: string, userId: string): Promise<{ pdfStorageKey: string; pdfHash: string; version: number }> {
+export async function generateReportPdf(
+  reconId: string,
+  userId: string,
+): Promise<{ pdfStorageKey: string; pdfHash: string; version: number }> {
   const recon = await db.query.reconciliations.findFirst({
     where: eq(reconciliations.id, reconId),
   });
@@ -495,8 +487,12 @@ export async function generateReportPdf(reconId: string, userId: string): Promis
   // Determine version and storage key
   // If PDF already exists, increment version; otherwise start at 1
   const currentVersion = recon.version || 1;
-  const newVersion = (recon.pdfStorageKey ? currentVersion + 1 : 1);
+  const newVersion = recon.pdfStorageKey ? currentVersion + 1 : 1;
   const pdfStorageKey = `reports/${recon.siteId}/${recon.id}/v${newVersion}.pdf`;
+
+  // Persist the sealed PDF bytes to object storage. A new versioned key means
+  // prior versions are never overwritten (immutable evidence trail).
+  await putObject(pdfStorageKey, pdfBuffer);
 
   // Update reconciliation with PDF metadata
   await db

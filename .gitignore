@@ -8,7 +8,13 @@ coverage
 *.env
 *.env.local
 *.env.*.local
+.env.test
+*.env.test
+.env.*
 .claude
 .idea
 .vscode/*.log
 bun.lockb
+
+# Legacy scratch phase notes (removed — kept secrets out of git)
+PHASE_*.md

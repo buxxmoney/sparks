@@ -1,0 +1,21 @@
+@import '@astryxdesign/core/reset.css';
+@import '@astryxdesign/core/astryx.css';
+@import '@astryxdesign/theme-neutral/theme.css';
+
+/* App surface + font. The Astryx theme drives component colours; this only sets
+   the page background behind the shell and the base font metrics. */
+body {
+  background-color: hsl(210 40% 98%);
+  color: hsl(222 47% 11%);
+  font-feature-settings: "rlig" 1, "calt" 1;
+}
+
+/* Recharts: inherit our theme + soften the default tooltip chrome. */
+.recharts-surface {
+  overflow: visible;
+}
+.recharts-default-tooltip {
+  border-radius: 0.75rem !important;
+  border: 1px solid hsl(214 32% 91%) !important;
+  box-shadow: 0 4px 16px rgb(15 23 42 / 0.08) !important;
+}

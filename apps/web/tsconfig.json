@@ -2,7 +2,6 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "outDir": "./.next",
-    "rootDir": "./src",
     "jsx": "preserve",
     "lib": [
       "es2020",
@@ -13,6 +12,9 @@
     "paths": {
       "@/*": [
         "./src/*"
+      ],
+      "@sparks/server": [
+        "../../apps/server/src"
       ],
       "@sparks/*": [
         "../../packages/*/src"

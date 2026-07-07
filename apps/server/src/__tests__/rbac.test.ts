@@ -1,13 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDb, sites, siteAccess } from "@sparks/db";
+import { getDb, sites, siteAccess, member, organization, user } from "@sparks/db";
 import { eq, and } from "drizzle-orm";
 import {
   requireOrg,
   requireSiteAccess,
+  requirePlatformOperator,
+  isOrgOwner,
   ForbiddenError,
   type AuthContext,
 } from "../middleware";
 import { sessionMe } from "../procedures";
+import { tariffsProfilesCreate } from "../routers";
 
 describe("RBAC Middleware", () => {
   const testOrgId = "test-org-001";
@@ -208,5 +211,166 @@ describe("RBAC Middleware", () => {
         expect(error.message).toContain("Site not found");
       }
     }
+  });
+});
+
+/**
+ * R2 — org plugin (member table) + platform-operator gate. These exercise the
+ * NEW authorization paths: org owners reach every site in their org purely via
+ * better-auth `member` (no per-site grant), and requirePlatformOperator reads the
+ * real `isPlatformOperator` user flag.
+ */
+describe("RBAC — org membership & platform operator", () => {
+  const orgId = "r2-test-org";
+  const otherOrgId = "r2-other-org";
+  const orgOwnerUserId = "r2-org-owner";
+  const platformOpUserId = "r2-platform-op";
+  const regularUserId = "r2-regular";
+  let siteA: string;
+  let siteB: string;
+
+  const ownerCtx: AuthContext = {
+    userId: orgOwnerUserId,
+    sessionId: "r2-session-owner",
+    organizationId: orgId,
+  };
+  const regularCtx: AuthContext = {
+    userId: regularUserId,
+    sessionId: "r2-session-regular",
+    organizationId: orgId,
+  };
+
+  beforeEach(async () => {
+    const db = getDb();
+
+    // better-auth-owned rows: two orgs, three users, one owner membership.
+    await db.insert(organization).values([
+      { id: orgId, name: "R2 Org" },
+      { id: otherOrgId, name: "R2 Other Org" },
+    ]);
+    await db.insert(user).values([
+      { id: orgOwnerUserId, email: "r2-owner@example.com", isPlatformOperator: false },
+      { id: platformOpUserId, email: "r2-op@example.com", isPlatformOperator: true },
+      { id: regularUserId, email: "r2-regular@example.com", isPlatformOperator: false },
+    ]);
+    await db.insert(member).values({
+      id: "r2-member-owner",
+      organizationId: orgId,
+      userId: orgOwnerUserId,
+      role: "owner",
+    });
+
+    // Two sites in the org — NO site_access grants for the owner.
+    const a = await db
+      .insert(sites)
+      .values({ organizationId: orgId, name: "R2 Site A", timezone: "Africa/Johannesburg", demandIntervalMinutes: 30, status: "active" })
+      .returning();
+    siteA = a[0].id;
+    const b = await db
+      .insert(sites)
+      .values({ organizationId: orgId, name: "R2 Site B", timezone: "Africa/Johannesburg", demandIntervalMinutes: 30, status: "active" })
+      .returning();
+    siteB = b[0].id;
+  });
+
+  afterEach(async () => {
+    const db = getDb();
+    await db.delete(sites).where(eq(sites.id, siteA));
+    await db.delete(sites).where(eq(sites.id, siteB));
+    await db.delete(member).where(eq(member.organizationId, orgId));
+    await db.delete(user).where(eq(user.id, orgOwnerUserId));
+    await db.delete(user).where(eq(user.id, platformOpUserId));
+    await db.delete(user).where(eq(user.id, regularUserId));
+    await db.delete(organization).where(eq(organization.id, orgId));
+    await db.delete(organization).where(eq(organization.id, otherOrgId));
+  });
+
+  it("org owner reads ALL org sites via membership (no per-site grant)", async () => {
+    expect(await isOrgOwner(ownerCtx)).toBe(true);
+
+    const ra = await requireSiteAccess(ownerCtx, siteA);
+    expect(ra.siteId).toBe(siteA);
+    const rb = await requireSiteAccess(ownerCtx, siteB);
+    expect(rb.siteId).toBe(siteB);
+  });
+
+  it("a non-owner member with no grant is denied a site", async () => {
+    // regularUser is not a member/owner and has no site_access grant.
+    expect(await isOrgOwner(regularCtx)).toBe(false);
+    try {
+      await requireSiteAccess(regularCtx, siteA);
+      expect.unreachable("Should have thrown ForbiddenError");
+    } catch (error) {
+      expect(error instanceof ForbiddenError).toBe(true);
+      expect((error as Error).message).toContain("No access to site");
+    }
+  });
+
+  it("cross-org owner cannot reach another org's site", async () => {
+    const crossCtx: AuthContext = {
+      userId: orgOwnerUserId,
+      sessionId: "r2-session-owner",
+      organizationId: otherOrgId, // owner of orgId, but acting as otherOrgId
+    };
+    try {
+      await requireSiteAccess(crossCtx, siteA);
+      expect.unreachable("Should have thrown ForbiddenError");
+    } catch (error) {
+      expect(error instanceof ForbiddenError).toBe(true);
+      expect((error as Error).message).toContain("different organization");
+    }
+  });
+
+  it("platform operator passes requirePlatformOperator", async () => {
+    await requirePlatformOperator(platformOpUserId); // resolves
+  });
+
+  it("non-operator (and unknown user) cannot pass requirePlatformOperator", async () => {
+    for (const uid of [regularUserId, "r2-nonexistent-user"]) {
+      try {
+        await requirePlatformOperator(uid);
+        expect.unreachable("Should have thrown ForbiddenError");
+      } catch (error) {
+        expect(error instanceof ForbiddenError).toBe(true);
+        expect((error as Error).message).toContain("Platform operator");
+      }
+    }
+  });
+
+  it("non-operator is denied an operator-only procedure (tariff library write)", async () => {
+    try {
+      await tariffsProfilesCreate(regularCtx, {
+        name: "Illegal Library Tariff",
+        type: "landlord_stated",
+        source: "library",
+        currency: "ZAR",
+        effectiveFrom: new Date("2026-01-01"),
+      });
+      expect.unreachable("Should have thrown ForbiddenError");
+    } catch (error) {
+      expect(error instanceof ForbiddenError).toBe(true);
+      expect((error as Error).message).toContain("Platform operator");
+    }
+  });
+
+  it("platform operator CAN create a library tariff", async () => {
+    const opCtx: AuthContext = {
+      userId: platformOpUserId,
+      sessionId: "r2-session-op",
+      organizationId: orgId,
+    };
+    const result = await tariffsProfilesCreate(opCtx, {
+      name: "Legit Library Tariff",
+      type: "landlord_stated",
+      source: "library",
+      currency: "ZAR",
+      effectiveFrom: new Date("2026-01-01"),
+    });
+    expect(result.created).toBe(true);
+
+    // cleanup the created library profile
+    const db = getDb();
+    const { tariffProfiles } = await import("@sparks/db");
+    await db.delete(tariffProfiles).where(eq(tariffProfiles.id, result.profileId));
   });
 });

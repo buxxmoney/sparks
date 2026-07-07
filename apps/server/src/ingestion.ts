@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { db, devices, meters, readings, deviceHealthSamples, sites } from "@sparks/db";
 import { eq } from "drizzle-orm";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { aggregateDemandIntervals, detectDataGaps } from "./workers";
 
 const ingestReadingsBatchInput = z.object({
   readings: z.array(
@@ -32,53 +33,108 @@ const ingestHealthInput = z.object({
   bufferedRecords: z.number().int().optional(),
 });
 
-const deviceConfigInput = z.object({
+const commissionInput = z.object({
   deviceId: z.string().uuid(),
-  provisioningToken: z.string(),
+  provisioningToken: z.string().min(1),
 });
 
-async function validateDeviceAuth(deviceId: string, apiKey: string): Promise<boolean> {
-  const deviceList = await db
-    .select()
-    .from(devices)
-    .where(eq(devices.id, deviceId))
-    .limit(1);
+/* ────────────────────────── Device HMAC auth (docs/02 §4.2, R7) ──────────────────────────
+ * The edge agent signs the *raw request body* with its device key and sends the hex
+ * signature in `x-signature`. Per spec the server stores ONLY a hash of the device key
+ * (`devices.api_key_hash`), never the key itself — so the HMAC key on both ends is the
+ * SHA-256 of the device key:
+ *
+ *   deviceKey (K)  ──issued once at commission, held only by the device──▶  never stored
+ *   apiKeyHash     = sha256(K)                                          ──▶  stored server-side
+ *   signature      = HMAC-SHA256(key = sha256(K), message = rawBody)     (device derives sha256(K))
+ *
+ * The server recomputes HMAC-SHA256 keyed by the stored `apiKeyHash` and constant-time
+ * compares. This keeps the store-only-a-hash property while giving per-request body
+ * integrity (a bearer token would not detect a tampered body). Keys are rotatable.
+ * ------------------------------------------------------------------------------------------ */
 
-  const device = deviceList[0];
-  if (!device) {
+/** SHA-256 of a device key, hex. This is what's persisted in `devices.api_key_hash`. */
+function hashDeviceKey(deviceKey: string): string {
+  return createHash("sha256").update(deviceKey).digest("hex");
+}
+
+/**
+ * Sign a raw request body the way the edge agent must. Exported so tests and the edge
+ * reference implementation share one canonical definition of the wire contract.
+ */
+export function signDeviceBody(deviceKey: string, rawBody: string): string {
+  return createHmac("sha256", hashDeviceKey(deviceKey)).update(rawBody).digest("hex");
+}
+
+/** Constant-time verify of a hex signature against the stored key hash. */
+function verifyDeviceSignature(storedKeyHash: string, rawBody: string, providedHex: string): boolean {
+  const expected = createHmac("sha256", storedKeyHash).update(rawBody).digest("hex");
+  const a = Buffer.from(expected, "hex");
+  let b: Buffer;
+  try {
+    b = Buffer.from(providedHex, "hex");
+  } catch {
     return false;
   }
+  // timingSafeEqual throws on length mismatch — guard first (length is not secret).
+  if (a.length === 0 || a.length !== b.length) {
+    return false;
+  }
+  return timingSafeEqual(a, b);
+}
 
-  const providedHash = createHash("sha256").update(apiKey).digest("hex");
-  return providedHash === device.apiKeyHash;
+/**
+ * Authenticate a signed device request. Returns the raw body (needed by the caller to
+ * parse) plus the resolved device, or an HTTP error tuple. The signature is verified over
+ * the exact bytes the device signed, so the caller must NOT re-read the body.
+ */
+async function authenticateSignedRequest(
+  c: import("hono").Context,
+): Promise<
+  | { ok: true; rawBody: string; deviceId: string }
+  | { ok: false; status: 400 | 401; error: string }
+> {
+  const deviceId = c.req.header("x-device-id");
+  const signature = c.req.header("x-signature");
+
+  if (!deviceId || !signature) {
+    return { ok: false, status: 400, error: "Missing x-device-id or x-signature header" };
+  }
+
+  const deviceList = await db.select().from(devices).where(eq(devices.id, deviceId)).limit(1);
+  const device = deviceList[0];
+  if (!device) {
+    return { ok: false, status: 401, error: "Invalid device credentials" };
+  }
+
+  const rawBody = await c.req.text();
+  if (!verifyDeviceSignature(device.apiKeyHash, rawBody, signature)) {
+    return { ok: false, status: 401, error: "Invalid signature" };
+  }
+
+  return { ok: true, rawBody, deviceId };
 }
 
 export function createIngestionRouter() {
   const router = new Hono();
 
   router.post("/readings", async (c) => {
-    const deviceId = c.req.header("x-device-id");
-    const apiKey = c.req.header("x-device-key");
-
-    if (!deviceId || !apiKey) {
-      return c.json({ error: "Missing x-device-id or x-device-key header" }, 400);
+    const authResult = await authenticateSignedRequest(c);
+    if (!authResult.ok) {
+      return c.json({ error: authResult.error }, authResult.status);
     }
-
-    const isValid = await validateDeviceAuth(deviceId, apiKey);
-    if (!isValid) {
-      return c.json({ error: "Invalid device credentials" }, 401);
-    }
+    const { rawBody, deviceId } = authResult;
 
     type IngestInput = typeof ingestReadingsBatchInput._output;
     let parsed: IngestInput;
     try {
-      const body = await c.req.json();
-      parsed = ingestReadingsBatchInput.parse(body);
+      parsed = ingestReadingsBatchInput.parse(JSON.parse(rawBody));
     } catch (err) {
       return c.json({ error: "Invalid request body" }, 400);
     }
 
     let highestSeq = 0;
+    const affectedMeters = new Set<string>();
 
     for (const reading of parsed.readings) {
       const meterList = await db
@@ -106,6 +162,7 @@ export function createIngestionRouter() {
       };
 
       try {
+        // Idempotent upsert on (meter_id, time) — a replayed batch overwrites in place.
         await db
           .insert(readings)
           .values(values)
@@ -114,11 +171,26 @@ export function createIngestionRouter() {
             set: values,
           });
 
+        affectedMeters.add(reading.meterId);
         if (reading.seq && reading.seq > highestSeq) {
           highestSeq = reading.seq;
         }
       } catch (err) {
         return c.json({ error: "Failed to insert reading" }, 500);
+      }
+    }
+
+    // Trigger aggregation + gap detection for each affected meter so demand_intervals
+    // and data_gaps populate immediately after ingest (docs/02 §4.2 on-ingest debounce;
+    // R1/R2). Awaited inline: at MVP cadence this is cheap and keeps the pipeline
+    // deterministic. Failures here must NOT lose already-committed readings, so they are
+    // logged rather than surfaced to the device (the cron re-runs aggregation regardless).
+    for (const meterId of affectedMeters) {
+      try {
+        await aggregateDemandIntervals(meterId);
+        await detectDataGaps(meterId);
+      } catch (err) {
+        console.error(`Post-ingest aggregation failed for meter ${meterId}:`, err);
       }
     }
 
@@ -129,25 +201,23 @@ export function createIngestionRouter() {
   });
 
   router.post("/health", async (c) => {
-    const deviceId = c.req.header("x-device-id");
-    const apiKey = c.req.header("x-device-key");
-
-    if (!deviceId || !apiKey) {
-      return c.json({ error: "Missing x-device-id or x-device-key header" }, 400);
+    const authResult = await authenticateSignedRequest(c);
+    if (!authResult.ok) {
+      return c.json({ error: authResult.error }, authResult.status);
     }
-
-    const isValid = await validateDeviceAuth(deviceId, apiKey);
-    if (!isValid) {
-      return c.json({ error: "Invalid device credentials" }, 401);
-    }
+    const { rawBody, deviceId } = authResult;
 
     type HealthInput = typeof ingestHealthInput._output;
     let parsed: HealthInput;
     try {
-      const body = await c.req.json();
-      parsed = ingestHealthInput.parse(body);
+      parsed = ingestHealthInput.parse(JSON.parse(rawBody));
     } catch (err) {
       return c.json({ error: "Invalid request body" }, 400);
+    }
+
+    // The signed device may only report its own health.
+    if (parsed.deviceId !== deviceId) {
+      return c.json({ error: "deviceId does not match signing device" }, 403);
     }
 
     try {
@@ -220,15 +290,58 @@ export function createDeviceRouter() {
     });
   });
 
+  // First contact from a freshly installed Pi (docs/02 §4.2). The device presents its
+  // deviceId + the one-time provisioning token issued at `devices.provision`. On success
+  // the server rotates in a fresh device key, stores ONLY its hash, and flips the device
+  // to `online`. The token is one-time by construction: commission is refused once the
+  // device leaves `provisioning`, and the key it verified against has been replaced.
   router.post("/commission", async (c) => {
+    let parsed: z.infer<typeof commissionInput>;
     try {
-      const body = await c.req.json();
-      deviceConfigInput.parse(body);
+      parsed = commissionInput.parse(await c.req.json());
     } catch (err) {
       return c.json({ error: "Invalid request body" }, 400);
     }
 
-    return c.json({ error: "Not yet implemented" }, 501);
+    const deviceList = await db
+      .select()
+      .from(devices)
+      .where(eq(devices.id, parsed.deviceId))
+      .limit(1);
+
+    const device = deviceList[0];
+    if (!device) {
+      return c.json({ error: "Device not found" }, 404);
+    }
+
+    if (device.status !== "provisioning") {
+      return c.json({ error: "Device already commissioned" }, 409);
+    }
+
+    // Constant-time check of the provisioning token against the stored hash.
+    const tokenHash = hashDeviceKey(parsed.provisioningToken);
+    const expected = Buffer.from(device.apiKeyHash, "utf8");
+    const provided = Buffer.from(tokenHash, "utf8");
+    const tokenValid =
+      expected.length === provided.length && timingSafeEqual(expected, provided);
+    if (!tokenValid) {
+      return c.json({ error: "Invalid provisioning token" }, 401);
+    }
+
+    // Issue the real device key; persist only its hash. Returned once, never again.
+    const deviceKey = randomBytes(32).toString("hex");
+    const now = new Date();
+    await db
+      .update(devices)
+      .set({
+        apiKeyHash: hashDeviceKey(deviceKey),
+        status: "online",
+        lastSeenAt: now,
+        updatedAt: now,
+      })
+      .where(eq(devices.id, parsed.deviceId));
+
+    return c.json({ deviceId: parsed.deviceId, deviceKey });
   });
 
   return router;

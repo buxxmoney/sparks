@@ -1,24 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
-  getDb,
-  sites,
-  siteAccess,
   billingPeriods,
-  landlordInvoices,
+  getDb,
   invoiceLineItems,
+  landlordInvoices,
+  siteAccess,
+  sites,
 } from "@sparks/db";
 import { eq } from "drizzle-orm";
+import { categorizeLineItem, deriveLineCategory, normalizeComponent } from "../invoices";
 import type { AuthContext } from "../middleware";
 import {
+  invoicesConfirm,
   invoicesCreateUpload,
   invoicesGet,
   invoicesList,
   invoicesListLineItems,
-  invoicesUpdateLineItem,
-  invoicesConfirm,
   invoicesLock,
+  invoicesUpdateLineItem,
 } from "../routers";
-import { categorizeLineItem } from "../invoices";
 
 const db = getDb();
 
@@ -223,7 +223,9 @@ describe("Invoice Management", () => {
     });
 
     const lowConfidenceItem = listResult.lineItems[0];
-    const confidence = lowConfidenceItem.confidence ? Number.parseFloat(lowConfidenceItem.confidence.toString()) : 0;
+    const confidence = lowConfidenceItem.confidence
+      ? Number.parseFloat(lowConfidenceItem.confidence.toString())
+      : 0;
     expect(confidence).toBeLessThan(0.7);
   });
 
@@ -462,11 +464,113 @@ describe("Line Category Categorization", () => {
   });
 
   it("handles unknown categories gracefully", () => {
-    const { category, isImpermissible } = categorizeLineItem(
-      "Unknown item",
-      "unknown_type",
-    );
+    const { category, isImpermissible } = categorizeLineItem("Unknown item", "unknown_type");
     expect(category).toBeDefined();
     expect(typeof isImpermissible).toBe("boolean");
+  });
+});
+
+describe("Canonical line grouping (unit → component)", () => {
+  // Real lines from the Metronomic (Mall of the South) + PEC (Waterfall) bills.
+  const cases: Array<{ unit: string | null; label: string; utility: string; component: string }> = [
+    {
+      unit: "kWh",
+      label: "JHB E LVD NON-TOU ACTIVE ENERGY",
+      utility: "electricity",
+      component: "active_energy",
+    },
+    {
+      unit: "kVA",
+      label: "JHB E LVD NON-TOU NETWORK DEMAND",
+      utility: "electricity",
+      component: "demand",
+    },
+    {
+      unit: "kVArh",
+      label: "JHB E LVD NON-TOU REACTIVE ENERGY",
+      utility: "electricity",
+      component: "reactive_energy",
+    },
+    {
+      unit: "Gen kWh",
+      label: "REDEFINE DGE REC (INLAND) G LESS 10% GEN ENERGY",
+      utility: "electricity",
+      component: "generation",
+    },
+    {
+      unit: "kWh",
+      label: "JHB E LVD NON-TOU NETWORK SURCH",
+      utility: "electricity",
+      component: "levy_surcharge",
+    },
+    {
+      unit: "basic",
+      label: "JHB E LVD NON-TOU SERV",
+      utility: "electricity",
+      component: "service_fixed",
+    },
+    {
+      unit: "basic",
+      label: "JHB E LVD NON-TOU NETWORK",
+      utility: "electricity",
+      component: "network",
+    },
+    {
+      unit: "kWh",
+      label: "Electricity : Energy Charge (Eskom Businessrate 1 2 3)",
+      utility: "electricity",
+      component: "active_energy",
+    },
+    {
+      unit: null,
+      label: "Network Demand Charge (Eskom : Business)",
+      utility: "electricity",
+      component: "demand",
+    },
+    {
+      unit: null,
+      label: "Electrification and Rural Subsidy Charge",
+      utility: "electricity",
+      component: "levy_surcharge",
+    },
+    {
+      unit: "kl",
+      label: "Water kL (Johannesburg : Commercial)",
+      utility: "water",
+      component: "volume",
+    },
+    {
+      unit: "kl",
+      label: "Sanitation (Johannesburg : Commercial)",
+      utility: "sanitation",
+      component: "volume",
+    },
+    { unit: null, label: "Total Vat 15.00%", utility: "vat", component: "vat" },
+  ];
+
+  it("derives the component from the physical unit across both invoice formats", () => {
+    for (const c of cases) {
+      expect(normalizeComponent(c.unit, c.label, c.utility)).toBe(c.component);
+    }
+  });
+
+  it("maps components to the coarse reconciliation buckets", () => {
+    expect(deriveLineCategory("active_energy", "energy").category).toBe("active");
+    expect(deriveLineCategory("generation", "gen energy").category).toBe("active");
+    expect(deriveLineCategory("demand", "network demand").category).toBe("demand");
+    expect(deriveLineCategory("reactive_energy", "reactive").category).toBe("reactive");
+    expect(deriveLineCategory("service_fixed", "service charge").category).toBe("fixed");
+    expect(deriveLineCategory("levy_surcharge", "electrification levy").category).toBe("fixed");
+    expect(deriveLineCategory("volume", "water").category).toBe("other");
+  });
+
+  it("flags impermissible add-ons by description regardless of component", () => {
+    const admin = deriveLineCategory("service_fixed", "Administration fee");
+    expect(admin.isImpermissible).toBe(true);
+    expect(admin.category).toBe("add_on_admin");
+
+    const metering = deriveLineCategory("service_fixed", "Metering charge");
+    expect(metering.isImpermissible).toBe(true);
+    expect(metering.category).toBe("add_on_metering");
   });
 });

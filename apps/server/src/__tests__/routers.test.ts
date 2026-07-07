@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDb, sites, siteAccess, billingCyclePolicies, billingPeriods, devices, meters } from "@sparks/db";
+import { eq } from "drizzle-orm";
+import { getDb, sites, siteAccess, billingCyclePolicies, billingPeriods, devices, meters, demandIntervals, user } from "@sparks/db";
 import type { AuthContext } from "../middleware";
 import {
   sitesList,
@@ -24,6 +25,7 @@ import {
   billingPeriodsMaterialize,
   billingPeriodsUpsert,
   billingPeriodsClose,
+  demandListIntervals,
 } from "../routers";
 import { ForbiddenError, UnauthorizedError } from "../middleware";
 
@@ -56,7 +58,21 @@ describe("oRPC Routers", () => {
     organizationId: "other-org",
   };
 
+  // Sparks internal operator — the only actor allowed to provision/remove sites.
+  const operatorUserId = "test-operator-001";
+  const operatorCtx: AuthContext = {
+    userId: operatorUserId,
+    sessionId: "session-op",
+    organizationId: orgId,
+  };
+
   beforeEach(async () => {
+    // Seed the platform-operator user row that requirePlatformOperator reads.
+    await db
+      .insert(user)
+      .values({ id: operatorUserId, email: "operator@sparks.test", isPlatformOperator: true })
+      .onConflictDoNothing();
+
     // Create test site with owner access
     const siteResult = await db
       .insert(sites)
@@ -120,6 +136,35 @@ describe("oRPC Routers", () => {
     await db.delete(billingPeriods);
     await db.delete(billingCyclePolicies);
     await db.delete(sites);
+    await db.delete(user).where(eq(user.id, operatorUserId));
+  });
+
+  /* ─────────────── Demand (charts) Tests ─────────────── */
+
+  describe("Demand Router — listIntervals", () => {
+    it("returns clock-aligned intervals in the window, oldest→newest", async () => {
+      const base = new Date("2026-07-15T00:00:00Z");
+      // Insert three 30-min intervals out of order to prove ordering.
+      await db.insert(demandIntervals).values([
+        { meterId, siteId, intervalStart: new Date(base.getTime() + 60 * 60000), intervalMinutes: 30, activeEnergyKwh: "3.000", avgDemandKw: "6.000", avgDemandKva: "6.500", reactiveEnergyKvarh: "1.000", sampleCount: 30, expectedSamples: 30, isComplete: true },
+        { meterId, siteId, intervalStart: base, intervalMinutes: 30, activeEnergyKwh: "1.000", avgDemandKw: "2.000", avgDemandKva: "2.200", reactiveEnergyKvarh: "0.500", sampleCount: 30, expectedSamples: 30, isComplete: true },
+        { meterId, siteId, intervalStart: new Date(base.getTime() + 30 * 60000), intervalMinutes: 30, activeEnergyKwh: "2.000", avgDemandKw: "4.000", avgDemandKva: "4.300", reactiveEnergyKvarh: "0.800", sampleCount: 30, expectedSamples: 30, isComplete: true },
+      ]);
+
+      const res = await demandListIntervals(ownerCtx, {
+        siteId,
+        from: base.toISOString(),
+        to: new Date(base.getTime() + 2 * 60 * 60000).toISOString(),
+      });
+
+      expect(res.intervals).toHaveLength(3);
+      expect(res.intervals.map((i) => i.avgDemandKw)).toEqual(["2.000", "4.000", "6.000"]);
+      expect(res.intervals[0]?.intervalStart).toBe(base.toISOString());
+    });
+
+    it("rejects a caller without access to the site", async () => {
+      await expect(demandListIntervals(otherCtx, { siteId })).rejects.toThrow();
+    });
   });
 
   /* ─────────────── Sites Tests ─────────────── */
@@ -155,8 +200,8 @@ describe("oRPC Routers", () => {
       }
     });
 
-    it("should create site", async () => {
-      const result = await sitesCreate(ownerCtx, {
+    it("should create site as a platform operator", async () => {
+      const result = await sitesCreate(operatorCtx, {
         organizationId: orgId,
         name: "New Site",
         timezone: "Africa/Johannesburg",
@@ -164,6 +209,20 @@ describe("oRPC Routers", () => {
       });
       expect(result.name).toBe("New Site");
       expect(result.demandIntervalMinutes).toBe(15);
+    });
+
+    it("should deny site creation to a non-operator org owner", async () => {
+      try {
+        await sitesCreate(ownerCtx, {
+          organizationId: orgId,
+          name: "Customer-made Site",
+          timezone: "Africa/Johannesburg",
+          demandIntervalMinutes: 30,
+        });
+        expect.unreachable();
+      } catch (e) {
+        expect(e instanceof ForbiddenError).toBe(true);
+      }
     });
 
     it("should update site", async () => {
@@ -194,17 +253,19 @@ describe("oRPC Routers", () => {
       }
     });
 
-    it("should delete site as owner", async () => {
-      const result = await sitesDelete(ownerCtx, { siteId });
+    it("should delete site as a platform operator", async () => {
+      const result = await sitesDelete(operatorCtx, { siteId });
       expect(result.deleted).toBe(siteId);
     });
 
-    it("should deny delete site as non-owner", async () => {
-      try {
-        await sitesDelete(managerCtx, { siteId });
-        expect.unreachable();
-      } catch (e) {
-        expect(e instanceof ForbiddenError).toBe(true);
+    it("should deny delete site to a non-operator (org owner or manager)", async () => {
+      for (const ctx of [ownerCtx, managerCtx]) {
+        try {
+          await sitesDelete(ctx, { siteId });
+          expect.unreachable();
+        } catch (e) {
+          expect(e instanceof ForbiddenError).toBe(true);
+        }
       }
     });
   });
@@ -221,10 +282,10 @@ describe("oRPC Routers", () => {
       const result = await siteAccessGrant(ownerCtx, {
         siteId,
         userId: otherUserId,
-        role: "site_manager",
+        role: "editor",
       });
       expect(result.userId).toBe(otherUserId);
-      expect(result.role).toBe("site_manager");
+      expect(result.role).toBe("editor");
     });
 
     it("should deny grant without owner role", async () => {
@@ -232,7 +293,7 @@ describe("oRPC Routers", () => {
         await siteAccessGrant(managerCtx, {
           siteId,
           userId: otherUserId,
-          role: "site_manager",
+          role: "editor",
         });
         expect.unreachable();
       } catch (e) {
@@ -244,7 +305,7 @@ describe("oRPC Routers", () => {
       await siteAccessGrant(ownerCtx, {
         siteId,
         userId: otherUserId,
-        role: "site_manager",
+        role: "editor",
       });
 
       const result = await siteAccessRevoke(ownerCtx, {
