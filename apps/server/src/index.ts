@@ -127,9 +127,11 @@ if (typeof Bun === "undefined") {
     {
       fetch: app.fetch,
       port: port,
+      // Bind all interfaces so platform proxies (Railway/Render) can reach it.
+      hostname: "0.0.0.0",
     },
     () => {
-      console.log(`Server running on http://localhost:${port}`);
+      console.log(`Server running on port ${port}`);
     },
   );
 }

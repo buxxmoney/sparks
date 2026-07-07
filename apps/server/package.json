@@ -2,13 +2,12 @@
   "name": "@sparks/server",
   "version": "0.1.0",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./src/index.ts",
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target bun",
     "check": "tsc --noEmit",
     "test": "NODE_ENV=test bun test",
-    "start": "bun dist/index.js"
+    "start": "tsx src/index.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1079.0",
@@ -23,6 +22,7 @@
     "hono": "^4.0.0",
     "playwright": "^1.40.0",
     "resend": "^6.17.1",
+    "tsx": "^4.19.2",
     "zod": "^3.25.0"
   },
   "devDependencies": {
