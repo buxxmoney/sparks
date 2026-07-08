@@ -9,6 +9,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Logo } from "@/components/Logo";
 import { client } from "@/lib/client";
+import { clearSelectedOrganization } from "@/lib/useOrganizationContext";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -40,6 +41,11 @@ export default function LoginPage() {
         setError(data.message || "Sign in failed");
         return;
       }
+
+      // Drop any org id left in localStorage by a previous account on this browser.
+      // Otherwise the client sends a stale x-organization-id the new user isn't a
+      // member of, and org-scoped calls fail. The org-selector sets the right one next.
+      clearSelectedOrganization();
 
       // Persist a phone number the user entered at set-password (that page ends
       // unauthenticated, so it stashed it for the first sign-in). Best-effort.

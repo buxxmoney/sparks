@@ -69,13 +69,20 @@ export async function requireSession(c: Context): Promise<AuthContext> {
   const organizationId = c.req.header("x-organization-id") || "";
 
   if (session?.user) {
-    if (organizationId) {
-      await requireMembership(session.user.id, organizationId);
-    }
+    // The selected org travels in a client header (from localStorage). If it's stale
+    // or belongs to another account — e.g. a different user signs in on the same
+    // browser — DON'T brick the whole session with a 403. Degrade to "no org
+    // selected" so discovery endpoints (session.listMemberships, session.me) still
+    // work and the user can pick a valid org. Org-scoped procedures stay safe: they
+    // fail closed via requireOrg / requireSiteAccess (an empty org matches nothing).
+    const validOrg =
+      organizationId && (await hasMembership(session.user.id, organizationId))
+        ? organizationId
+        : "";
     return {
       userId: session.user.id,
       sessionId: session.session?.id || "",
-      organizationId,
+      organizationId: validOrg,
       headers: c.req.raw.headers,
     };
   }
@@ -93,15 +100,13 @@ export async function requireSession(c: Context): Promise<AuthContext> {
   throw new UnauthorizedError("Missing or invalid session");
 }
 
-/** Throws unless the user is a better-auth `member` of the organization. */
-async function requireMembership(userId: string, organizationId: string): Promise<void> {
+/** True if the user is a better-auth `member` of the organization. */
+async function hasMembership(userId: string, organizationId: string): Promise<boolean> {
   const db = getDb();
   const membership = await db.query.member.findFirst({
     where: and(eq(member.userId, userId), eq(member.organizationId, organizationId)),
   });
-  if (!membership) {
-    throw new ForbiddenError("Not a member of the selected organization");
-  }
+  return Boolean(membership);
 }
 
 /** True if the user is an org-level `owner` (better-auth member role). */
