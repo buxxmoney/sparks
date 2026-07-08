@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import pg from "pg";
+import { assertDestructiveAllowed } from "./src/guard";
 
 const { Client } = pg;
 
@@ -9,6 +10,11 @@ if (!dbUrl) {
   console.error("ERROR: DATABASE_URL not set");
   process.exit(1);
 }
+
+// Migrations re-apply every file on each run and some DROP TABLE ... CASCADE — i.e.
+// re-running against a real DB destroys data. Refuse unless the target is local/test
+// or the caller has explicitly opted in via CONFIRM_PROD_DB=<dbname>.
+assertDestructiveAllowed("apply-migrations");
 
 console.log(`Connecting to: ${dbUrl.split("@")[1] || "database"}`);
 
