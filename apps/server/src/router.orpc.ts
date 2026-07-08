@@ -131,6 +131,7 @@ export const appRouter = {
   readings: {
     latest: proc(V.readingsLatestInput, R.readingsLatest),
     monthToDate: proc(V.readingsMonthToDateInput, R.readingsMonthToDate),
+    energyByPeriod: proc(V.readingsEnergyByPeriodInput, R.readingsEnergyByPeriod),
   },
   demand: {
     listIntervals: proc(V.demandListIntervalsInput, R.demandListIntervals),

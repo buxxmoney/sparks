@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { Building2, LogOut, User as UserIcon } from "lucide-react";
 import { TopNav } from "@astryxdesign/core/TopNav";
 import { MobileNavToggle } from "@astryxdesign/core/MobileNav";
@@ -14,7 +13,6 @@ import { client } from "@/lib/client";
 import { signOut } from "@/lib/api";
 
 export function Topbar({ title }: { title: string }) {
-  const router = useRouter();
   const { session } = useSession();
   const { organizationId } = useOrganization();
   const { data: memberships } = useRPC(() => client.session.listMemberships(), []);
@@ -24,7 +22,11 @@ export function Topbar({ title }: { title: string }) {
 
   const handleSignOut = async () => {
     await signOut();
-    router.push("/auth/login");
+    // Hard navigation (not router.push): a full page load discards ALL cached
+    // client state — the session (email shown here), the selected org, and every
+    // useRPC result — so the app can't keep showing a signed-out user's identity
+    // or data. A soft SPA nav left this component mounted with stale state.
+    window.location.href = "/auth/login";
   };
 
   return (

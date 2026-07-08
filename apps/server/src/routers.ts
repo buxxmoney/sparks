@@ -24,7 +24,7 @@ import {
   tariffRates,
   user,
 } from "@sparks/db";
-import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm";
 import { auth } from "./auth";
 import { type BillingPeriodPolicy, materializePeriods } from "./billing";
 import { billReviewRequestEmail, sendEmail, siteInviteEmail } from "./email";
@@ -87,6 +87,7 @@ import {
   orgListMembersInput,
   orgRemoveMemberInput,
   orgSetMemberRoleInput,
+  readingsEnergyByPeriodInput,
   readingsLatestInput,
   readingsMonthToDateInput,
   reconciliationFinalizeInput,
@@ -1889,6 +1890,11 @@ export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
   const parsed = invoicesUploadAndParseInput.parse(input);
   await requireSiteEditor(ctx, parsed.siteId);
 
+  // Correlate every log line for this upload so a 500 is traceable end-to-end.
+  const traceId = randomUUID().slice(0, 8);
+  const log = (msg: string) => console.log(`[upload ${traceId}] ${msg}`);
+  log(`start site=${parsed.siteId} user=${ctx.userId}`);
+
   const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
   if (!site) {
     throw new PreconditionError("Site not found");
@@ -1898,9 +1904,21 @@ export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
   if (pdfBuffer.length === 0) {
     throw new Error("Uploaded file is empty");
   }
+  log(`decoded pdf: ${pdfBuffer.length} bytes`);
 
   // Parse FIRST so the billing period comes from the invoice itself (not a picker).
-  const parsedInvoice = await parseInvoiceWithClaude(pdfBuffer);
+  // This calls out to Claude (and optionally poppler) — the most failure-prone step.
+  let parsedInvoice: Awaited<ReturnType<typeof parseInvoiceWithClaude>>;
+  try {
+    parsedInvoice = await parseInvoiceWithClaude(pdfBuffer);
+  } catch (err) {
+    log(`parse FAILED: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
+    throw err;
+  }
+  log(
+    `parsed: ${parsedInvoice.lineItems.length} line items, model=${parsedInvoice.parseModel}, ` +
+      `period=${parsedInvoice.periodStart ?? "?"}→${parsedInvoice.periodEnd ?? "?"}`,
+  );
 
   const { start, end } = invoicePeriodBounds(parsedInvoice.periodStart, parsedInvoice.periodEnd);
   const period = await findOrCreateInvoicePeriod(
@@ -1909,10 +1927,19 @@ export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
     end,
     site.demandIntervalMinutes ?? 30,
   );
+  log(`billing period ${period.id} (${start.toISOString()}→${end.toISOString()})`);
 
   const fileHash = createHash("sha256").update(pdfBuffer).digest("hex");
   const fileStorageKey = `invoices/${parsed.siteId}/${period.id}/${randomUUID()}.pdf`;
-  await putObject(fileStorageKey, pdfBuffer, "application/pdf");
+  try {
+    await putObject(fileStorageKey, pdfBuffer, "application/pdf");
+  } catch (err) {
+    log(
+      `storage putObject FAILED for ${fileStorageKey}: ${err instanceof Error ? err.message : err}`,
+    );
+    throw err;
+  }
+  log(`stored pdf at ${fileStorageKey}`);
 
   const [invoice] = await db
     .insert(landlordInvoices)
@@ -1929,6 +1956,7 @@ export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
     .returning();
 
   await persistParsedInvoice(invoice.id, parsedInvoice);
+  log(`done: invoice ${invoice.id} persisted`);
 
   return {
     invoiceId: invoice.id,
@@ -2597,6 +2625,82 @@ export async function readingsMonthToDate(ctx: AuthContext, input: unknown) {
     peakDemandKva: agg?.peakDemandKva ?? "0",
     intervalCount: agg?.intervalCount ?? 0,
   };
+}
+
+// Total active energy (kWh) per billing period, for the "energy across billing
+// periods" bar chart. Buckets by the site's real billing periods when it has any;
+// otherwise falls back to calendar months. `basis` tells the UI which was used so
+// it can caption the chart ("shown per calendar month until a billing period is
+// set"). Returns the trailing `limit` buckets (default 12), oldest→newest.
+export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
+  const parsed = readingsEnergyByPeriodInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+  const limit = parsed.limit ?? 12;
+
+  const periods = await db.query.billingPeriods.findMany({
+    where: eq(billingPeriods.siteId, parsed.siteId),
+    orderBy: [asc(billingPeriods.periodStart)],
+  });
+
+  if (periods.length > 0) {
+    // Bucket by real billing periods (half-open [start, end)).
+    const buckets = await Promise.all(
+      periods.map(async (p) => {
+        const [row] = await db
+          .select({
+            activeEnergyKwh: sql<string>`coalesce(sum(${demandIntervals.activeEnergyKwh}), 0)`,
+            reactiveEnergyKvarh: sql<string>`coalesce(sum(${demandIntervals.reactiveEnergyKvarh}), 0)`,
+          })
+          .from(demandIntervals)
+          .where(
+            and(
+              eq(demandIntervals.siteId, parsed.siteId),
+              gte(demandIntervals.intervalStart, p.periodStart),
+              lt(demandIntervals.intervalStart, p.periodEnd),
+            ),
+          );
+        return {
+          label:
+            p.label ??
+            new Date(p.periodStart).toLocaleDateString("en-ZA", {
+              day: "numeric",
+              month: "short",
+            }),
+          periodStart: new Date(p.periodStart).toISOString(),
+          periodEnd: new Date(p.periodEnd).toISOString(),
+          activeEnergyKwh: row?.activeEnergyKwh ?? "0",
+          reactiveEnergyKvarh: row?.reactiveEnergyKvarh ?? "0",
+        };
+      }),
+    );
+    return { basis: "billing_period" as const, periods: buckets.slice(-limit) };
+  }
+
+  // Fallback: group by calendar month (UTC) straight from the interval table.
+  const monthRows = await db
+    .select({
+      monthStart: sql<string>`date_trunc('month', ${demandIntervals.intervalStart})`,
+      activeEnergyKwh: sql<string>`coalesce(sum(${demandIntervals.activeEnergyKwh}), 0)`,
+      reactiveEnergyKvarh: sql<string>`coalesce(sum(${demandIntervals.reactiveEnergyKvarh}), 0)`,
+    })
+    .from(demandIntervals)
+    .where(eq(demandIntervals.siteId, parsed.siteId))
+    .groupBy(sql`date_trunc('month', ${demandIntervals.intervalStart})`)
+    .orderBy(asc(sql`date_trunc('month', ${demandIntervals.intervalStart})`));
+
+  const months = monthRows.map((r) => {
+    const start = new Date(r.monthStart);
+    const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1));
+    return {
+      label: start.toLocaleDateString("en-ZA", { month: "short", year: "2-digit" }),
+      periodStart: start.toISOString(),
+      periodEnd: end.toISOString(),
+      activeEnergyKwh: r.activeEnergyKwh,
+      reactiveEnergyKvarh: r.reactiveEnergyKvarh,
+    };
+  });
+
+  return { basis: "calendar_month" as const, periods: months.slice(-limit) };
 }
 
 // Clock-aligned demand intervals for a site within a window (docs/02 §4.1

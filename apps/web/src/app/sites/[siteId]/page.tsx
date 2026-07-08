@@ -88,10 +88,26 @@ export default function SiteDetailsPage() {
   const { data: mtd } = useRPC(() => client.readings.monthToDate({ siteId }), [siteId, tick]);
   const { data: devicesData } = useRPC(() => client.devices.list({ siteId }), [siteId, tick]);
   const { data: demand } = useRPC(() => client.demand.listIntervals({ siteId }), [siteId, tick]);
+  // Energy per billing period is slow-moving — no need to tie it to the 30s tick.
+  const { data: energyByPeriod } = useRPC(
+    () => client.readings.energyByPeriod({ siteId }),
+    [siteId],
+  );
 
   const reading = latest?.reading;
   const devices = devicesData?.devices ?? [];
   const intervals = demand?.intervals ?? [];
+
+  // Reactive power isn't stored on the instantaneous reading, but it's the third
+  // side of the power triangle: Q = √(S² − P²), with S = apparent (kVA), P = active
+  // (kW). Guard the root against tiny negatives from rounding.
+  const activeKw = reading?.totalPowerKw != null ? Number.parseFloat(reading.totalPowerKw) : null;
+  const apparentKva =
+    reading?.totalApparentKva != null ? Number.parseFloat(reading.totalApparentKva) : null;
+  const reactiveKvar =
+    activeKw != null && apparentKva != null && !Number.isNaN(activeKw) && !Number.isNaN(apparentKva)
+      ? Math.sqrt(Math.max(0, apparentKva * apparentKva - activeKw * activeKw))
+      : null;
 
   if (loading) {
     return (
@@ -148,56 +164,69 @@ export default function SiteDetailsPage() {
         </Stack>
       </Stack>
 
-      {/* KPI cards */}
-      <Grid columns={{ minWidth: 340, repeat: "fit" }} gap={6}>
-        <Card padding={5}>
-          <Stack gap={4}>
-            <CardHead
-              icon={<Activity size={16} />}
-              title="Current load"
-              right={
-                reading?.time ? (
-                  <Text type="supporting" size="sm">as of {new Date(reading.time).toLocaleString()}</Text>
-                ) : null
-              }
-            />
-            {reading ? (
-              <Grid columns={3} gap={4}>
-                <MetricStat label="Active Power" hint={METRIC_HINTS.activePower} value={num(reading.totalPowerKw)} unit="kW" accent="primary" />
-                <MetricStat label="Apparent Power" hint={METRIC_HINTS.apparentPower} value={num(reading.totalApparentKva)} unit="kVA" />
-                <MetricStat label="Power Factor" hint={METRIC_HINTS.powerFactor} value={num(reading.powerFactor, 3)} />
-              </Grid>
-            ) : (
+      {/* Live overview — asymmetric tile layout: the three current-load tiles
+          stack in a wider left column (apparent → reactive → active), with the
+          billing-period card beside them. Flex-wrap collapses to a single column
+          on narrow viewports. */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 24, alignItems: "flex-start" }}>
+        {/* Current load — three stacked power tiles */}
+        <div style={{ flex: "2 1 420px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <CardHead
+            icon={<Activity size={16} />}
+            title="Current load"
+            right={
+              reading?.time ? (
+                <Text type="supporting" size="sm">as of {new Date(reading.time).toLocaleString()}</Text>
+              ) : null
+            }
+          />
+          {reading ? (
+            <>
+              <Card padding={4}>
+                <MetricStat label="Apparent Power" hint={METRIC_HINTS.apparentPower} value={num(apparentKva)} unit="kVA" accent="success" />
+              </Card>
+              <Card padding={4}>
+                <MetricStat label="Reactive Power" hint={METRIC_HINTS.reactivePower} value={num(reactiveKvar)} unit="kVAr" accent="warning" />
+              </Card>
+              <Card padding={4}>
+                <MetricStat label="Active Power" hint={METRIC_HINTS.activePower} value={num(activeKw)} unit="kW" accent="primary" />
+              </Card>
+            </>
+          ) : (
+            <Card padding={4}>
               <Text type="supporting">No live readings yet for this site.</Text>
-            )}
-          </Stack>
-        </Card>
+            </Card>
+          )}
+        </div>
 
-        <Card padding={5}>
-          <Stack gap={4}>
-            <CardHead
-              icon={<CalendarRange size={16} />}
-              title="Month to date"
-              right={
-                mtd?.periodStart ? (
-                  <Text type="supporting" size="sm">since {new Date(mtd.periodStart).toLocaleDateString()}</Text>
-                ) : null
-              }
-            />
-            <Grid columns={3} gap={4}>
-              <MetricStat label="Active Energy" hint={METRIC_HINTS.activeEnergy} value={num(mtd?.activeEnergyKwh)} unit="kWh" accent="primary" />
-              <MetricStat label="Peak Demand" hint={METRIC_HINTS.peakDemand} value={num(mtd?.peakDemandKva)} unit="kVA" accent="warning" />
-              <MetricStat label="Reactive Energy" hint={METRIC_HINTS.reactiveEnergy} value={num(mtd?.reactiveEnergyKvarh)} unit="kVArh" />
-            </Grid>
-          </Stack>
-        </Card>
-      </Grid>
+        {/* Billing period — energy/demand totals for the current billing period */}
+        <div style={{ flex: "1 1 300px" }}>
+          <Card padding={5}>
+            <Stack gap={4}>
+              <CardHead
+                icon={<CalendarRange size={16} />}
+                title="Billing period"
+                right={
+                  mtd?.periodStart ? (
+                    <Text type="supporting" size="sm">since {new Date(mtd.periodStart).toLocaleDateString()}</Text>
+                  ) : null
+                }
+              />
+              <Stack gap={5}>
+                <MetricStat label="Active Energy" hint={METRIC_HINTS.activeEnergy} value={num(mtd?.activeEnergyKwh)} unit="kWh" accent="primary" />
+                <MetricStat label="Peak Demand" hint={METRIC_HINTS.peakDemand} value={num(mtd?.peakDemandKva)} unit="kVA" accent="warning" />
+                <MetricStat label="Reactive Energy" hint={METRIC_HINTS.reactiveEnergy} value={num(mtd?.reactiveEnergyKvarh)} unit="kVArh" />
+              </Stack>
+            </Stack>
+          </Card>
+        </div>
+      </div>
 
-      {/* Consumption chart (default: energy kWh; switchable) */}
+      {/* Historical — 24h power series + energy across billing periods (switchable) */}
       <Card padding={5}>
         <Stack gap={3}>
-          <CardHead icon={<BarChart3 size={16} />} title="Consumption" />
-          <ConsumptionChart intervals={intervals} />
+          <CardHead icon={<BarChart3 size={16} />} title="Historical" />
+          <ConsumptionChart intervals={intervals} energyByPeriod={energyByPeriod ?? null} />
         </Stack>
       </Card>
 

@@ -26,6 +26,7 @@ import {
   billingPeriodsUpsert,
   billingPeriodsClose,
   demandListIntervals,
+  readingsEnergyByPeriod,
 } from "../routers";
 import { ForbiddenError, UnauthorizedError } from "../middleware";
 
@@ -164,6 +165,52 @@ describe("oRPC Routers", () => {
 
     it("rejects a caller without access to the site", async () => {
       await expect(demandListIntervals(otherCtx, { siteId })).rejects.toThrow();
+    });
+  });
+
+  /* ─────────────── Energy across billing periods ─────────────── */
+
+  describe("Readings Router — energyByPeriod", () => {
+    it("falls back to calendar-month buckets when the site has no billing periods", async () => {
+      // Two intervals in the same month → one calendar bucket summing their energy.
+      const base = new Date("2026-05-10T00:00:00Z");
+      await db.insert(demandIntervals).values([
+        { meterId, siteId, intervalStart: base, intervalMinutes: 30, activeEnergyKwh: "5.000", avgDemandKw: "1", avgDemandKva: "1", reactiveEnergyKvarh: "0.500", sampleCount: 30, expectedSamples: 30, isComplete: true },
+        { meterId, siteId, intervalStart: new Date(base.getTime() + 30 * 60000), intervalMinutes: 30, activeEnergyKwh: "3.000", avgDemandKw: "1", avgDemandKva: "1", reactiveEnergyKvarh: "0.500", sampleCount: 30, expectedSamples: 30, isComplete: true },
+      ]);
+
+      const res = await readingsEnergyByPeriod(ownerCtx, { siteId });
+      expect(res.basis).toBe("calendar_month");
+      expect(res.periods).toHaveLength(1);
+      expect(Number(res.periods[0]?.activeEnergyKwh)).toBeCloseTo(8, 3);
+      expect(Number(res.periods[0]?.reactiveEnergyKvarh)).toBeCloseTo(1, 3);
+    });
+
+    it("buckets by real billing periods when the site has them", async () => {
+      await db.insert(billingPeriods).values({
+        siteId,
+        periodStart: new Date("2026-06-01T00:00:00Z"),
+        periodEnd: new Date("2026-07-01T00:00:00Z"),
+        boundaryInclusivity: "half_open",
+        demandIntervalMinutes: 30,
+        label: "June 2026",
+      });
+      await db.insert(demandIntervals).values([
+        // Inside the period → counted.
+        { meterId, siteId, intervalStart: new Date("2026-06-15T00:00:00Z"), intervalMinutes: 30, activeEnergyKwh: "10.000", avgDemandKw: "1", avgDemandKva: "1", reactiveEnergyKvarh: "2.000", sampleCount: 30, expectedSamples: 30, isComplete: true },
+        // Outside (next month) → excluded from the June bucket.
+        { meterId, siteId, intervalStart: new Date("2026-07-15T00:00:00Z"), intervalMinutes: 30, activeEnergyKwh: "99.000", avgDemandKw: "1", avgDemandKva: "1", reactiveEnergyKvarh: "9.000", sampleCount: 30, expectedSamples: 30, isComplete: true },
+      ]);
+
+      const res = await readingsEnergyByPeriod(ownerCtx, { siteId });
+      expect(res.basis).toBe("billing_period");
+      expect(res.periods).toHaveLength(1);
+      expect(res.periods[0]?.label).toBe("June 2026");
+      expect(Number(res.periods[0]?.activeEnergyKwh)).toBeCloseTo(10, 3);
+    });
+
+    it("rejects a caller without access to the site", async () => {
+      await expect(readingsEnergyByPeriod(otherCtx, { siteId })).rejects.toThrow();
     });
   });
 

@@ -99,6 +99,8 @@ export const METRIC_HINTS = {
     "The real power being drawn right now, in kilowatts (kW). This is the electricity actually doing work — what most people think of as 'usage'.",
   apparentPower:
     "Total power the supply must deliver, in kilovolt-amps (kVA) — the combination of useful (active) power and the reactive power equipment needs. Utilities often bill demand on this.",
+  reactivePower:
+    "The power drawn right now to sustain magnetic fields in motors and transformers, in kilovolt-amps reactive (kVAr). It does no useful work but the network still has to carry it.",
   powerFactor:
     "How efficiently power is used: active power ÷ apparent power, from 0 to 1. Closer to 1 is better; a low value can attract penalty charges.",
   activeEnergy:

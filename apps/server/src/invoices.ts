@@ -160,6 +160,13 @@ export function deriveLineCategory(
 }
 
 export async function parseInvoiceWithClaude(pdfContent: Buffer): Promise<ParsedInvoice> {
+  // Fail loudly and specifically if the API key is missing — otherwise the SDK
+  // throws a generic error deep in the call and the upload looks like a mystery 500.
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error(
+      "Invoice parsing is unavailable: ANTHROPIC_API_KEY is not set on the server.",
+    );
+  }
   const client = new Anthropic();
 
   const rules = `Return ONLY a JSON object (no prose, no markdown):
@@ -202,6 +209,11 @@ Rules:
   // poppler isn't installed.
   const extractedText = await extractPdfText(pdfContent);
   const source = extractedText ? "text" : "pdf";
+  console.log(
+    `[invoice-parse] pdf=${pdfContent.length}B textLayer=${
+      extractedText ? `${extractedText.length} chars` : "none (vision fallback)"
+    }`,
+  );
 
   // Adaptive model: with a clean text layer the task is transcription, not visual
   // reasoning — the faster Haiku is accurate (verified: exact reconcilable total).
@@ -245,15 +257,31 @@ ${rules}`,
         },
       ];
 
-  const response = await client.messages.create({
-    model,
-    // Structured transcription from an exact text layer — extended thinking just
-    // adds latency and eats the output budget (which truncated big bills into
-    // invalid JSON). Disable it; give the JSON a generous cap.
-    thinking: { type: "disabled" },
-    max_tokens: 16000,
-    messages: [{ role: "user", content: requestContent }],
-  });
+  let response: Anthropic.Message;
+  try {
+    response = await client.messages.create({
+      model,
+      // Structured transcription from an exact text layer — extended thinking just
+      // adds latency and eats the output budget (which truncated big bills into
+      // invalid JSON). Disable it; give the JSON a generous cap.
+      thinking: { type: "disabled" },
+      max_tokens: 16000,
+      messages: [{ role: "user", content: requestContent }],
+    });
+  } catch (err) {
+    // Anthropic SDK errors carry a status + message — log them so an auth/quota/
+    // model problem is obvious in the server logs instead of a bare 500.
+    const status = (err as { status?: number }).status;
+    console.error(
+      `[invoice-parse] Anthropic call failed (model=${model}, status=${status ?? "?"}): ${
+        err instanceof Error ? err.message : err
+      }`,
+    );
+    throw new Error(
+      `The invoice parser could not reach Claude (${status ?? "network"} error). Please try again.`,
+      { cause: err },
+    );
+  }
 
   // Find the text block — Claude 5 models (e.g. Sonnet 5) return a `thinking`
   // block first, so we can't assume content[0] is the text.

@@ -26,8 +26,24 @@ const base = os.$context<ORPCContext>().use(async ({ next }) => {
       // Client-actionable precondition — surface the message (400) instead of 500.
       throw new ORPCError("BAD_REQUEST", { message: err.message });
     }
-    // Unexpected error: log it (the browser only sees a generic 500) then rethrow.
-    console.error("[rpc] procedure error:", err);
+    // Unexpected error: the browser only sees a generic 500, so log everything we
+    // can (name, message, full stack, and any nested `cause`) to make the server
+    // logs actionable. `console.error(err)` alone often prints "[object Object]"
+    // for non-Error throwables — serialize defensively.
+    if (err instanceof Error) {
+      console.error(
+        `[rpc] procedure error: ${err.name}: ${err.message}\n${err.stack ?? "(no stack)"}`,
+      );
+      const cause = (err as { cause?: unknown }).cause;
+      if (cause) {
+        console.error(
+          "[rpc] └─ cause:",
+          cause instanceof Error ? `${cause.name}: ${cause.message}\n${cause.stack}` : cause,
+        );
+      }
+    } else {
+      console.error("[rpc] procedure error (non-Error thrown):", JSON.stringify(err));
+    }
     throw err; // oRPC maps unknown errors to INTERNAL_SERVER_ERROR (500)
   }
 });

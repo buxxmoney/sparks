@@ -2,6 +2,7 @@
 
 import { AuthShell } from "@/components/AuthShell";
 import { client } from "@/lib/client";
+import { signOut } from "@/lib/api";
 import { setSelectedOrganization } from "@/lib/useOrganizationContext";
 import { useSession } from "@/lib/useSession";
 import { Banner } from "@astryxdesign/core/Banner";
@@ -57,6 +58,15 @@ function AcceptInner() {
     );
   }
 
+  // Invitations are tied to a specific email. If the person is signed in as a
+  // different account, accepting fails server-side ("sent to a different email").
+  // Let them switch accounts here instead of getting stuck (the "mix up").
+  const switchAccount = async () => {
+    await signOut();
+    const next = encodeURIComponent(`/invite/accept?token=${token}`);
+    window.location.href = `/auth/login?next=${next}`;
+  };
+
   return (
     <Stack gap={4}>
       <Text>
@@ -73,6 +83,24 @@ function AcceptInner() {
         />
         <Link href="/dashboard">Not now</Link>
       </Stack>
+      <Text type="supporting" size="sm">
+        Invited on a different email?{" "}
+        <button
+          type="button"
+          onClick={switchAccount}
+          style={{
+            border: "none",
+            background: "none",
+            padding: 0,
+            color: "hsl(221 83% 53%)",
+            cursor: "pointer",
+            textDecoration: "underline",
+            font: "inherit",
+          }}
+        >
+          Sign in with a different account
+        </button>
+      </Text>
     </Stack>
   );
 }

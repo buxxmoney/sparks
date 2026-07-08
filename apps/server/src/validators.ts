@@ -471,6 +471,15 @@ export const readingsMonthToDateInput = z.object({
   asOf: z.coerce.date().optional(),
 });
 
+// Total active energy (kWh) bucketed per billing period, for the "energy across
+// billing periods" bar chart. When the site has real billing periods we bucket by
+// those; otherwise we fall back to calendar months (the response says which).
+export const readingsEnergyByPeriodInput = z.object({
+  siteId: z.string().uuid(),
+  // How many trailing buckets to return at most (newest kept). Defaults to 12.
+  limit: z.number().int().positive().max(36).optional(),
+});
+
 // Time-series demand intervals for charting a site's load over a window (docs/02 §4.1
 // `demand.listIntervals`). Read-only. Defaults to the last 24h when no window is given.
 export const demandListIntervalsInput = z.object({
@@ -578,4 +587,5 @@ export type InvoicesLockInput = z.infer<typeof invoicesLockInput>;
 
 export type ReadingsLatestInput = z.infer<typeof readingsLatestInput>;
 export type ReadingsMonthToDateInput = z.infer<typeof readingsMonthToDateInput>;
+export type ReadingsEnergyByPeriodInput = z.infer<typeof readingsEnergyByPeriodInput>;
 export type DemandListIntervalsInput = z.infer<typeof demandListIntervalsInput>;
