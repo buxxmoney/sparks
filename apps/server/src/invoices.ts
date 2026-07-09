@@ -597,7 +597,13 @@ Rules:
       scheduleRate: l.scheduleRate ?? null,
       scheduleRef: l.scheduleRef ?? null,
       billed: `R${(params.charges[i]?.amountRand ?? 0).toFixed(2)}`,
-      expected: l.expected != null ? `R${Number(l.expected).toFixed(2)}` : null,
+      // The model is asked for a plain number but sometimes returns a formula/words
+      // ("not computable", "qty × rate") — coerce only a finite number, else show "—"
+      // rather than leaking "RNaN" into the review email.
+      expected:
+        l.expected != null && Number.isFinite(Number(l.expected))
+          ? `R${Number(l.expected).toFixed(2)}`
+          : null,
       verdict: (l.verdict as TariffAnalysisLine["verdict"]) ?? "unknown",
       comment: l.comment ?? null,
     }));

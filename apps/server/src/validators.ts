@@ -449,6 +449,51 @@ export const alertsAcknowledgeInput = z.object({
   deliveryId: z.string().uuid(),
 });
 
+// Operator-only: assign a landlord ("stated") tariff to a site in-app, so a bill
+// whose "expected" side is pending can be priced. `rates` mirrors tariffsProfilesAddRate
+// (a landlord tariff is a profile + its rate rows). When `regenerateBillingPeriodId`
+// is given, the reconciliation for that period is recomputed against the new tariff so
+// its pending "expected" side is filled immediately.
+export const adminAssignSiteTariffInput = z.object({
+  siteId: z.string().uuid(),
+  name: z.string().min(1).max(255).default("Landlord tariff"),
+  effectiveFrom: z.coerce.date(),
+  rates: z
+    .array(
+      z.object({
+        chargeType: z.enum(["active_energy", "demand", "reactive_energy", "fixed", "ancillary"]),
+        unit: z.enum(["c_per_kwh", "r_per_kva", "c_per_kvarh", "r_per_day", "r_per_month"]),
+        rateValue: z.string().regex(/^\d+(\.\d{1,6})?$/),
+        season: z.enum(["high", "low", "all"]).default("all"),
+        touPeriod: z.enum(["peak", "standard", "offpeak", "all"]).default("all"),
+      }),
+    )
+    .min(1),
+  regenerateBillingPeriodId: z.string().uuid().optional(),
+});
+
+export const adminSiteTariffGetInput = z.object({
+  siteId: z.string().uuid(),
+});
+
+// Operator Reviewed-history search + pagination.
+export const adminListReviewedBillsInput = z.object({
+  query: z.string().max(200).optional(),
+  limit: z.number().int().min(1).max(100).default(25),
+  offset: z.number().int().min(0).default(0),
+});
+
+export const adminListOrgSitesInput = z.object({
+  organizationId: z.string().min(1),
+});
+
+// Deleting an org is destructive + irreversible — require the caller to echo its exact
+// name as a fat-finger guard.
+export const adminDeleteOrganizationInput = z.object({
+  organizationId: z.string().min(1),
+  confirmName: z.string().min(1),
+});
+
 // Operator-managed reference tariff schedules (Eskom/municipal published prices).
 export const tariffSchedulesCreateInput = z.object({
   name: z.string().min(1).max(200),

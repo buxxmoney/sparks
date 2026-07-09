@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { desc, eq, isNotNull, sql } from "drizzle-orm";
 import {
+  alerts,
   getDb,
   landlordInvoices,
   member,
   organization,
   reconciliations,
   sites,
+  tariffProfiles,
   tariffSchedules,
   user,
 } from "@sparks/db";
@@ -19,6 +21,9 @@ import { dispatchBillOutcome } from "./notifications";
 import { putObject } from "./storage";
 import {
   adminCreateCustomerInput,
+  adminDeleteOrganizationInput,
+  adminListOrgSitesInput,
+  adminListReviewedBillsInput,
   adminReviewReconciliationInput,
   tariffSchedulesCreateInput,
   tariffSchedulesDeleteInput,
@@ -126,103 +131,278 @@ export async function adminListOrganizations(ctx: AuthContext) {
 }
 
 /**
- * Operator-only Sparks QA queue: every reconciliation awaiting sign-off
- * (provisional) or that QA flagged, newest first, with the site + org context and
- * the headline discrepancy so the operator can triage and verify it.
+ * Operator-only: list the sites under an organization (cross-tenant, so operators can
+ * see + decommission them). Unlike sites.list (org-membership gated), this reads any org.
+ */
+export async function adminListOrgSites(ctx: AuthContext, input: unknown) {
+  const parsed = adminListOrgSitesInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+  const rows = await db
+    .select({
+      id: sites.id,
+      name: sites.name,
+      city: sites.city,
+      status: sites.status,
+      createdAt: sites.createdAt,
+    })
+    .from(sites)
+    .where(eq(sites.organizationId, parsed.organizationId))
+    .orderBy(sites.name);
+  return { sites: rows };
+}
+
+/**
+ * Operator-only: hard-delete an organization and everything under it — for when a
+ * customer ends their subscription. Deletes in FK-dependency order inside a transaction:
+ * its sites (cascading every site-scoped row — devices, meters, readings, invoices,
+ * reconciliations, access grants, billing periods, site-level alerts…), then its
+ * org-scoped tariff profiles and org-level alerts, then the org row itself (cascading
+ * members + invitations). The customers' USER logins are left intact (a user may belong
+ * to other orgs); the cascade only removes their membership of this org. Requires the
+ * caller to echo the exact org name as a fat-finger guard.
+ */
+export async function adminDeleteOrganization(ctx: AuthContext, input: unknown) {
+  const parsed = adminDeleteOrganizationInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+
+  const [org] = await db
+    .select({ id: organization.id, name: organization.name })
+    .from(organization)
+    .where(eq(organization.id, parsed.organizationId))
+    .limit(1);
+  if (!org) {
+    throw new Error("Organization not found");
+  }
+  if (parsed.confirmName.trim() !== org.name) {
+    throw new Error("The confirmation name does not match the organization name.");
+  }
+
+  const orgSites = await db
+    .select({ id: sites.id })
+    .from(sites)
+    .where(eq(sites.organizationId, parsed.organizationId));
+
+  await db.transaction(async (tx) => {
+    // Sites first — their FKs cascade to all site-scoped data.
+    await tx.delete(sites).where(eq(sites.organizationId, parsed.organizationId));
+    // Org-scoped rows with no FK cascade from the organization row.
+    await tx.delete(tariffProfiles).where(eq(tariffProfiles.organizationId, parsed.organizationId));
+    await tx.delete(alerts).where(eq(alerts.organizationId, parsed.organizationId));
+    // The org row — cascades better-auth members + invitations.
+    await tx.delete(organization).where(eq(organization.id, parsed.organizationId));
+  });
+
+  return { deleted: parsed.organizationId, siteCount: orgSites.length };
+}
+
+// Shared select shape for a reconciliation + its invoice/site/org context. Used by
+// both the work queue and the reviewed history so their rows line up.
+function reconContextColumns() {
+  return {
+    reconId: reconciliations.id,
+    invoiceId: reconciliations.invoiceId,
+    reviewStatus: reconciliations.reviewStatus,
+    reviewNote: reconciliations.reviewNote,
+    reviewedAt: reconciliations.reviewedAt,
+    generatedAt: reconciliations.generatedAt,
+    version: reconciliations.version,
+    siteId: reconciliations.siteId,
+    billingPeriodId: reconciliations.billingPeriodId,
+    siteName: sites.name,
+    organizationName: organization.name,
+    customerEmail: user.email,
+    billingPeriodStart: reconciliations.billingPeriodStart,
+    billingPeriodEnd: reconciliations.billingPeriodEnd,
+    chargedTotalCents: reconciliations.chargedTotalCents,
+    expectedLandlordCents: reconciliations.expectedLandlordCents,
+    discrepancyVsLandlordCents: reconciliations.discrepancyVsLandlordCents,
+    dataIntegrityStatus: reconciliations.dataIntegrityStatus,
+    reviewRequestedAt: landlordInvoices.reviewRequestedAt,
+  };
+}
+
+/**
+ * Operator-only unified work queue — the single "what needs doing" list. It merges the
+ * old "bills submitted" + "QA queue" surfaces: every submitted bill still AWAITING an
+ * operator response, one row each. A row is one of three states:
+ *   - "needs_tariff"     — submitted but produced NO reconciliation (couldn't price
+ *                          without a landlord tariff) → assign a tariff.
+ *   - "pending_expected" — has a recon but no landlord tariff yet, so the expected side
+ *                          is undetermined → assign a tariff (then it recomputes).
+ *   - "ready"            — has a full recon with an expected side → review & respond.
+ * Bills the operator has RESPONDED to (verified or sent back) leave the queue and live
+ * in the Reviewed history (adminListReviewedBills). Newest first.
  */
 export async function adminListReviewQueue(ctx: AuthContext) {
   await requirePlatformOperator(ctx.userId);
   const db = getDb();
 
-  const rows = await db
-    .select({
-      reconId: reconciliations.id,
-      reviewStatus: reconciliations.reviewStatus,
-      reviewNote: reconciliations.reviewNote,
-      generatedAt: reconciliations.generatedAt,
-      version: reconciliations.version,
-      siteId: reconciliations.siteId,
-      siteName: sites.name,
-      organizationName: organization.name,
-      billingPeriodStart: reconciliations.billingPeriodStart,
-      billingPeriodEnd: reconciliations.billingPeriodEnd,
-      chargedTotalCents: reconciliations.chargedTotalCents,
-      expectedLandlordCents: reconciliations.expectedLandlordCents,
-      discrepancyVsLandlordCents: reconciliations.discrepancyVsLandlordCents,
-      dataIntegrityStatus: reconciliations.dataIntegrityStatus,
-      reviewRequestedAt: landlordInvoices.reviewRequestedAt,
-    })
+  const reconRows = await db
+    .select(reconContextColumns())
     .from(reconciliations)
     .leftJoin(sites, eq(sites.id, reconciliations.siteId))
     .leftJoin(organization, sql`${organization.id} = ${sites.organizationId}`)
     .leftJoin(landlordInvoices, eq(landlordInvoices.id, reconciliations.invoiceId))
-    .where(inArray(reconciliations.reviewStatus, ["provisional", "flagged"]));
+    .leftJoin(user, eq(user.id, landlordInvoices.uploadedByUserId));
 
-  const queue = rows
-    .map((r) => ({ ...r, chargedTotalCents: r.chargedTotalCents ?? 0 }))
-    .sort((a, b) => {
-      // Customer-requested reviews first, then newest.
-      const ar = a.reviewRequestedAt ? 1 : 0;
-      const br = b.reviewRequestedAt ? 1 : 0;
-      if (ar !== br) return br - ar;
-      return (b.generatedAt?.getTime() ?? 0) - (a.generatedAt?.getTime() ?? 0);
-    });
+  // Reduce to the latest version per invoice (each Reopen/operator recompute adds one).
+  const latestByInvoice = new Map<string, (typeof reconRows)[number]>();
+  const orphans: typeof reconRows = []; // recons with no invoiceId — can't dedupe.
+  for (const r of reconRows) {
+    if (!r.invoiceId) {
+      orphans.push(r);
+      continue;
+    }
+    const cur = latestByInvoice.get(r.invoiceId);
+    if (!cur || r.version > cur.version) latestByInvoice.set(r.invoiceId, r);
+  }
 
-  return { queue };
-}
+  const respondedInvoices = new Set<string>();
+  const workRecons: (typeof reconRows)[number][] = [];
+  for (const r of [...latestByInvoice.values(), ...orphans]) {
+    // Responded (verified OR sent back) → history, not work.
+    if (r.reviewStatus === "reviewed" || r.reviewStatus === "flagged") {
+      if (r.invoiceId) respondedInvoices.add(r.invoiceId);
+      continue;
+    }
+    workRecons.push(r);
+  }
 
-/**
- * Operator-only: bills customers have explicitly SENT to Sparks for review. This is
- * the "who submitted what" list — it includes submissions that don't yet have a
- * reconciliation (e.g. the site has no landlord tariff, so it isn't in the QA queue
- * yet). `hasReconciliation` distinguishes the two so the operator knows the next step.
- */
-export async function adminListSubmittedInvoices(ctx: AuthContext) {
-  await requirePlatformOperator(ctx.userId);
-  const db = getDb();
+  const invoicesWithRecon = new Set(
+    reconRows.map((r) => r.invoiceId).filter((id): id is string => Boolean(id)),
+  );
 
-  const rows = await db
+  // Submitted bills that produced NO reconciliation at all → they still need a tariff.
+  const submitted = await db
     .select({
       invoiceId: landlordInvoices.id,
       siteId: landlordInvoices.siteId,
       siteName: sites.name,
       organizationName: organization.name,
       customerEmail: user.email,
+      billingPeriodId: landlordInvoices.billingPeriodId,
       billingPeriodStart: landlordInvoices.billingPeriodStart,
       billingPeriodEnd: landlordInvoices.billingPeriodEnd,
       confirmedTotalCents: landlordInvoices.confirmedTotalCents,
       reviewRequestedAt: landlordInvoices.reviewRequestedAt,
-      status: landlordInvoices.status,
     })
     .from(landlordInvoices)
     .leftJoin(sites, eq(sites.id, landlordInvoices.siteId))
     .leftJoin(organization, sql`${organization.id} = ${sites.organizationId}`)
     .leftJoin(user, eq(user.id, landlordInvoices.uploadedByUserId))
-    .where(isNotNull(landlordInvoices.reviewRequestedAt))
-    .orderBy(desc(landlordInvoices.reviewRequestedAt));
+    .where(isNotNull(landlordInvoices.reviewRequestedAt));
+
+  const queue = [
+    ...workRecons.map((r) => ({
+      reconId: r.reconId as string | null,
+      invoiceId: r.invoiceId,
+      siteId: r.siteId,
+      siteName: r.siteName,
+      organizationName: r.organizationName,
+      customerEmail: r.customerEmail,
+      billingPeriodId: r.billingPeriodId,
+      billingPeriodStart: r.billingPeriodStart,
+      billingPeriodEnd: r.billingPeriodEnd,
+      version: r.version,
+      chargedTotalCents: r.chargedTotalCents ?? 0,
+      expectedLandlordCents: r.expectedLandlordCents,
+      discrepancyVsLandlordCents: r.discrepancyVsLandlordCents,
+      dataIntegrityStatus: r.dataIntegrityStatus,
+      reviewNote: r.reviewNote,
+      reviewRequestedAt: r.reviewRequestedAt,
+      generatedAt: r.generatedAt,
+      state: r.expectedLandlordCents == null ? "pending_expected" : "ready",
+    })),
+    ...submitted
+      .filter((s) => !invoicesWithRecon.has(s.invoiceId) && !respondedInvoices.has(s.invoiceId))
+      .map((s) => ({
+        reconId: null as string | null,
+        invoiceId: s.invoiceId,
+        siteId: s.siteId,
+        siteName: s.siteName,
+        organizationName: s.organizationName,
+        customerEmail: s.customerEmail,
+        billingPeriodId: s.billingPeriodId,
+        billingPeriodStart: s.billingPeriodStart,
+        billingPeriodEnd: s.billingPeriodEnd,
+        version: 0,
+        chargedTotalCents: s.confirmedTotalCents ?? 0,
+        expectedLandlordCents: null as number | null,
+        discrepancyVsLandlordCents: null as number | null,
+        dataIntegrityStatus: null as string | null,
+        reviewNote: null as string | null,
+        reviewRequestedAt: s.reviewRequestedAt,
+        generatedAt: null as Date | null,
+        state: "needs_tariff",
+      })),
+  ].sort((a, b) => {
+    const at = a.reviewRequestedAt?.getTime() ?? a.generatedAt?.getTime() ?? 0;
+    const bt = b.reviewRequestedAt?.getTime() ?? b.generatedAt?.getTime() ?? 0;
+    return bt - at;
+  });
+
+  return { queue };
+}
+
+/**
+ * Operator-only Reviewed history — bills the operator has already responded to
+ * (verified or sent back), newest response first. Searchable by site / org / customer
+ * and paginated, since it grows without bound as bills are processed. Only the latest
+ * recon version per invoice is shown, so a bill appears once with its final outcome.
+ */
+export async function adminListReviewedBills(ctx: AuthContext, input: unknown) {
+  const parsed = adminListReviewedBillsInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
 
   const reconRows = await db
-    .select({ invoiceId: reconciliations.invoiceId, reviewStatus: reconciliations.reviewStatus })
-    .from(reconciliations);
-  // Which submissions already produced a reconciliation (those show in the QA queue)…
-  const withRecon = new Set(reconRows.map((r) => r.invoiceId));
-  // …and which have been RESPONDED to (verified or flagged) — those are handled, so
-  // they drop off this "needs attention" list once the operator replies.
-  const responded = new Set(
-    reconRows
-      .filter((r) => r.reviewStatus === "reviewed" || r.reviewStatus === "flagged")
-      .map((r) => r.invoiceId),
-  );
+    .select(reconContextColumns())
+    .from(reconciliations)
+    .leftJoin(sites, eq(sites.id, reconciliations.siteId))
+    .leftJoin(organization, sql`${organization.id} = ${sites.organizationId}`)
+    .leftJoin(landlordInvoices, eq(landlordInvoices.id, reconciliations.invoiceId))
+    .leftJoin(user, eq(user.id, landlordInvoices.uploadedByUserId));
 
-  const submissions = rows
-    .filter((r) => !responded.has(r.invoiceId))
-    .map((r) => ({
-      ...r,
-      confirmedTotalCents: r.confirmedTotalCents ?? 0,
-      hasReconciliation: withRecon.has(r.invoiceId),
-    }));
+  // Latest version per invoice, then keep only responded ones (verified/flagged).
+  const latestByInvoice = new Map<string, (typeof reconRows)[number]>();
+  for (const r of reconRows) {
+    const key = r.invoiceId ?? r.reconId;
+    const cur = latestByInvoice.get(key);
+    if (!cur || r.version > cur.version) latestByInvoice.set(key, r);
+  }
 
-  return { submissions };
+  const q = parsed.query?.trim().toLowerCase() ?? "";
+  const all = [...latestByInvoice.values()]
+    .filter((r) => r.reviewStatus === "reviewed" || r.reviewStatus === "flagged")
+    .filter(
+      (r) =>
+        !q ||
+        (r.siteName ?? "").toLowerCase().includes(q) ||
+        (r.organizationName ?? "").toLowerCase().includes(q) ||
+        (r.customerEmail ?? "").toLowerCase().includes(q),
+    )
+    .sort((a, b) => (b.reviewedAt?.getTime() ?? 0) - (a.reviewedAt?.getTime() ?? 0));
+
+  const total = all.length;
+  const page = all.slice(parsed.offset, parsed.offset + parsed.limit).map((r) => ({
+    reconId: r.reconId,
+    siteId: r.siteId,
+    siteName: r.siteName,
+    organizationName: r.organizationName,
+    customerEmail: r.customerEmail,
+    billingPeriodStart: r.billingPeriodStart,
+    billingPeriodEnd: r.billingPeriodEnd,
+    chargedTotalCents: r.chargedTotalCents ?? 0,
+    expectedLandlordCents: r.expectedLandlordCents,
+    discrepancyVsLandlordCents: r.discrepancyVsLandlordCents,
+    reviewStatus: r.reviewStatus,
+    reviewNote: r.reviewNote,
+    reviewedAt: r.reviewedAt,
+  }));
+
+  return { reviewed: page, total, offset: parsed.offset, limit: parsed.limit };
 }
 
 /**

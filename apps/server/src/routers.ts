@@ -56,6 +56,8 @@ import { dispatchInvoiceParsed, dispatchReviewSubmitted } from "./notifications"
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
 import {
+  adminAssignSiteTariffInput,
+  adminSiteTariffGetInput,
   alertsAcknowledgeInput,
   alertsAttachmentUrlInput,
   billingPeriodsCloseInput,
@@ -1308,6 +1310,139 @@ export async function tariffsAssignList(ctx: AuthContext, input: unknown) {
   return { siteId: parsed.siteId, assignments: results };
 }
 
+/**
+ * Operator-only: the landlord tariff currently on file for a site (the open
+ * `landlord` assignment + its profile + rate rows), or null when none is assigned.
+ * Powers the operator admin "assign tariff" screen — showing what's already there so
+ * a pending reconciliation's missing "expected" side can be filled in-app rather than
+ * via the seed script. Unlike `tariffsAssignList` (site-scoped, requireSiteAccess),
+ * this is cross-tenant and gated on requirePlatformOperator, since operators aren't
+ * members of the customer's org.
+ */
+export async function adminSiteTariffGet(ctx: AuthContext, input: unknown) {
+  const parsed = adminSiteTariffGetInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
+  if (!site) {
+    throw new PreconditionError("Site not found");
+  }
+
+  // The current landlord tariff = the open (effectiveTo IS NULL) landlord assignment,
+  // most-recently-effective first if several were ever left open.
+  const open = await db.query.siteTariffAssignments.findMany({
+    where: and(
+      eq(siteTariffAssignments.siteId, parsed.siteId),
+      eq(siteTariffAssignments.role, "landlord"),
+      isNull(siteTariffAssignments.effectiveTo),
+    ),
+  });
+  const assignment = open.sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
+
+  if (!assignment) {
+    return { siteId: parsed.siteId, siteName: site.name, assignment: null, profile: null, rates: [] };
+  }
+
+  const profile = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, assignment.tariffProfileId),
+  });
+  const rates = await db.query.tariffRates.findMany({
+    where: eq(tariffRates.tariffProfileId, assignment.tariffProfileId),
+  });
+
+  return { siteId: parsed.siteId, siteName: site.name, assignment, profile, rates };
+}
+
+/**
+ * Operator-only: assign a landlord ("stated") tariff to a site from the admin UI —
+ * the in-app equivalent of the seed script's profile + rates + assignment inserts.
+ * Creates a `landlord_stated`/`custom` profile scoped to the site's org, its rate
+ * rows, supersedes any open landlord assignment, and opens a new one effective from
+ * `effectiveFrom`. When `regenerateBillingPeriodId` is given, the reconciliation for
+ * that period is recomputed against the new tariff, turning a "pending" recon (no
+ * expected side) into a full one. A recompute failure is reported (not thrown) so the
+ * assignment still stands.
+ */
+export async function adminAssignSiteTariff(ctx: AuthContext, input: unknown) {
+  const parsed = adminAssignSiteTariffInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
+  if (!site) {
+    throw new PreconditionError("Site not found");
+  }
+
+  const profileId = randomUUID();
+  await db.insert(tariffProfiles).values({
+    id: profileId,
+    organizationId: site.organizationId,
+    name: parsed.name,
+    type: "landlord_stated",
+    source: "custom",
+    currency: "ZAR",
+    effectiveFrom: parsed.effectiveFrom,
+  });
+  await db.insert(tariffRates).values(
+    parsed.rates.map((r) => ({
+      id: randomUUID(),
+      tariffProfileId: profileId,
+      chargeType: r.chargeType,
+      unit: r.unit,
+      rateValue: r.rateValue,
+      season: r.season,
+      touPeriod: r.touPeriod,
+    })),
+  );
+
+  // Supersede any open landlord assignment. Close it at the new tariff's start so the
+  // period the operator is pricing resolves to the NEW assignment (the effective-date
+  // picker keeps the latest-starting assignment overlapping the period; ending the old
+  // one at effectiveFrom removes it from that overlap). Assumes effectiveFrom is at or
+  // before any prior start — true when defaulting to the bill's period start.
+  const openAssignments = await db.query.siteTariffAssignments.findMany({
+    where: and(
+      eq(siteTariffAssignments.siteId, parsed.siteId),
+      eq(siteTariffAssignments.role, "landlord"),
+      isNull(siteTariffAssignments.effectiveTo),
+    ),
+  });
+  for (const a of openAssignments) {
+    await db
+      .update(siteTariffAssignments)
+      .set({ effectiveTo: parsed.effectiveFrom })
+      .where(eq(siteTariffAssignments.id, a.id));
+  }
+
+  const assignmentId = randomUUID();
+  await db.insert(siteTariffAssignments).values({
+    id: assignmentId,
+    siteId: parsed.siteId,
+    tariffProfileId: profileId,
+    role: "landlord",
+    effectiveFrom: parsed.effectiveFrom,
+  });
+
+  // Recompute the pending reconciliation so its expected side is filled now. Best-effort:
+  // the tariff assignment is the durable outcome, so a recompute error is surfaced but
+  // never rolls the assignment back.
+  let regenerated: { reconId: string; version: number } | null = null;
+  let regenerateError: string | null = null;
+  if (parsed.regenerateBillingPeriodId) {
+    try {
+      const recon = await runReconciliationForPeriod(parsed.regenerateBillingPeriodId);
+      regenerated = { reconId: recon.reconId, version: recon.version };
+    } catch (err) {
+      regenerateError = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[adminAssignSiteTariff] recompute failed for period ${parsed.regenerateBillingPeriodId}:`,
+        err,
+      );
+    }
+  }
+
+  return { profileId, assignmentId, regenerated, regenerateError };
+}
+
 /* ─────────────── Reconciliation Router ─────────────── */
 
 /** True if an instant falls inside a billing period, honoring boundary inclusivity. */
@@ -2549,16 +2684,18 @@ async function computeTariffAnalysis(
         Math.abs(b.effectiveFrom.getTime() - periodEnd.getTime()),
     )[0];
 
-  // Infer the bill's own provider (for the reference caveat).
+  // Infer the bill's own provider (for the reference caveat). Match common
+  // abbreviations too — municipal bills print tariff codes like "JHB E LVD" or
+  // "COJ", not the full city name, so a name-only match would miss them.
   const billProvider = /eskom/i.test(labels)
     ? "Eskom"
-    : /johannesburg|city power|joburg/i.test(labels)
+    : /johannesburg|city power|joburg|\bjhb\b|\bcoj\b/i.test(labels)
       ? "City of Johannesburg / City Power"
-      : /tshwane/i.test(labels)
+      : /tshwane|\btsh\b/i.test(labels)
         ? "City of Tshwane"
-        : /ekurhuleni/i.test(labels)
+        : /ekurhuleni|\bekur\b/i.test(labels)
           ? "Ekurhuleni"
-          : /cape town/i.test(labels)
+          : /cape town|\bcct\b/i.test(labels)
             ? "City of Cape Town"
             : "the municipality/utility";
 
