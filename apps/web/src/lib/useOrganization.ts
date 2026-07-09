@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { client } from "./client";
+import { getSelectedOrganization, setSelectedOrganization } from "./useOrganizationContext";
 import { useRPC } from "./useRPC";
 
 export function useOrganization() {
@@ -11,6 +12,12 @@ export function useOrganization() {
   useEffect(() => {
     if (sessionMe?.organizationId) {
       setOrganizationId(sessionMe.organizationId);
+      // Reconcile localStorage with the server-resolved org so the x-organization-id
+      // header sent on future requests is a real membership. This heals a stale or
+      // foreign org id left by a previous account without stranding the user.
+      if (getSelectedOrganization() !== sessionMe.organizationId) {
+        setSelectedOrganization(sessionMe.organizationId);
+      }
     }
   }, [sessionMe]);
 

@@ -66,23 +66,28 @@ export async function requireSession(c: Context): Promise<AuthContext> {
     session = null;
   }
 
-  const organizationId = c.req.header("x-organization-id") || "";
+  const headerOrg = c.req.header("x-organization-id") || "";
 
   if (session?.user) {
-    // The selected org travels in a client header (from localStorage). If it's stale
-    // or belongs to another account — e.g. a different user signs in on the same
-    // browser — DON'T brick the whole session with a 403. Degrade to "no org
-    // selected" so discovery endpoints (session.listMemberships, session.me) still
-    // work and the user can pick a valid org. Org-scoped procedures stay safe: they
-    // fail closed via requireOrg / requireSiteAccess (an empty org matches nothing).
-    const validOrg =
-      organizationId && (await hasMembership(session.user.id, organizationId))
-        ? organizationId
-        : "";
+    // The selected org travels in a client header (from localStorage). Resolve the
+    // effective org: honour an explicitly-selected org the user actually belongs to;
+    // otherwise (missing, stale, or another account's org left in localStorage) fall
+    // back to the user's OWN first membership — the SAME fallback session.me uses.
+    //
+    // Why fall back instead of "": the client also derives an organizationId from
+    // session.me and passes it in request bodies. If the header resolved to "" while
+    // the body said the user's real org, requireOrg would raise "Organization
+    // mismatch" and strand a perfectly valid user. Resolving both the same way keeps
+    // them in agreement. The fallback only ever selects an org the user is a member
+    // of, so it can't grant access to anyone else's data.
+    const organizationId =
+      headerOrg && (await hasMembership(session.user.id, headerOrg))
+        ? headerOrg
+        : await firstMembershipOrg(session.user.id);
     return {
       userId: session.user.id,
       sessionId: session.session?.id || "",
-      organizationId: validOrg,
+      organizationId,
       headers: c.req.raw.headers,
     };
   }
@@ -93,7 +98,7 @@ export async function requireSession(c: Context): Promise<AuthContext> {
     const userId = c.req.header("x-user-id");
     const sessionId = c.req.header("x-session-id");
     if (userId && sessionId) {
-      return { userId, sessionId, organizationId, headers: c.req.raw.headers };
+      return { userId, sessionId, organizationId: headerOrg, headers: c.req.raw.headers };
     }
   }
 
@@ -107,6 +112,21 @@ async function hasMembership(userId: string, organizationId: string): Promise<bo
     where: and(eq(member.userId, userId), eq(member.organizationId, organizationId)),
   });
   return Boolean(membership);
+}
+
+/**
+ * The user's default org: their earliest membership (deterministic, by createdAt).
+ * MUST match the fallback order session.me uses, so the org resolved when building
+ * the request context agrees with the organizationId the client derives from
+ * session.me — otherwise requireOrg would see a mismatch. Returns "" if none.
+ */
+async function firstMembershipOrg(userId: string): Promise<string> {
+  const db = getDb();
+  const membership = await db.query.member.findFirst({
+    where: eq(member.userId, userId),
+    orderBy: (m, { asc }) => [asc(m.createdAt), asc(m.id)],
+  });
+  return membership?.organizationId ?? "";
 }
 
 /** True if the user is an org-level `owner` (better-auth member role). */
