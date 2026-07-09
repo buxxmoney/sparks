@@ -163,12 +163,21 @@ export function billReviewRequestEmail(data: {
 
 /** Renders the "Tariff analysis (AI)" block for the review email. */
 function tariffAnalysisHtml(a: TariffAnalysis | null | undefined): string {
-  if (!a) return ""; // no reference schedules on file — omit the section entirely
+  if (!a) return ""; // not an electricity bill — omit the section entirely
+  const basisTag =
+    a.basis === "reference"
+      ? ` <span style="font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;background:#fef9c3;color:#854d0e">reference baseline</span>`
+      : a.basis === "direct"
+        ? ` <span style="font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;background:#dcfce7;color:#166534">direct</span>`
+        : "";
   const heading = `<p style="margin:18px 0 6px;font-weight:600">Tariff analysis (AI)${
     a.scheduleName ? ` — vs ${escapeHtml(a.scheduleName)}` : ""
-  }</p>`;
+  }${basisTag}</p>`;
+  const context = a.contextNote
+    ? `<p style="color:#854d0e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 10px;font-size:12px;margin:0 0 8px">${escapeHtml(a.contextNote)}</p>`
+    : "";
   if (!a.available || a.lines.length === 0) {
-    return `${heading}<p style="color:#6b7280;font-size:12px">${escapeHtml(
+    return `${heading}${context}<p style="color:#6b7280;font-size:12px">${escapeHtml(
       a.note ?? "No tariff analysis available.",
     )}</p>`;
   }
@@ -196,7 +205,7 @@ function tariffAnalysisHtml(a: TariffAnalysis | null | undefined): string {
       </tr>`,
     )
     .join("");
-  return `${heading}
+  return `${heading}${context}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="text-align:left;color:#6b7280;font-size:11px">
         <th style="padding:6px 8px">Charge / tariff</th><th style="padding:6px 8px">Schedule rate / source</th>

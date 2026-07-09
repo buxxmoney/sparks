@@ -458,6 +458,12 @@ export interface TariffAnalysis {
   scheduleName: string | null;
   provider: string | null;
   note: string | null; // e.g. "No reference schedule on file for Eskom."
+  // "direct" = the schedule IS the bill's provider (a like-for-like check).
+  // "reference" = a national baseline (Eskom) shown as context for a bill from a
+  // different (e.g. municipal) provider — rates are indicative, not the bill's tariff.
+  basis?: "direct" | "reference";
+  // A short caveat about basis/tariff-year to show the reviewer up front (or null).
+  contextNote?: string | null;
   lines: TariffAnalysisLine[];
 }
 
@@ -479,9 +485,12 @@ interface AnalysisCharge {
  */
 export async function analyzeInvoiceTariffs(params: {
   scheduleName: string;
-  provider: string;
+  provider: string; // the schedule's provider (e.g. "Eskom")
   scheduleText: string;
   charges: AnalysisCharge[];
+  basis: "direct" | "reference";
+  billProvider: string; // provider inferred from the bill (may differ, e.g. "Johannesburg")
+  contextNote: string | null; // caveat about basis / tariff-year
 }): Promise<TariffAnalysis> {
   if (!process.env.ANTHROPIC_API_KEY) {
     return {
@@ -505,9 +514,17 @@ export async function analyzeInvoiceTariffs(params: {
     )
     .join("\n");
 
+  const basisInstruction =
+    params.basis === "direct"
+      ? `This schedule IS the bill's provider (${params.provider}), so treat it as the authoritative like-for-like tariff and check each charge against it.`
+      : `IMPORTANT: this bill appears to be from "${params.billProvider}", NOT ${params.provider}. The ${params.provider} schedule is provided as a NATIONAL REFERENCE BASELINE (Eskom is the state utility other tariffs derive from). So: map each charge to its nearest ${params.provider} tariff for CONTEXT, give that reference rate, but in the comment make clear it's the ${params.provider} equivalent — NOT this bill's actual tariff — so a small "over/under" may just reflect the provider difference. Set verdict "unknown" for a charge with no sensible ${params.provider} equivalent.`;
+
   const prompt = `You are a South African utility-tariff analyst helping a reviewer check a tenant's electricity/utility bill.
 
-Below is a provider's published tariff schedule ("${params.scheduleName}", provider ${params.provider}), followed by the charge lines from a specific bill. For EACH charge line, work out the applicable tariff rate and whether the billed amount is right.
+${basisInstruction}
+${params.contextNote ? `Context for the reviewer: ${params.contextNote}` : ""}
+
+Below is the "${params.scheduleName}" schedule (provider ${params.provider}), followed by the charge lines from the bill. For EACH charge line, work out the applicable tariff rate and whether the billed amount is right.
 
 <reference_schedule>
 ${params.scheduleText}
@@ -589,6 +606,8 @@ Rules:
       scheduleName: params.scheduleName,
       provider: params.provider,
       note: null,
+      basis: params.basis,
+      contextNote: params.contextNote,
       lines,
     };
   } catch {

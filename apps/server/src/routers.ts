@@ -2504,56 +2504,16 @@ export async function invoicesRequestReview(ctx: AuthContext, input: unknown) {
   return { invoiceId: parsed.invoiceId, reviewRequestedAt: new Date() };
 }
 
-// Pick the reference tariff schedule that applies to this bill (provider named in
-// its charges + effective for the period) and run the AI cross-reference. Returns
-// null when no schedules are on file at all (the email just omits the section);
-// returns an available:false analysis with a note when schedules exist but none fit.
+// Run the AI tariff cross-reference for an ELECTRICITY bill. Eskom is treated as the
+// national reference baseline: if a schedule matches the bill's own provider + period
+// we use it directly; otherwise we fall back to the nearest Eskom schedule as context
+// (rates shown as reference, not the bill's actual tariff), flagging the tariff year.
+// Returns null only when it isn't applicable (no electricity charges).
 async function computeTariffAnalysis(
   lineRows: (typeof invoiceLineItems.$inferSelect)[],
   periodStart: Date,
   periodEnd: Date,
 ): Promise<TariffAnalysis | null> {
-  const schedules = await db.query.tariffSchedules.findMany();
-  if (schedules.length === 0) return null;
-
-  const labels = lineRows.map((l) => (l.rawLabel ?? "").toLowerCase()).join(" | ");
-  const schedule = schedules
-    .filter(
-      (s) =>
-        labels.includes(s.provider.toLowerCase()) &&
-        s.effectiveFrom.getTime() <= periodEnd.getTime() &&
-        (!s.effectiveTo || s.effectiveTo.getTime() >= periodStart.getTime()),
-    )
-    .sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
-
-  if (!schedule) {
-    // Explain WHY there was no match — provider miss vs. effective-date miss — so the
-    // operator knows exactly what to upload (rather than a vague "no schedule").
-    const fmt = (d: Date) => d.toISOString().slice(0, 10);
-    const providerMatches = schedules.filter((s) => labels.includes(s.provider.toLowerCase()));
-    let note: string;
-    if (providerMatches.length === 0) {
-      const have = [...new Set(schedules.map((s) => s.provider))].join(", ") || "none";
-      note = `This bill's charges don't reference a provider we have a reference schedule for (on file: ${have}). Upload the applicable provider's schedule in operator admin.`;
-    } else {
-      const s = providerMatches.sort(
-        (a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime(),
-      )[0];
-      note = `We have a ${s.provider} schedule ("${s.name}", effective from ${fmt(s.effectiveFrom)}), but none on file covers this bill's period (${fmt(periodStart)} → ${fmt(periodEnd)}). SA tariffs run Apr–Mar, so upload the ${s.provider} schedule for that tariff year to enable rate checks on this bill.`;
-    }
-    return { available: false, scheduleName: null, provider: null, note, lines: [] };
-  }
-  if (!schedule.extractedText) {
-    return {
-      available: false,
-      scheduleName: schedule.name,
-      provider: schedule.provider,
-      note: "The matched schedule has no extracted text (a scanned PDF?). Re-upload a text-based copy.",
-      lines: [],
-    };
-  }
-
-  // Electricity charges are where named-tariff lookups matter most.
   const charges = lineRows
     .filter((l) => (l.confirmedUtility ?? l.utility ?? "") === "electricity")
     .map((l) => ({
@@ -2563,13 +2523,78 @@ async function computeTariffAnalysis(
       rate: l.rate !== null ? Number(l.rate) : null,
       amountRand: (l.confirmedValueCents ?? l.parsedValueCents ?? 0) / 100,
     }));
-  if (charges.length === 0) return null;
+  if (charges.length === 0) return null; // not an electricity bill — nothing to check
+
+  const schedules = (await db.query.tariffSchedules.findMany()).filter((s) => s.extractedText);
+  if (schedules.length === 0) {
+    return {
+      available: false,
+      scheduleName: null,
+      provider: null,
+      note: "No reference tariff schedule with usable text is on file. Upload one (e.g. the Eskom Schedule of Standard Prices) in operator admin to enable rate checks.",
+      lines: [],
+    };
+  }
+
+  const labels = lineRows.map((l) => (l.rawLabel ?? "").toLowerCase()).join(" | ");
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const covers = (s: (typeof schedules)[number]) =>
+    s.effectiveFrom.getTime() <= periodEnd.getTime() &&
+    (!s.effectiveTo || s.effectiveTo.getTime() >= periodStart.getTime());
+  const providerNamed = (s: (typeof schedules)[number]) => labels.includes(s.provider.toLowerCase());
+  const nearest = (list: typeof schedules) =>
+    [...list].sort(
+      (a, b) =>
+        Math.abs(a.effectiveFrom.getTime() - periodEnd.getTime()) -
+        Math.abs(b.effectiveFrom.getTime() - periodEnd.getTime()),
+    )[0];
+
+  // Infer the bill's own provider (for the reference caveat).
+  const billProvider = /eskom/i.test(labels)
+    ? "Eskom"
+    : /johannesburg|city power|joburg/i.test(labels)
+      ? "City of Johannesburg / City Power"
+      : /tshwane/i.test(labels)
+        ? "City of Tshwane"
+        : /ekurhuleni/i.test(labels)
+          ? "Ekurhuleni"
+          : /cape town/i.test(labels)
+            ? "City of Cape Town"
+            : "the municipality/utility";
+
+  let schedule: (typeof schedules)[number];
+  let basis: "direct" | "reference";
+  let contextNote: string | null = null;
+
+  const namedCovering = schedules.filter((s) => providerNamed(s) && covers(s));
+  const named = schedules.filter((s) => providerNamed(s));
+  if (namedCovering.length > 0) {
+    schedule = nearest(namedCovering);
+    basis = "direct";
+  } else if (named.length > 0) {
+    schedule = nearest(named);
+    basis = "direct";
+    contextNote = `Using the ${schedule.provider} schedule effective ${fmt(schedule.effectiveFrom)}; this bill covers ${fmt(periodStart)}–${fmt(periodEnd)}, so rates may be from a different tariff year (SA tariffs run Apr–Mar).`;
+  } else {
+    // No schedule for the bill's own provider → Eskom (preferred) as national baseline.
+    const eskom = schedules.filter((s) => /eskom/i.test(s.provider));
+    schedule = nearest(eskom.length > 0 ? eskom : schedules);
+    basis = "reference";
+    contextNote =
+      `This bill is from ${billProvider}, not ${schedule.provider}. ${schedule.provider}'s rates are shown as a national reference baseline — indicative context, not the bill's actual tariff.` +
+      (covers(schedule)
+        ? ""
+        : ` The schedule on file is effective ${fmt(schedule.effectiveFrom)}; the bill covers ${fmt(periodStart)}–${fmt(periodEnd)}.`);
+  }
 
   return analyzeInvoiceTariffs({
     scheduleName: schedule.name,
     provider: schedule.provider,
-    scheduleText: schedule.extractedText,
+    scheduleText: schedule.extractedText ?? "",
     charges,
+    basis,
+    billProvider,
+    contextNote,
   });
 }
 
