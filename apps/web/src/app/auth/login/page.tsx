@@ -10,11 +10,9 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { Logo } from "@/components/Logo";
 import { client } from "@/lib/client";
 import { clearSelectedOrganization } from "@/lib/useOrganizationContext";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 export default function LoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -60,9 +58,11 @@ export default function LoginPage() {
       }
 
       // Honor a post-login redirect (e.g. accepting a site invite) if it's a
-      // safe in-app path; otherwise go pick an organization.
+      // safe in-app path; otherwise go pick an organization. Use a full-page
+      // navigation so the app shell re-fetches the now-authenticated session
+      // (a client push would keep the stale signed-out session and bounce back).
       const next = new URLSearchParams(window.location.search).get("next");
-      router.push(next && next.startsWith("/") ? next : "/auth/org-selector");
+      window.location.href = next && next.startsWith("/") ? next : "/auth/org-selector";
     } catch (err) {
       setError("An error occurred. Please try again.");
     } finally {

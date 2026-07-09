@@ -42,7 +42,6 @@ export default function InvoiceDetailPage() {
   const [lines, setLines] = useState<ReviewLine[]>([]);
   const [error, setError] = useState("");
   const [sendLoading, setSendLoading] = useState(false);
-  const [reopenLoading, setReopenLoading] = useState(false);
   const [sentMsg, setSentMsg] = useState("");
   const [sentReconId, setSentReconId] = useState<string | null>(null);
 
@@ -132,18 +131,6 @@ export default function InvoiceDetailPage() {
     }
   };
 
-  const handleReopen = async () => {
-    setReopenLoading(true);
-    setError("");
-    try {
-      await client.invoices.reopen({ invoiceId });
-      await refetchInvoice();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to reopen invoice");
-    } finally {
-      setReopenLoading(false);
-    }
-  };
 
   // Parsing runs in the background. While the invoice is still being read (and hasn't
   // failed), poll every 2s so the screen flips to the review as soon as it's ready.
@@ -355,15 +342,11 @@ export default function InvoiceDetailPage() {
                     : `/sites/${siteId}/reconciliation`
                 }
               />
-              <Button
-                label={reopenLoading ? "Reopening…" : "Reopen"}
-                variant="secondary"
-                icon={<RotateCcw size={16} />}
-                isLoading={reopenLoading}
-                onClick={handleReopen}
-                isDisabled={!isLocked || !canAct}
-              />
             </Stack>
+            <Text type="supporting">
+              It's with Sparks now — we'll get back to you. Need a change? Reply to us and we'll sort
+              it out.
+            </Text>
           </Stack>
         </Card>
       ) : null}
