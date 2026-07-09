@@ -191,7 +191,13 @@ export async function parseInvoiceWithClaude(pdfContent: Buffer): Promise<Parsed
 }
 
 Rules:
-- Extract EVERY charge line shown (all utilities). Use the exact printed text for rawLabel.
+- Extract each distinct charge EXACTLY ONCE. Use the exact printed text for rawLabel.
+- CRITICAL — avoid double-counting. SA utility invoices usually show the same charges TWICE: a high-level SUMMARY/ROLLUP table (e.g. "Rand Value Totals" or a per-utility "Subtotal/VAT/Total" table, one row per utility+supply group) AND an ITEMISED breakdown (e.g. "Consumption Charges", one row per tariff component like active energy, network demand, reactive energy). For each utility+supply group:
+    • if an ITEMISED breakdown exists, extract ONLY those component rows and DO NOT also extract that group's summary/subtotal row;
+    • if the group appears ONLY in a summary (no itemised rows), extract the single summary row.
+  Extracting both the rollup AND its components would double the amount — never do that.
+- NEVER emit a subtotal, section total, per-utility/per-group rollup ("Rand Value Totals" rows), carried-forward, balance, or GRAND total as a line item. Those are sums of other lines. The grand total belongs in totalRand only.
+- Sanity check before returning: your line items for a given utility+supply group should sum to that group's printed subtotal — NOT twice it. If they'd sum to roughly double a printed subtotal, you have included both the rollup and its components; drop the rollup rows.
 - amountRand is the printed amount as a plain number in Rand (e.g. 2640.00). South African invoices may use a comma as the decimal separator and spaces or commas as thousands separators — "R2 640,00" and "R2,640.00" both mean 2640.00. Interpret correctly.
 - quantity is the consumption/units for the line; rate is the price per unit in Rand, ONLY if the invoice prints it (else null — do not compute it).
 - Credits, discounts, or negative adjustments must be NEGATIVE numbers.

@@ -136,7 +136,7 @@ export function InvoiceReview({
             )}
             <span>
               <span style={{ fontSize: 13, color: "hsl(221 83% 38%)", fontWeight: 600 }}>
-                Reconcilable total
+                Total Tenant Usage
               </span>
               <span style={{ display: "block", fontSize: 12, color: "hsl(221 60% 45%)" }}>
                 your electricity charges — tap to see how we got here
