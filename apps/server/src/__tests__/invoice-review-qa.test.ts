@@ -33,6 +33,18 @@ import {
 
 const db = getDb();
 
+// confirmReconcile now returns reconId: string | null (null when reconciliation is
+// deferred to Sparks, e.g. no landlord tariff). These tests set up a tariff, so a
+// reconId is expected — assert it and narrow the type for the rest of the test.
+async function confirmReconcileOk(
+  ctx: AuthContext,
+  input: Parameters<typeof invoicesConfirmReconcile>[1],
+) {
+  const r = await invoicesConfirmReconcile(ctx, input);
+  if (r.reconId == null) throw new Error("test expected a reconId (scenario has a tariff)");
+  return { ...r, reconId: r.reconId };
+}
+
 // The Invoice Review & QA overhaul: editable grouping → one-click confirm &
 // reconcile → provisional recon → Sparks QA sign-off unlocks the sealed PDF.
 describe("Invoice review & QA overhaul", () => {
@@ -225,7 +237,7 @@ describe("Invoice review & QA overhaul", () => {
 
   it("confirm & reconcile: edited grouping drives the reconcilable base, locks, and lands provisional", async () => {
     // The user pulls the mis-grouped "Network charge" up into tenant electricity.
-    const result = await invoicesConfirmReconcile(ownerCtx, {
+    const result = await confirmReconcileOk(ownerCtx, {
       invoiceId,
       lines: [
         { lineItemId: activeLineId, utility: "electricity", supplyGroup: "tenant", component: "active_energy", valueCents: 300000 },
@@ -257,7 +269,7 @@ describe("Invoice review & QA overhaul", () => {
   });
 
   it("keeps water out of the reconcilable base when left grouped as water", async () => {
-    const result = await invoicesConfirmReconcile(ownerCtx, {
+    const result = await confirmReconcileOk(ownerCtx, {
       invoiceId,
       lines: [
         { lineItemId: activeLineId, utility: "electricity", supplyGroup: "tenant", component: "active_energy", valueCents: 300000 },
@@ -270,7 +282,7 @@ describe("Invoice review & QA overhaul", () => {
   });
 
   it("gates the sealed PDF until Sparks signs off, and the queue surfaces the recon", async () => {
-    const { reconId } = await invoicesConfirmReconcile(ownerCtx, {
+    const { reconId } = await confirmReconcileOk(ownerCtx, {
       invoiceId,
       lines: [
         { lineItemId: activeLineId, utility: "electricity", supplyGroup: "tenant", component: "active_energy", valueCents: 300000 },
@@ -314,7 +326,7 @@ describe("Invoice review & QA overhaul", () => {
   });
 
   it("records a customer 'Send to Sparks' request and prioritises it in the queue", async () => {
-    const { reconId } = await invoicesConfirmReconcile(ownerCtx, {
+    const { reconId } = await confirmReconcileOk(ownerCtx, {
       invoiceId,
       lines: [
         { lineItemId: activeLineId, utility: "electricity", supplyGroup: "tenant", component: "active_energy", valueCents: 300000 },
@@ -334,7 +346,7 @@ describe("Invoice review & QA overhaul", () => {
   });
 
   it("delivers the outcome to the customer's Alerts inbox and tracks read state", async () => {
-    const { reconId } = await invoicesConfirmReconcile(ownerCtx, {
+    const { reconId } = await confirmReconcileOk(ownerCtx, {
       invoiceId,
       lines: [
         { lineItemId: activeLineId, utility: "electricity", supplyGroup: "tenant", component: "active_energy", valueCents: 300000 },
@@ -374,7 +386,7 @@ describe("Invoice review & QA overhaul", () => {
   });
 
   it("reopen unlocks the invoice and a regenerate makes a new version", async () => {
-    const first = await invoicesConfirmReconcile(ownerCtx, {
+    const first = await confirmReconcileOk(ownerCtx, {
       invoiceId,
       lines: [
         { lineItemId: activeLineId, utility: "electricity", supplyGroup: "tenant", component: "active_energy", valueCents: 300000 },
@@ -389,7 +401,7 @@ describe("Invoice review & QA overhaul", () => {
     expect(reopened.invoice.lockedAt).toBeNull();
 
     // Regenerate after correcting the grouping → version 2 (prior version kept).
-    const second = await invoicesConfirmReconcile(ownerCtx, {
+    const second = await confirmReconcileOk(ownerCtx, {
       invoiceId,
       lines: [
         { lineItemId: activeLineId, utility: "electricity", supplyGroup: "tenant", component: "active_energy", valueCents: 300000 },

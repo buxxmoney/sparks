@@ -2372,29 +2372,12 @@ export async function invoicesConfirmReconcile(ctx: AuthContext, input: unknown)
     }
   }
 
-  // Prerequisites that would otherwise fail AFTER the lock (below) — check them first,
-  // while the invoice is still editable, so a missing setup step doesn't strand the
-  // invoice in a locked state the customer can't retry out of.
-  if (!invoice.billingPeriodId) {
-    throw new PreconditionError("Invoice has no billing period");
-  }
-  const landlordTariff = await db.query.siteTariffAssignments.findFirst({
-    where: and(
-      eq(siteTariffAssignments.siteId, invoice.siteId),
-      eq(siteTariffAssignments.role, "landlord"),
-    ),
-  });
-  if (!landlordTariff) {
-    throw new PreconditionError(
-      "This site has no landlord tariff assigned yet, so the bill can't be reconciled. " +
-        "Assign a landlord tariff to the site, then send for review.",
-    );
-  }
-
-  // Confirm + lock (the invisible freeze point) in one step. Reconciliation requires
-  // a locked invoice, so we must lock before running it — but if reconciliation then
-  // fails for any reason, roll the lock back so the invoice stays editable and the
-  // customer can fix the cause and retry (previously it got stuck "locked").
+  // Confirm + lock (the freeze point) so the numbers the customer saw are pinned for
+  // the review. Sending a bill to Sparks must NOT require the customer to have set up
+  // a landlord tariff — Sparks assigns/verifies the tariff and produces the final
+  // reconciliation during review. So reconciliation here is BEST-EFFORT: generate the
+  // provisional recon now if everything's in place, otherwise defer it to Sparks. The
+  // bill still gets sent for review either way.
   await db
     .update(landlordInvoices)
     .set({
@@ -2410,22 +2393,33 @@ export async function invoicesConfirmReconcile(ctx: AuthContext, input: unknown)
     })
     .where(eq(landlordInvoices.id, parsed.invoiceId));
 
-  let recon: Awaited<ReturnType<typeof runReconciliationForPeriod>>;
-  try {
-    recon = await runReconciliationForPeriod(invoice.billingPeriodId);
-  } catch (err) {
-    await db
-      .update(landlordInvoices)
-      .set({ status: invoice.status, lockedAt: invoice.lockedAt })
-      .where(eq(landlordInvoices.id, parsed.invoiceId));
-    throw err;
+  let reconId: string | null = null;
+  let version: number | null = null;
+  let reconciliationDeferred = false;
+  if (invoice.billingPeriodId) {
+    try {
+      const recon = await runReconciliationForPeriod(invoice.billingPeriodId);
+      reconId = recon.reconId;
+      version = recon.version;
+    } catch (err) {
+      // e.g. no landlord tariff assigned yet — fine, Sparks handles it during review.
+      reconciliationDeferred = true;
+      console.log(
+        `[confirmReconcile] reconciliation deferred to Sparks for invoice ${parsed.invoiceId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  } else {
+    reconciliationDeferred = true;
   }
 
   return {
-    reconId: recon.reconId,
-    version: recon.version,
+    reconId,
+    version,
     reviewStatus: "provisional" as const,
     reconcilableTotalCents: reconcilableTotal,
+    reconciliationDeferred,
   };
 }
 
