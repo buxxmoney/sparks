@@ -201,17 +201,26 @@ export async function adminListSubmittedInvoices(ctx: AuthContext) {
     .where(isNotNull(landlordInvoices.reviewRequestedAt))
     .orderBy(desc(landlordInvoices.reviewRequestedAt));
 
-  // Which submissions already produced a reconciliation (those show in the QA queue).
   const reconRows = await db
-    .select({ invoiceId: reconciliations.invoiceId })
+    .select({ invoiceId: reconciliations.invoiceId, reviewStatus: reconciliations.reviewStatus })
     .from(reconciliations);
+  // Which submissions already produced a reconciliation (those show in the QA queue)…
   const withRecon = new Set(reconRows.map((r) => r.invoiceId));
+  // …and which have been RESPONDED to (verified or flagged) — those are handled, so
+  // they drop off this "needs attention" list once the operator replies.
+  const responded = new Set(
+    reconRows
+      .filter((r) => r.reviewStatus === "reviewed" || r.reviewStatus === "flagged")
+      .map((r) => r.invoiceId),
+  );
 
-  const submissions = rows.map((r) => ({
-    ...r,
-    confirmedTotalCents: r.confirmedTotalCents ?? 0,
-    hasReconciliation: withRecon.has(r.invoiceId),
-  }));
+  const submissions = rows
+    .filter((r) => !responded.has(r.invoiceId))
+    .map((r) => ({
+      ...r,
+      confirmedTotalCents: r.confirmedTotalCents ?? 0,
+      hasReconciliation: withRecon.has(r.invoiceId),
+    }));
 
   return { submissions };
 }

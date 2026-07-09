@@ -6,7 +6,6 @@ import {
   UserPlus,
   MapPin,
   ClipboardCheck,
-  ExternalLink,
   Send,
   ScrollText,
   Trash2,
@@ -59,10 +58,11 @@ export default function AdminPage() {
     refetch: refetchQueue,
   } = useRPC(() => client.admin.listReviewQueue(), []);
   // Bills customers have sent for review (incl. ones with no reconciliation yet).
-  const { data: submittedData, loading: submittedLoading } = useRPC(
-    () => client.admin.listSubmittedInvoices(),
-    [],
-  );
+  const {
+    data: submittedData,
+    loading: submittedLoading,
+    refetch: refetchSubmitted,
+  } = useRPC(() => client.admin.listSubmittedInvoices(), []);
   const submissions = submittedData?.submissions ?? [];
   const [reviewBusy, setReviewBusy] = useState(false);
   const [queueMsg, setQueueMsg] = useState<{ kind: "success" | "error"; text: string } | null>(
@@ -198,6 +198,7 @@ export default function AdminPage() {
       });
       setRespondTo(null);
       refetchQueue();
+      refetchSubmitted();
     } catch (err) {
       setQueueMsg({
         kind: "error",
@@ -504,19 +505,11 @@ export default function AdminPage() {
                   key: "actions",
                   header: "",
                   renderCell: (q) => (
-                    <Stack direction="horizontal" gap={2} wrap="wrap" align="center">
-                      <Button
-                        label="Open"
-                        variant="ghost"
-                        icon={<ExternalLink size={14} />}
-                        href={`/sites/${q.siteId}/reconciliation/${q.reconId}`}
-                      />
-                      <Button
-                        label="Review & respond"
-                        variant="primary"
-                        onClick={() => openRespond(q.reconId, q.siteName ?? "the site")}
-                      />
-                    </Stack>
+                    <Button
+                      label="Review & respond"
+                      variant="primary"
+                      onClick={() => openRespond(q.reconId, q.siteName ?? "the site")}
+                    />
                   ),
                 },
               ]}
