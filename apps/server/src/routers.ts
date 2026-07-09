@@ -2276,7 +2276,29 @@ export async function invoicesConfirmReconcile(ctx: AuthContext, input: unknown)
     }
   }
 
-  // Confirm + lock (the invisible freeze point) in one step.
+  // Prerequisites that would otherwise fail AFTER the lock (below) — check them first,
+  // while the invoice is still editable, so a missing setup step doesn't strand the
+  // invoice in a locked state the customer can't retry out of.
+  if (!invoice.billingPeriodId) {
+    throw new PreconditionError("Invoice has no billing period");
+  }
+  const landlordTariff = await db.query.siteTariffAssignments.findFirst({
+    where: and(
+      eq(siteTariffAssignments.siteId, invoice.siteId),
+      eq(siteTariffAssignments.role, "landlord"),
+    ),
+  });
+  if (!landlordTariff) {
+    throw new PreconditionError(
+      "This site has no landlord tariff assigned yet, so the bill can't be reconciled. " +
+        "Assign a landlord tariff to the site, then send for review.",
+    );
+  }
+
+  // Confirm + lock (the invisible freeze point) in one step. Reconciliation requires
+  // a locked invoice, so we must lock before running it — but if reconciliation then
+  // fails for any reason, roll the lock back so the invoice stays editable and the
+  // customer can fix the cause and retry (previously it got stuck "locked").
   await db
     .update(landlordInvoices)
     .set({
@@ -2292,11 +2314,16 @@ export async function invoicesConfirmReconcile(ctx: AuthContext, input: unknown)
     })
     .where(eq(landlordInvoices.id, parsed.invoiceId));
 
-  if (!invoice.billingPeriodId) {
-    throw new PreconditionError("Invoice has no billing period");
+  let recon: Awaited<ReturnType<typeof runReconciliationForPeriod>>;
+  try {
+    recon = await runReconciliationForPeriod(invoice.billingPeriodId);
+  } catch (err) {
+    await db
+      .update(landlordInvoices)
+      .set({ status: invoice.status, lockedAt: invoice.lockedAt })
+      .where(eq(landlordInvoices.id, parsed.invoiceId));
+    throw err;
   }
-
-  const recon = await runReconciliationForPeriod(invoice.billingPeriodId);
 
   return {
     reconId: recon.reconId,
