@@ -43,7 +43,7 @@ export default function ReconciliationPage() {
 
       <Banner
         status="info"
-        title="Reconciliations are generated from a locked invoice — upload an invoice, confirm it, lock it, then generate its reconciliation."
+        title="Reconciliations are generated from the invoices you send us. Upload your invoice and send it for review, and we'll generate the reconciliation for you."
       />
 
       <Card padding={5}>
