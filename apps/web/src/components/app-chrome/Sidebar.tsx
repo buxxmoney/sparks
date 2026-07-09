@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   SideNav,
   SideNavSection,
@@ -42,7 +43,14 @@ const ICON_SIZE = 18;
 function NavSections() {
   const { pathname, siteId } = useNavContext();
   const { isPlatformOperator, isOrgOwner } = useOrganization();
-  const { data: unread } = useRPC(() => client.alerts.unreadCount(), []);
+  // The sidebar persists across client navigation, so a one-shot fetch goes stale as
+  // alerts arrive or are read. Poll so the unread badge stays current.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 20_000);
+    return () => clearInterval(id);
+  }, []);
+  const { data: unread } = useRPC(() => client.alerts.unreadCount(), [tick]);
   const unreadCount = unread?.count ?? 0;
 
   return (

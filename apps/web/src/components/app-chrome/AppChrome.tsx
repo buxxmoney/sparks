@@ -1,8 +1,9 @@
 "use client";
 
 import { AppShell } from "@astryxdesign/core/AppShell";
-import { usePathname } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState, type ReactNode } from "react";
+import { useSession } from "@/lib/useSession";
 import { AppSideNav } from "./Sidebar";
 import { Topbar } from "./Topbar";
 
@@ -14,14 +15,33 @@ function isBareRoute(pathname: string): boolean {
 
 export function AppChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname() || "/";
+  const router = useRouter();
+  const { session, loading } = useSession();
+  const bare = isBareRoute(pathname);
   // Lifted (not left uncontrolled inside SideNav) so Topbar can size the
   // header's logo cell to match — see Sidebar.tsx's AppSideNav comment.
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
+  // Authenticated app routes require a session. If there isn't one (signed out,
+  // expired, or opened a deep link like the review email's /admin without a
+  // session), send them to login instead of rendering a broken shell with an empty
+  // account menu and "Operators only".
+  useEffect(() => {
+    if (!bare && !loading && !session?.user) {
+      router.replace(`/auth/login?next=${encodeURIComponent(pathname)}`);
+    }
+  }, [bare, loading, session, pathname, router]);
+
   // Auth screens and the root redirect render bare (they bring their own
   // full-screen AuthShell layout).
-  if (isBareRoute(pathname)) {
+  if (bare) {
     return <>{children}</>;
+  }
+
+  // Don't flash the app shell while the session is loading or the redirect above is
+  // in flight — otherwise an unauthenticated deep link shows an empty, broken shell.
+  if (loading || !session?.user) {
+    return null;
   }
 
   return (

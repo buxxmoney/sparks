@@ -28,7 +28,13 @@ import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-
 import { auth } from "./auth";
 import { type BillingPeriodPolicy, materializePeriods } from "./billing";
 import { billReviewRequestEmail, sendEmail, siteInviteEmail } from "./email";
-import { deriveLineCategory, parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
+import {
+  analyzeInvoiceTariffs,
+  deriveLineCategory,
+  parseInvoiceWithClaude,
+  persistParsedInvoice,
+  type TariffAnalysis,
+} from "./invoices";
 import type { AuthContext } from "./middleware";
 import {
   ForbiddenError,
@@ -46,9 +52,12 @@ import {
   generateReconciliation,
   priceSegments,
 } from "./reconciliation";
+import { dispatchInvoiceParsed, dispatchReviewSubmitted } from "./notifications";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
 import {
+  adminAssignSiteTariffInput,
+  adminSiteTariffGetInput,
   alertsAcknowledgeInput,
   alertsAttachmentUrlInput,
   billingPeriodsCloseInput,
@@ -73,6 +82,7 @@ import {
   invoicesLockInput,
   invoicesReopenInput,
   invoicesRequestReviewInput,
+  invoicesRetryParseInput,
   invoicesSetPeriodInput,
   invoicesUpdateLineItemInput,
   invoicesUploadAndParseInput,
@@ -1300,6 +1310,139 @@ export async function tariffsAssignList(ctx: AuthContext, input: unknown) {
   return { siteId: parsed.siteId, assignments: results };
 }
 
+/**
+ * Operator-only: the landlord tariff currently on file for a site (the open
+ * `landlord` assignment + its profile + rate rows), or null when none is assigned.
+ * Powers the operator admin "assign tariff" screen — showing what's already there so
+ * a pending reconciliation's missing "expected" side can be filled in-app rather than
+ * via the seed script. Unlike `tariffsAssignList` (site-scoped, requireSiteAccess),
+ * this is cross-tenant and gated on requirePlatformOperator, since operators aren't
+ * members of the customer's org.
+ */
+export async function adminSiteTariffGet(ctx: AuthContext, input: unknown) {
+  const parsed = adminSiteTariffGetInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
+  if (!site) {
+    throw new PreconditionError("Site not found");
+  }
+
+  // The current landlord tariff = the open (effectiveTo IS NULL) landlord assignment,
+  // most-recently-effective first if several were ever left open.
+  const open = await db.query.siteTariffAssignments.findMany({
+    where: and(
+      eq(siteTariffAssignments.siteId, parsed.siteId),
+      eq(siteTariffAssignments.role, "landlord"),
+      isNull(siteTariffAssignments.effectiveTo),
+    ),
+  });
+  const assignment = open.sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
+
+  if (!assignment) {
+    return { siteId: parsed.siteId, siteName: site.name, assignment: null, profile: null, rates: [] };
+  }
+
+  const profile = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, assignment.tariffProfileId),
+  });
+  const rates = await db.query.tariffRates.findMany({
+    where: eq(tariffRates.tariffProfileId, assignment.tariffProfileId),
+  });
+
+  return { siteId: parsed.siteId, siteName: site.name, assignment, profile, rates };
+}
+
+/**
+ * Operator-only: assign a landlord ("stated") tariff to a site from the admin UI —
+ * the in-app equivalent of the seed script's profile + rates + assignment inserts.
+ * Creates a `landlord_stated`/`custom` profile scoped to the site's org, its rate
+ * rows, supersedes any open landlord assignment, and opens a new one effective from
+ * `effectiveFrom`. When `regenerateBillingPeriodId` is given, the reconciliation for
+ * that period is recomputed against the new tariff, turning a "pending" recon (no
+ * expected side) into a full one. A recompute failure is reported (not thrown) so the
+ * assignment still stands.
+ */
+export async function adminAssignSiteTariff(ctx: AuthContext, input: unknown) {
+  const parsed = adminAssignSiteTariffInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
+  if (!site) {
+    throw new PreconditionError("Site not found");
+  }
+
+  const profileId = randomUUID();
+  await db.insert(tariffProfiles).values({
+    id: profileId,
+    organizationId: site.organizationId,
+    name: parsed.name,
+    type: "landlord_stated",
+    source: "custom",
+    currency: "ZAR",
+    effectiveFrom: parsed.effectiveFrom,
+  });
+  await db.insert(tariffRates).values(
+    parsed.rates.map((r) => ({
+      id: randomUUID(),
+      tariffProfileId: profileId,
+      chargeType: r.chargeType,
+      unit: r.unit,
+      rateValue: r.rateValue,
+      season: r.season,
+      touPeriod: r.touPeriod,
+    })),
+  );
+
+  // Supersede any open landlord assignment. Close it at the new tariff's start so the
+  // period the operator is pricing resolves to the NEW assignment (the effective-date
+  // picker keeps the latest-starting assignment overlapping the period; ending the old
+  // one at effectiveFrom removes it from that overlap). Assumes effectiveFrom is at or
+  // before any prior start — true when defaulting to the bill's period start.
+  const openAssignments = await db.query.siteTariffAssignments.findMany({
+    where: and(
+      eq(siteTariffAssignments.siteId, parsed.siteId),
+      eq(siteTariffAssignments.role, "landlord"),
+      isNull(siteTariffAssignments.effectiveTo),
+    ),
+  });
+  for (const a of openAssignments) {
+    await db
+      .update(siteTariffAssignments)
+      .set({ effectiveTo: parsed.effectiveFrom })
+      .where(eq(siteTariffAssignments.id, a.id));
+  }
+
+  const assignmentId = randomUUID();
+  await db.insert(siteTariffAssignments).values({
+    id: assignmentId,
+    siteId: parsed.siteId,
+    tariffProfileId: profileId,
+    role: "landlord",
+    effectiveFrom: parsed.effectiveFrom,
+  });
+
+  // Recompute the pending reconciliation so its expected side is filled now. Best-effort:
+  // the tariff assignment is the durable outcome, so a recompute error is surfaced but
+  // never rolls the assignment back.
+  let regenerated: { reconId: string; version: number } | null = null;
+  let regenerateError: string | null = null;
+  if (parsed.regenerateBillingPeriodId) {
+    try {
+      const recon = await runReconciliationForPeriod(parsed.regenerateBillingPeriodId);
+      regenerated = { reconId: recon.reconId, version: recon.version };
+    } catch (err) {
+      regenerateError = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[adminAssignSiteTariff] recompute failed for period ${parsed.regenerateBillingPeriodId}:`,
+        err,
+      );
+    }
+  }
+
+  return { profileId, assignmentId, regenerated, regenerateError };
+}
+
 /* ─────────────── Reconciliation Router ─────────────── */
 
 /** True if an instant falls inside a billing period, honoring boundary inclusivity. */
@@ -1513,6 +1656,9 @@ async function runReconciliationForPeriod(
   // Price landlord + legal-ceiling tariffs using the assignment(s) EFFECTIVE
   // during the period (splitting on effective-date changes) with per-interval
   // energy + the site timezone, so R4's TOU/seasonal pricing applies end-to-end.
+  // No landlord tariff on file is NOT fatal — we still produce a reconciliation from
+  // the measured usage and the billed charges, with the "expected" side left pending
+  // for Sparks to determine. This keeps every submitted bill reviewable and sendable.
   const landlordResult = await priceRoleOverPeriod(
     billingPeriod.siteId,
     "landlord",
@@ -1520,11 +1666,6 @@ async function runReconciliationForPeriod(
     intervals,
     site.timezone,
   );
-  if (!landlordResult) {
-    throw new PreconditionError(
-      "No landlord tariff assigned to this site. Assign a landlord tariff effective during the period first.",
-    );
-  }
   const ceilingResult = await priceRoleOverPeriod(
     billingPeriod.siteId,
     "legal_ceiling",
@@ -1542,7 +1683,7 @@ async function runReconciliationForPeriod(
       maxDemandKva,
       reactiveKvarh: totalReactiveKvarh,
     },
-    landlordResult.pricing,
+    landlordResult ? landlordResult.pricing : null,
     ceilingResult ? ceilingResult.pricing : null,
     {
       confirmedActiveCents: invoice.confirmedActiveCents,
@@ -1572,7 +1713,7 @@ async function runReconciliationForPeriod(
     billingPeriodEnd: billingPeriod.periodEnd,
     boundaryInclusivity: billingPeriod.boundaryInclusivity,
     demandIntervalMinutes: billingPeriod.demandIntervalMinutes,
-    landlordTariffProfileId: landlordResult.primaryProfileId,
+    landlordTariffProfileId: landlordResult?.primaryProfileId ?? null,
     legalCeilingTariffProfileId: ceilingResult?.primaryProfileId || null,
     measuredActiveKwh: reconData.measuredActiveKwh.toString(),
     measuredMaxDemandKva: reconData.measuredMaxDemandKva.toString(),
@@ -1869,7 +2010,23 @@ async function findOrCreateInvoicePeriod(
   const existing = await db.query.billingPeriods.findFirst({
     where: and(eq(billingPeriods.siteId, siteId), eq(billingPeriods.periodStart, start)),
   });
-  if (existing) return existing;
+  if (existing) {
+    // Keep the end in sync — otherwise editing an invoice's period end (which keeps
+    // the same start) would silently no-op, matching the old period and dropping the
+    // change ("Save period does nothing").
+    if (existing.periodEnd.getTime() !== end.getTime()) {
+      const [updated] = await db
+        .update(billingPeriods)
+        .set({
+          periodEnd: end,
+          label: start.toLocaleString("en-ZA", { month: "long", year: "numeric" }),
+        })
+        .where(eq(billingPeriods.id, existing.id))
+        .returning();
+      return updated;
+    }
+    return existing;
+  }
   const [created] = await db
     .insert(billingPeriods)
     .values({
@@ -1886,14 +2043,15 @@ async function findOrCreateInvoicePeriod(
   return created;
 }
 
+// Upload an invoice and start parsing ASYNCHRONOUSLY. Parsing calls out to Claude
+// (and poppler) and can take seconds-to-minutes on scanned bills, which is too long
+// to hold an HTTP request open (the client would spin and the edge could time out).
+// So we store the PDF, create the invoice row in a "parsing" state, kick the parse
+// off in the background, and return immediately. The client polls invoices.get and
+// a completion alert lands in the inbox when it finishes. See runInvoiceParse.
 export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
   const parsed = invoicesUploadAndParseInput.parse(input);
   await requireSiteEditor(ctx, parsed.siteId);
-
-  // Correlate every log line for this upload so a 500 is traceable end-to-end.
-  const traceId = randomUUID().slice(0, 8);
-  const log = (msg: string) => console.log(`[upload ${traceId}] ${msg}`);
-  log(`start site=${parsed.siteId} user=${ctx.userId}`);
 
   const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
   if (!site) {
@@ -1904,50 +2062,21 @@ export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
   if (pdfBuffer.length === 0) {
     throw new Error("Uploaded file is empty");
   }
-  log(`decoded pdf: ${pdfBuffer.length} bytes`);
 
-  // Parse FIRST so the billing period comes from the invoice itself (not a picker).
-  // This calls out to Claude (and optionally poppler) — the most failure-prone step.
-  let parsedInvoice: Awaited<ReturnType<typeof parseInvoiceWithClaude>>;
-  try {
-    parsedInvoice = await parseInvoiceWithClaude(pdfBuffer);
-  } catch (err) {
-    log(`parse FAILED: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
-    throw err;
-  }
-  log(
-    `parsed: ${parsedInvoice.lineItems.length} line items, model=${parsedInvoice.parseModel}, ` +
-      `period=${parsedInvoice.periodStart ?? "?"}→${parsedInvoice.periodEnd ?? "?"}`,
-  );
-
-  const { start, end } = invoicePeriodBounds(parsedInvoice.periodStart, parsedInvoice.periodEnd);
-  const period = await findOrCreateInvoicePeriod(
-    parsed.siteId,
-    start,
-    end,
-    site.demandIntervalMinutes ?? 30,
-  );
-  log(`billing period ${period.id} (${start.toISOString()}→${end.toISOString()})`);
-
+  // Store the PDF up front (fast) so the row references it and the background job
+  // (and any retry) can re-read it. The real billing period isn't known until the
+  // parse runs, so create the row with placeholder period dates it will overwrite.
   const fileHash = createHash("sha256").update(pdfBuffer).digest("hex");
-  const fileStorageKey = `invoices/${parsed.siteId}/${period.id}/${randomUUID()}.pdf`;
-  try {
-    await putObject(fileStorageKey, pdfBuffer, "application/pdf");
-  } catch (err) {
-    log(
-      `storage putObject FAILED for ${fileStorageKey}: ${err instanceof Error ? err.message : err}`,
-    );
-    throw err;
-  }
-  log(`stored pdf at ${fileStorageKey}`);
+  const fileStorageKey = `invoices/${parsed.siteId}/pending/${randomUUID()}.pdf`;
+  await putObject(fileStorageKey, pdfBuffer, "application/pdf");
 
+  const placeholder = new Date();
   const [invoice] = await db
     .insert(landlordInvoices)
     .values({
       siteId: parsed.siteId,
-      billingPeriodId: period.id,
-      billingPeriodStart: period.periodStart,
-      billingPeriodEnd: period.periodEnd,
+      billingPeriodStart: placeholder,
+      billingPeriodEnd: placeholder,
       fileStorageKey,
       fileHash,
       status: "uploaded",
@@ -1955,16 +2084,116 @@ export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
     })
     .returning();
 
-  await persistParsedInvoice(invoice.id, parsedInvoice);
-  log(`done: invoice ${invoice.id} persisted`);
+  // Fire-and-forget: the Railway server is a persistent process, so the parse keeps
+  // running after we respond. Errors are recorded on the row (parseError) by
+  // runInvoiceParse itself; the .catch here is just a last-resort log.
+  void runInvoiceParse(invoice.id).catch((err) =>
+    console.error(`[upload] background parse crashed for invoice ${invoice.id}:`, err),
+  );
 
-  return {
-    invoiceId: invoice.id,
-    status: "parsed_pending_confirm" as const,
-    lineItemCount: parsedInvoice.lineItems.length,
-    parseModel: parsedInvoice.parseModel,
-    periodDetected: Boolean(parsedInvoice.periodStart && parsedInvoice.periodEnd),
-  };
+  return { invoiceId: invoice.id, status: "parsing" as const };
+}
+
+// Background worker: read the stored PDF, parse it with Claude, detect the billing
+// period, persist the line items, and notify the customer. Records a failure reason
+// on the invoice (parseError) and reverts it to "uploaded" (retryable) on any error.
+// Safe to call fire-and-forget; it owns its own error handling.
+async function runInvoiceParse(invoiceId: string): Promise<void> {
+  const traceId = randomUUID().slice(0, 8);
+  const log = (msg: string) => console.log(`[parse ${traceId}] invoice=${invoiceId} ${msg}`);
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, invoiceId),
+  });
+  if (!invoice) {
+    log("not found — skipping");
+    return;
+  }
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, invoice.siteId) });
+
+  await db
+    .update(landlordInvoices)
+    .set({ status: "parsing", parseError: null })
+    .where(eq(landlordInvoices.id, invoiceId));
+
+  try {
+    log("reading stored pdf");
+    const pdfBuffer = await getObject(invoice.fileStorageKey);
+    const parsedInvoice = await parseInvoiceWithClaude(pdfBuffer);
+    log(`parsed ${parsedInvoice.lineItems.length} line items, model=${parsedInvoice.parseModel}`);
+
+    const { start, end } = invoicePeriodBounds(parsedInvoice.periodStart, parsedInvoice.periodEnd);
+    const period = await findOrCreateInvoicePeriod(
+      invoice.siteId,
+      start,
+      end,
+      site?.demandIntervalMinutes ?? 30,
+    );
+    await db
+      .update(landlordInvoices)
+      .set({
+        billingPeriodId: period.id,
+        billingPeriodStart: period.periodStart,
+        billingPeriodEnd: period.periodEnd,
+      })
+      .where(eq(landlordInvoices.id, invoiceId));
+
+    // persistParsedInvoice flips status to "parsed_pending_confirm" and inserts lines.
+    await persistParsedInvoice(invoiceId, parsedInvoice);
+    log("done — pending confirm");
+
+    await dispatchInvoiceParsed({
+      invoiceId,
+      siteId: invoice.siteId,
+      organizationId: site?.organizationId ?? "",
+      siteName: site?.name ?? "your site",
+      ok: true,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`FAILED: ${message}`);
+    await db
+      .update(landlordInvoices)
+      .set({ status: "uploaded", parseError: message })
+      .where(eq(landlordInvoices.id, invoiceId));
+
+    await dispatchInvoiceParsed({
+      invoiceId,
+      siteId: invoice.siteId,
+      organizationId: site?.organizationId ?? "",
+      siteName: site?.name ?? "your site",
+      ok: false,
+      errorMessage: message,
+    });
+  }
+}
+
+// Re-run parsing after a failure (or if it got stuck). Clears the error and kicks
+// the background job off again against the already-stored PDF.
+export async function invoicesRetryParse(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesRetryParseInput.parse(input);
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, parsed.invoiceId),
+  });
+  if (!invoice) {
+    throw new PreconditionError("Invoice not found");
+  }
+  await requireSiteEditor(ctx, invoice.siteId);
+  if (invoice.status !== "uploaded" && invoice.status !== "parsing") {
+    throw new ForbiddenError("This invoice has already been parsed.");
+  }
+
+  await db
+    .update(landlordInvoices)
+    .set({ status: "uploaded", parseError: null })
+    .where(eq(landlordInvoices.id, parsed.invoiceId));
+
+  void runInvoiceParse(parsed.invoiceId).catch((err) =>
+    console.error(`[retry] background parse crashed for invoice ${parsed.invoiceId}:`, err),
+  );
+
+  return { invoiceId: parsed.invoiceId, status: "parsing" as const };
 }
 
 // Correct the billing period on an invoice (dates come from the invoice; the user
@@ -2020,6 +2249,37 @@ export async function invoicesSetPeriod(ctx: AuthContext, input: unknown) {
       billingPeriodEnd: period.periodEnd,
     })
     .where(eq(landlordInvoices.id, parsed.invoiceId));
+
+  // Reflect the period the customer entered on the site's Billing cycle setting —
+  // to them these are the same thing, so Settings → Billing cycle should match. We
+  // infer a day-of-month cycle anchored on the period's start day. Only rewrite when
+  // it actually differs, so re-saving the same dates doesn't churn policy versions.
+  const anchorDay = start.getUTCDate();
+  const currentPolicy = await db.query.billingCyclePolicies.findFirst({
+    where: and(
+      eq(billingCyclePolicies.siteId, invoice.siteId),
+      isNull(billingCyclePolicies.effectiveTo),
+    ),
+  });
+  if (
+    !currentPolicy ||
+    currentPolicy.recurrence !== "day_of_month" ||
+    currentPolicy.anchorDay !== anchorDay
+  ) {
+    if (currentPolicy) {
+      await db
+        .update(billingCyclePolicies)
+        .set({ effectiveTo: new Date() })
+        .where(eq(billingCyclePolicies.id, currentPolicy.id));
+    }
+    await db.insert(billingCyclePolicies).values({
+      id: randomUUID(),
+      siteId: invoice.siteId,
+      recurrence: "day_of_month",
+      anchorDay,
+      version: (currentPolicy?.version ?? 0) + 1,
+    });
+  }
 
   return {
     invoiceId: parsed.invoiceId,
@@ -2276,7 +2536,12 @@ export async function invoicesConfirmReconcile(ctx: AuthContext, input: unknown)
     }
   }
 
-  // Confirm + lock (the invisible freeze point) in one step.
+  // Confirm + lock (the freeze point) so the numbers the customer saw are pinned for
+  // the review. Sending a bill to Sparks must NOT require the customer to have set up
+  // a landlord tariff — Sparks assigns/verifies the tariff and produces the final
+  // reconciliation during review. So reconciliation here is BEST-EFFORT: generate the
+  // provisional recon now if everything's in place, otherwise defer it to Sparks. The
+  // bill still gets sent for review either way.
   await db
     .update(landlordInvoices)
     .set({
@@ -2292,17 +2557,33 @@ export async function invoicesConfirmReconcile(ctx: AuthContext, input: unknown)
     })
     .where(eq(landlordInvoices.id, parsed.invoiceId));
 
-  if (!invoice.billingPeriodId) {
-    throw new PreconditionError("Invoice has no billing period");
+  let reconId: string | null = null;
+  let version: number | null = null;
+  let reconciliationDeferred = false;
+  if (invoice.billingPeriodId) {
+    try {
+      const recon = await runReconciliationForPeriod(invoice.billingPeriodId);
+      reconId = recon.reconId;
+      version = recon.version;
+    } catch (err) {
+      // e.g. no landlord tariff assigned yet — fine, Sparks handles it during review.
+      reconciliationDeferred = true;
+      console.log(
+        `[confirmReconcile] reconciliation deferred to Sparks for invoice ${parsed.invoiceId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  } else {
+    reconciliationDeferred = true;
   }
 
-  const recon = await runReconciliationForPeriod(invoice.billingPeriodId);
-
   return {
-    reconId: recon.reconId,
-    version: recon.version,
+    reconId,
+    version,
     reviewStatus: "provisional" as const,
     reconcilableTotalCents: reconcilableTotal,
+    reconciliationDeferred,
   };
 }
 
@@ -2346,7 +2627,112 @@ export async function invoicesRequestReview(ctx: AuthContext, input: unknown) {
     console.error(`[review-email] failed for invoice ${parsed.invoiceId}:`, err),
   );
 
+  // Confirm to the customer, in their Alerts inbox, that the bill is now with Sparks.
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, invoice.siteId) });
+  void dispatchReviewSubmitted({
+    invoiceId: invoice.id,
+    siteId: invoice.siteId,
+    organizationId: site?.organizationId ?? "",
+    siteName: site?.name ?? "your site",
+  });
+
   return { invoiceId: parsed.invoiceId, reviewRequestedAt: new Date() };
+}
+
+// Run the AI tariff cross-reference for an ELECTRICITY bill. Eskom is treated as the
+// national reference baseline: if a schedule matches the bill's own provider + period
+// we use it directly; otherwise we fall back to the nearest Eskom schedule as context
+// (rates shown as reference, not the bill's actual tariff), flagging the tariff year.
+// Returns null only when it isn't applicable (no electricity charges).
+async function computeTariffAnalysis(
+  lineRows: (typeof invoiceLineItems.$inferSelect)[],
+  periodStart: Date,
+  periodEnd: Date,
+): Promise<TariffAnalysis | null> {
+  const charges = lineRows
+    .filter((l) => (l.confirmedUtility ?? l.utility ?? "") === "electricity")
+    .map((l) => ({
+      rawLabel: l.rawLabel,
+      unit: l.unit,
+      quantity: l.quantity !== null ? Number(l.quantity) : null,
+      rate: l.rate !== null ? Number(l.rate) : null,
+      amountRand: (l.confirmedValueCents ?? l.parsedValueCents ?? 0) / 100,
+    }));
+  if (charges.length === 0) return null; // not an electricity bill — nothing to check
+
+  const schedules = (await db.query.tariffSchedules.findMany()).filter((s) => s.extractedText);
+  if (schedules.length === 0) {
+    return {
+      available: false,
+      scheduleName: null,
+      provider: null,
+      note: "No reference tariff schedule with usable text is on file. Upload one (e.g. the Eskom Schedule of Standard Prices) in operator admin to enable rate checks.",
+      lines: [],
+    };
+  }
+
+  const labels = lineRows.map((l) => (l.rawLabel ?? "").toLowerCase()).join(" | ");
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const covers = (s: (typeof schedules)[number]) =>
+    s.effectiveFrom.getTime() <= periodEnd.getTime() &&
+    (!s.effectiveTo || s.effectiveTo.getTime() >= periodStart.getTime());
+  const providerNamed = (s: (typeof schedules)[number]) => labels.includes(s.provider.toLowerCase());
+  const nearest = (list: typeof schedules) =>
+    [...list].sort(
+      (a, b) =>
+        Math.abs(a.effectiveFrom.getTime() - periodEnd.getTime()) -
+        Math.abs(b.effectiveFrom.getTime() - periodEnd.getTime()),
+    )[0];
+
+  // Infer the bill's own provider (for the reference caveat). Match common
+  // abbreviations too — municipal bills print tariff codes like "JHB E LVD" or
+  // "COJ", not the full city name, so a name-only match would miss them.
+  const billProvider = /eskom/i.test(labels)
+    ? "Eskom"
+    : /johannesburg|city power|joburg|\bjhb\b|\bcoj\b/i.test(labels)
+      ? "City of Johannesburg / City Power"
+      : /tshwane|\btsh\b/i.test(labels)
+        ? "City of Tshwane"
+        : /ekurhuleni|\bekur\b/i.test(labels)
+          ? "Ekurhuleni"
+          : /cape town|\bcct\b/i.test(labels)
+            ? "City of Cape Town"
+            : "the municipality/utility";
+
+  let schedule: (typeof schedules)[number];
+  let basis: "direct" | "reference";
+  let contextNote: string | null = null;
+
+  const namedCovering = schedules.filter((s) => providerNamed(s) && covers(s));
+  const named = schedules.filter((s) => providerNamed(s));
+  if (namedCovering.length > 0) {
+    schedule = nearest(namedCovering);
+    basis = "direct";
+  } else if (named.length > 0) {
+    schedule = nearest(named);
+    basis = "direct";
+    contextNote = `Using the ${schedule.provider} schedule effective ${fmt(schedule.effectiveFrom)}; this bill covers ${fmt(periodStart)}–${fmt(periodEnd)}, so rates may be from a different tariff year (SA tariffs run Apr–Mar).`;
+  } else {
+    // No schedule for the bill's own provider → Eskom (preferred) as national baseline.
+    const eskom = schedules.filter((s) => /eskom/i.test(s.provider));
+    schedule = nearest(eskom.length > 0 ? eskom : schedules);
+    basis = "reference";
+    contextNote =
+      `This bill is from ${billProvider}, not ${schedule.provider}. ${schedule.provider}'s rates are shown as a national reference baseline — indicative context, not the bill's actual tariff.` +
+      (covers(schedule)
+        ? ""
+        : ` The schedule on file is effective ${fmt(schedule.effectiveFrom)}; the bill covers ${fmt(periodStart)}–${fmt(periodEnd)}.`);
+  }
+
+  return analyzeInvoiceTariffs({
+    scheduleName: schedule.name,
+    provider: schedule.provider,
+    scheduleText: schedule.extractedText ?? "",
+    charges,
+    basis,
+    billProvider,
+    contextNote,
+  });
 }
 
 // Assembles + sends the internal "please review this bill" email to the Sparks
@@ -2386,6 +2772,17 @@ async function sendReviewRequestEmail(
     // leave null
   }
 
+  // Cross-reference the bill's charges against a provider's published tariff schedule
+  // (if one is on file that matches this bill). Best-effort — never blocks the email.
+  const tariffAnalysis = await computeTariffAnalysis(
+    lineRows,
+    invoice.billingPeriodStart,
+    invoice.billingPeriodEnd,
+  ).catch((err) => {
+    console.error(`[review-email] tariff analysis failed for invoice ${invoice.id}:`, err);
+    return null;
+  });
+
   const { subject, html } = billReviewRequestEmail({
     orgName: org?.name ?? "Customer",
     siteName: site?.name ?? "Site",
@@ -2406,6 +2803,7 @@ async function sendReviewRequestEmail(
       valueCents: l.confirmedValueCents ?? l.parsedValueCents ?? 0,
     })),
     adminUrl: `${process.env.WEB_URL || "http://localhost:3000"}/admin`,
+    tariffAnalysis,
   });
 
   // Attach the original invoice PDF if the stored object is present.
@@ -2490,11 +2888,12 @@ export async function alertsUnreadCount(ctx: AuthContext) {
   return { count: rows.length };
 }
 
+// Marking a message read DELETES it from the recipient's inbox (product decision:
+// a read message is done with, so it's removed rather than kept as a read row).
 export async function alertsAcknowledge(ctx: AuthContext, input: unknown) {
   const parsed = alertsAcknowledgeInput.parse(input);
   await db
-    .update(alertDeliveries)
-    .set({ readAt: new Date() })
+    .delete(alertDeliveries)
     .where(
       and(
         eq(alertDeliveries.id, parsed.deliveryId),
@@ -2504,15 +2903,15 @@ export async function alertsAcknowledge(ctx: AuthContext, input: unknown) {
   return { ok: true };
 }
 
+// "Mark all read" clears the recipient's whole in-app inbox (see alertsAcknowledge —
+// read = deleted).
 export async function alertsMarkAllRead(ctx: AuthContext) {
   await db
-    .update(alertDeliveries)
-    .set({ readAt: new Date() })
+    .delete(alertDeliveries)
     .where(
       and(
         eq(alertDeliveries.recipientUserId, ctx.userId),
         eq(alertDeliveries.channel, "app"),
-        isNull(alertDeliveries.readAt),
       ),
     );
   return { ok: true };

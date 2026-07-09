@@ -6,7 +6,6 @@ import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
-import { Divider } from "@astryxdesign/core/Divider";
 import { Grid } from "@astryxdesign/core/Grid";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Link } from "@astryxdesign/core/Link";
@@ -104,8 +103,6 @@ export default function ReconciliationDetailPage() {
   }
 
   const hasDG = recon.gapCount > 0;
-  const discrepancy = recon.discrepancyVsLandlordCents ?? 0;
-  const discColor = discrepancy > 0 ? "hsl(0 72% 51%)" : "hsl(142 71% 40%)";
 
   const reviewStatus = recon.reviewStatus ?? "provisional";
   const isVerified = reviewStatus === "reviewed";
@@ -181,7 +178,7 @@ export default function ReconciliationDetailPage() {
         <Banner
           status="info"
           title="Provisional — under Sparks review"
-          description="The numbers below are live so you can see them now, but the sealed dispute PDF only unlocks once Sparks has verified the reconciliation."
+          description="Your bill is with our team. We'll check the charges against your meter and send you the outcome. The sealed dispute PDF unlocks once Sparks has verified the reconciliation."
         />
       )}
 
@@ -222,154 +219,10 @@ export default function ReconciliationDetailPage() {
         </Stack>
       </Card>
 
-      <Card padding={5}>
-        <Stack gap={4}>
-          <Text weight="semibold">Tariff comparison</Text>
-          <Grid columns={{ minWidth: 180 }} gap={4}>
-            <Stat
-              label="Expected (Landlord)"
-              value={`R ${((recon.expectedLandlordCents ?? 0) / 100).toFixed(2)}`}
-            />
-            <Stat
-              label="Charged"
-              value={`R ${((recon.chargedTotalCents ?? 0) / 100).toFixed(2)}`}
-            />
-            <Stat
-              label="Discrepancy"
-              value={`${discrepancy > 0 ? "+" : ""}R ${(discrepancy / 100).toFixed(2)}`}
-              color={discColor}
-            />
-          </Grid>
-          {(recon.expectedCeilingCents ?? 0) > 0 ? (
-            <>
-              <Divider />
-              <Text type="supporting">
-                <strong>Legal ceiling</strong> — expected R{" "}
-                {((recon.expectedCeilingCents ?? 0) / 100).toFixed(2)} · discrepancy R{" "}
-                {((recon.discrepancyVsCeilingCents ?? 0) / 100).toFixed(2)}
-              </Text>
-            </>
-          ) : null}
-        </Stack>
-      </Card>
-
-      {recon.components && recon.components.length > 0 ? (
-        <Card padding={5}>
-          <Stack gap={4}>
-            <Text weight="semibold">Charge-by-charge comparison</Text>
-            <Text type="supporting">
-              Each electricity component the landlord charged, against what the meter × the landlord
-              tariff says it should be. A positive discrepancy means you were overcharged.
-            </Text>
-            <div style={{ overflowX: "auto" }}>
-              <table
-                style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 460 }}
-              >
-                <thead>
-                  <tr style={{ color: "hsl(215 16% 55%)", fontSize: 11, textAlign: "right" }}>
-                    <th style={{ textAlign: "left", fontWeight: 400, padding: "4px 0" }}>
-                      Component
-                    </th>
-                    <th style={{ fontWeight: 400 }}>Charged</th>
-                    <th style={{ fontWeight: 400 }}>Expected</th>
-                    <th style={{ fontWeight: 400 }}>Discrepancy</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recon.components.map((c) => {
-                    const d = c.discrepancyVsLandlordCents;
-                    const color = d > 0 ? "hsl(0 72% 45%)" : d < 0 ? "hsl(142 71% 35%)" : "inherit";
-                    return (
-                      <tr key={c.key} style={{ borderTop: "0.5px solid hsl(210 16% 90%)" }}>
-                        <td style={{ padding: "8px 0" }}>{c.label}</td>
-                        <td
-                          style={{
-                            padding: "8px 0",
-                            textAlign: "right",
-                            fontVariantNumeric: "tabular-nums",
-                          }}
-                        >
-                          R {(c.chargedCents / 100).toFixed(2)}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 0",
-                            textAlign: "right",
-                            fontVariantNumeric: "tabular-nums",
-                            color: "hsl(215 16% 50%)",
-                          }}
-                        >
-                          R {(c.expectedLandlordCents / 100).toFixed(2)}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 0",
-                            textAlign: "right",
-                            fontVariantNumeric: "tabular-nums",
-                            fontWeight: 600,
-                            color,
-                          }}
-                        >
-                          {d > 0 ? "+" : ""}R {(d / 100).toFixed(2)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                <tfoot>
-                  <tr style={{ borderTop: "0.5px solid hsl(210 16% 80%)" }}>
-                    <td style={{ padding: "8px 0", fontWeight: 500 }}>Total</td>
-                    <td
-                      style={{
-                        padding: "8px 0",
-                        textAlign: "right",
-                        fontVariantNumeric: "tabular-nums",
-                        fontWeight: 500,
-                      }}
-                    >
-                      R {((recon.chargedTotalCents ?? 0) / 100).toFixed(2)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "8px 0",
-                        textAlign: "right",
-                        fontVariantNumeric: "tabular-nums",
-                        fontWeight: 500,
-                        color: "hsl(215 16% 50%)",
-                      }}
-                    >
-                      R {((recon.expectedLandlordCents ?? 0) / 100).toFixed(2)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "8px 0",
-                        textAlign: "right",
-                        fontVariantNumeric: "tabular-nums",
-                        fontWeight: 600,
-                        color: discColor,
-                      }}
-                    >
-                      {discrepancy > 0 ? "+" : ""}R {(discrepancy / 100).toFixed(2)}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </Stack>
-        </Card>
-      ) : null}
-
-      <Card padding={5}>
-        <Stack gap={4}>
-          <Text weight="semibold">Metadata</Text>
-          <Grid columns={{ minWidth: 160 }} gap={4}>
-            <Stat label="Status" value={recon.status} />
-            <Stat label="Version" value={String(recon.version)} />
-            <Stat label="Data Integrity" value={recon.dataIntegrityStatus} />
-            <Stat label="Data Gaps" value={`${recon.gapCount} (${recon.gapMinutesTotal} min)`} />
-          </Grid>
-        </Stack>
-      </Card>
+      {/* Tariff comparison / component breakdown / metadata are intentionally NOT
+          shown to the customer: they're pre-verification internals that would confuse
+          them. The human-reviewed verdict is delivered by Sparks as a review outcome
+          (Alerts inbox + email). Once verified, the sealed dispute PDF is the artifact. */}
     </Stack>
   );
 }

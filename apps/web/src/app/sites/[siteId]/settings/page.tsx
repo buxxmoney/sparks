@@ -333,8 +333,10 @@ export default function SiteSettingsPage() {
                 />
                 <Text type="supporting">
                   Each period runs from day {anchorDay} to day{" "}
-                  {anchorDay === 1 ? 31 : anchorDay - 1} of the next month. Day 31 clamps to each
-                  month&apos;s last day.
+                  {anchorDay === 1 ? 31 : anchorDay - 1} of the next month.
+                  {anchorDay >= 29
+                    ? ` Shorter months that don't have a day ${anchorDay} (like February) use their last day instead.`
+                    : ""}
                 </Text>
               </Stack>
             ) : null}

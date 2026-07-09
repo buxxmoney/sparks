@@ -8,11 +8,9 @@ import { Button } from "@astryxdesign/core/Button";
 import { Link } from "@astryxdesign/core/Link";
 import { Stack } from "@astryxdesign/core/Stack";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 export default function SignupPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -61,8 +59,10 @@ export default function SignupPage() {
         name: `${email.split("@")[0]}'s Organization`,
       });
       setSelectedOrganization(orgData.organizationId);
+      // Full-page navigation so the app shell re-fetches the now-authenticated
+      // session (a client push would keep the stale signed-out session).
       const next = new URLSearchParams(window.location.search).get("next");
-      router.push(next && next.startsWith("/") ? next : "/dashboard");
+      window.location.href = next && next.startsWith("/") ? next : "/dashboard";
     } catch (err) {
       setError("An error occurred. Please try again.");
     } finally {

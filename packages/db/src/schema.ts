@@ -199,6 +199,8 @@ export const alertType = pgEnum("alert_type", [
   "power_restored",
   "demand_spike",
   "invoice_ready",
+  "invoice_parsed",
+  "review_submitted",
 ]);
 export const alertSeverity = pgEnum("alert_severity", ["info", "warning", "critical"]);
 export const alertStatus = pgEnum("alert_status", ["open", "acknowledged", "resolved"]);
@@ -565,6 +567,45 @@ export const siteTariffAssignments = pgTable(
   }),
 );
 
+/**
+ * Reference utility tariff schedules (e.g. Eskom "Schedule of Standard Prices",
+ * a municipality's approved tariffs). These are the PROVIDER's published rates —
+ * distinct from the landlord/legal-ceiling tariffs used by the reconciliation
+ * engine (tariffProfiles/siteTariffAssignments). Uploaded by Sparks operators and
+ * used by the AI at "send to Sparks" time to look up the rate a bill only names
+ * (no printed rate) and sanity-check the amount. Surfaced in the internal review
+ * email only. We store the extracted text so cross-referencing doesn't re-OCR.
+ */
+export const tariffSchedules = pgTable(
+  "tariff_schedules",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    name: text("name").notNull(),
+    // The publishing utility, e.g. "Eskom", "City of Johannesburg". Matched against
+    // the tariff names printed on a bill to pick the applicable schedule.
+    provider: text("provider").notNull(),
+    effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
+    effectiveTo: timestamp("effective_to", { withTimezone: true }),
+    fileStorageKey: text("file_storage_key").notNull(),
+    // LlamaParse markdown (tables preserved) or pdftotext fallback; null until the
+    // background extraction finishes.
+    extractedText: text("extracted_text"),
+    // "pending" while extracting, "ready" once text is stored, "failed" otherwise.
+    extractionStatus: text("extraction_status").notNull().default("pending"),
+    // Which engine actually produced the stored text: "llamaparse" | "pdftotext".
+    extractionEngine: text("extraction_engine"),
+    // Set when LlamaParse was configured but failed (even if pdftotext fallback
+    // succeeded) — so operators can see the good extractor is broken, not silently
+    // degrade to rate-table-less text.
+    extractionError: text("extraction_error"),
+    uploadedByUserId: text("uploaded_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    providerIdx: index("tariff_schedule_provider_idx").on(t.provider, t.effectiveFrom),
+  }),
+);
+
 /* ─────────────── Invoices ─────────────── */
 export const landlordInvoices = pgTable(
   "landlord_invoices",
@@ -587,6 +628,9 @@ export const landlordInvoices = pgTable(
     status: invoiceStatus("status").notNull().default("uploaded"),
     parseModel: text("parse_model"),
     parsedRaw: jsonb("parsed_raw"),
+    // Set when async parsing fails, so the review screen can show why and offer a
+    // retry. Null while parsing/queued and once parsing has succeeded.
+    parseError: text("parse_error"),
     confirmedActiveCents: integer("confirmed_active_cents"),
     confirmedDemandCents: integer("confirmed_demand_cents"),
     confirmedReactiveCents: integer("confirmed_reactive_cents"),

@@ -42,7 +42,6 @@ export default function InvoiceDetailPage() {
   const [lines, setLines] = useState<ReviewLine[]>([]);
   const [error, setError] = useState("");
   const [sendLoading, setSendLoading] = useState(false);
-  const [reopenLoading, setReopenLoading] = useState(false);
   const [sentMsg, setSentMsg] = useState("");
   const [sentReconId, setSentReconId] = useState<string | null>(null);
 
@@ -132,20 +131,36 @@ export default function InvoiceDetailPage() {
     }
   };
 
-  const handleReopen = async () => {
-    setReopenLoading(true);
+
+  // Parsing runs in the background. While the invoice is still being read (and hasn't
+  // failed), poll every 2s so the screen flips to the review as soon as it's ready.
+  const isParsing =
+    !!invoice && !invoice.parseError && (invoice.status === "parsing" || invoice.status === "uploaded");
+  useEffect(() => {
+    if (!isParsing) return;
+    const id = setInterval(() => refetchInvoice(), 2000);
+    return () => clearInterval(id);
+  }, [isParsing, refetchInvoice]);
+
+  const [retryLoading, setRetryLoading] = useState(false);
+  const handleRetry = async () => {
+    setRetryLoading(true);
     setError("");
     try {
-      await client.invoices.reopen({ invoiceId });
+      await client.invoices.retryParse({ invoiceId });
       await refetchInvoice();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to reopen invoice");
+      setError(err instanceof Error ? err.message : "Failed to retry parsing");
     } finally {
-      setReopenLoading(false);
+      setRetryLoading(false);
     }
   };
 
-  if (invoiceLoading) {
+  // Only show the full-page skeleton on the FIRST load. During background polling
+  // (every 2s while parsing) `invoiceLoading` briefly flips true on each refetch —
+  // if we returned the skeleton then, the page would flicker skeleton ↔ content.
+  // Once we have the invoice, keep rendering it (the "Reading…" card handles parsing).
+  if (invoiceLoading && !invoice) {
     return (
       <Stack gap={5}>
         <Skeleton height={32} width={220} />
@@ -161,7 +176,20 @@ export default function InvoiceDetailPage() {
   const isPendingConfirm = invoice.status === "parsed_pending_confirm";
   const isConfirmed = invoice.status === "confirmed";
   const isLocked = invoice.status === "locked";
-  const statusVariant: BadgeVariant = isLocked || isConfirmed ? "success" : "warning";
+  const hasParseError = !!invoice.parseError;
+  const reading = isParsing; // still being read in the background
+  const statusLabel = hasParseError
+    ? "couldn't read"
+    : reading
+      ? "reading…"
+      : invoice.status.replace(/_/g, " ");
+  const statusVariant: BadgeVariant = hasParseError
+    ? "warning"
+    : isLocked || isConfirmed
+      ? "success"
+      : reading
+        ? "neutral"
+        : "warning";
 
   return (
     <Stack gap={5}>
@@ -174,17 +202,63 @@ export default function InvoiceDetailPage() {
           </Link>
           <Heading level={2}>Invoice review</Heading>
         </Stack>
-        <Badge variant={statusVariant} label={invoice.status.replace(/_/g, " ")} />
+        <Badge variant={statusVariant} label={statusLabel} />
       </Stack>
 
       {error ? <Banner status="error" title={error} /> : null}
 
+      {/* Background parsing is still running. */}
+      {reading ? (
+        <Card padding={5}>
+          <Stack gap={3} align="center">
+            <Text weight="semibold">Reading your invoice…</Text>
+            <Text type="supporting">
+              We're extracting the billing period and charges. This usually takes a few seconds —
+              the page updates automatically when it's ready.
+            </Text>
+            <Skeleton height={120} />
+          </Stack>
+        </Card>
+      ) : null}
+
+      {/* Parsing failed — show why and let the customer retry against the stored PDF. */}
+      {hasParseError ? (
+        <Card padding={5}>
+          <Stack gap={4}>
+            <Banner
+              status="error"
+              title="We couldn't read this invoice"
+              description={invoice.parseError ?? undefined}
+            />
+            <Text type="supporting">
+              This can happen with an unusual layout or a scanned copy. Try again, or upload a
+              clearer PDF.
+            </Text>
+            {canAct ? (
+              <div style={{ display: "grid" }}>
+                <Button
+                  label={retryLoading ? "Retrying…" : "Try again"}
+                  variant="primary"
+                  icon={<RotateCcw size={16} />}
+                  isLoading={retryLoading}
+                  onClick={handleRetry}
+                />
+              </div>
+            ) : null}
+          </Stack>
+        </Card>
+      ) : null}
+
+      {!reading && !hasParseError ? (
       <Card padding={5}>
         <Stack gap={3}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             <CalendarRange size={16} color="hsl(221 83% 45%)" />
             <Text weight="semibold">Billing period</Text>
-            <Text type="supporting">— read from the invoice; fix it here if it's wrong</Text>
+            <Text type="supporting">
+              — the dates we read from your invoice. They set the period your usage is reconciled
+              against, so check they match your bill and adjust if needed.
+            </Text>
           </span>
           {isPendingConfirm ? (
             <Stack direction="horizontal" gap={3} align="end" wrap="wrap">
@@ -226,6 +300,7 @@ export default function InvoiceDetailPage() {
           )}
         </Stack>
       </Card>
+      ) : null}
 
       {isPendingConfirm ? (
         <Card padding={5}>
@@ -267,15 +342,11 @@ export default function InvoiceDetailPage() {
                     : `/sites/${siteId}/reconciliation`
                 }
               />
-              <Button
-                label={reopenLoading ? "Reopening…" : "Reopen"}
-                variant="secondary"
-                icon={<RotateCcw size={16} />}
-                isLoading={reopenLoading}
-                onClick={handleReopen}
-                isDisabled={!isLocked || !canAct}
-              />
             </Stack>
+            <Text type="supporting">
+              It's with Sparks now — we'll get back to you. Need a change? Reply to us and we'll sort
+              it out.
+            </Text>
           </Stack>
         </Card>
       ) : null}

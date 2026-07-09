@@ -150,3 +150,101 @@ export async function dispatchBillOutcome(params: {
 
   return { alertId: alert.id, recipientCount: recipients.length, attachmentKey };
 }
+
+/**
+ * In-app notification that background parsing of an uploaded invoice has finished
+ * (or failed). Lets a customer who navigated away from the upload screen find out
+ * their invoice is ready to review (or needs re-uploading). App-inbox only — no
+ * email/SMS, to avoid noise on a routine step. Best-effort; never throws.
+ */
+export async function dispatchInvoiceParsed(params: {
+  invoiceId: string;
+  siteId: string;
+  organizationId: string;
+  siteName: string;
+  ok: boolean;
+  errorMessage?: string | null;
+}): Promise<void> {
+  try {
+    const db = getDb();
+    const recipients = await resolveRecipients(params.organizationId, params.siteId);
+    if (recipients.length === 0) return;
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        organizationId: params.organizationId,
+        siteId: params.siteId,
+        type: "invoice_parsed",
+        severity: params.ok ? "info" : "warning",
+        title: params.ok
+          ? `Invoice ready to review — ${params.siteName}`
+          : `Couldn't read an invoice — ${params.siteName}`,
+        message: params.ok
+          ? "We've finished reading your invoice. Open it to review the charges and send it to Sparks."
+          : `We couldn't read the invoice you uploaded${
+              params.errorMessage ? `: ${params.errorMessage}` : ""
+            }. Please open it and try again.`,
+        payload: { invoiceId: params.invoiceId, ok: params.ok },
+        status: "open",
+      })
+      .returning();
+
+    for (const r of recipients) {
+      await db.insert(alertDeliveries).values({
+        alertId: alert.id,
+        channel: "app",
+        recipientUserId: r.id,
+        status: "sent",
+        sentAt: new Date(),
+      });
+    }
+  } catch (err) {
+    console.error(`[notify] invoice-parsed alert failed for ${params.invoiceId}:`, err);
+  }
+}
+
+/**
+ * In-app confirmation for the customer that their bill has been SENT to Sparks for
+ * review — closing the loop (ready → sent → outcome) in their Alerts inbox.
+ * App-inbox only; best-effort; never throws.
+ */
+export async function dispatchReviewSubmitted(params: {
+  invoiceId: string;
+  siteId: string;
+  organizationId: string;
+  siteName: string;
+}): Promise<void> {
+  try {
+    const db = getDb();
+    const recipients = await resolveRecipients(params.organizationId, params.siteId);
+    if (recipients.length === 0) return;
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        organizationId: params.organizationId,
+        siteId: params.siteId,
+        type: "review_submitted",
+        severity: "info",
+        title: `Sent to Sparks — ${params.siteName}`,
+        message:
+          "Your bill has been sent to Sparks for review. We'll check the charges against your meter and let you know the outcome.",
+        payload: { invoiceId: params.invoiceId },
+        status: "open",
+      })
+      .returning();
+
+    for (const r of recipients) {
+      await db.insert(alertDeliveries).values({
+        alertId: alert.id,
+        channel: "app",
+        recipientUserId: r.id,
+        status: "sent",
+        sentAt: new Date(),
+      });
+    }
+  } catch (err) {
+    console.error(`[notify] review-submitted alert failed for ${params.invoiceId}:`, err);
+  }
+}

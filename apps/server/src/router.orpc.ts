@@ -13,8 +13,17 @@ export const appRouter = {
   admin: {
     createCustomer: proc(V.adminCreateCustomerInput, A.adminCreateCustomer),
     listOrganizations: procNoInput(A.adminListOrganizations),
+    listOrgSites: proc(V.adminListOrgSitesInput, A.adminListOrgSites),
+    deleteOrganization: proc(V.adminDeleteOrganizationInput, A.adminDeleteOrganization),
     listReviewQueue: procNoInput(A.adminListReviewQueue),
+    listReviewedBills: proc(V.adminListReviewedBillsInput, A.adminListReviewedBills),
     reviewReconciliation: proc(V.adminReviewReconciliationInput, A.adminReviewReconciliation),
+    tariffSchedulesCreate: proc(V.tariffSchedulesCreateInput, A.adminTariffSchedulesCreate),
+    tariffSchedulesList: procNoInput(A.adminTariffSchedulesList),
+    tariffSchedulesDelete: proc(V.tariffSchedulesDeleteInput, A.adminTariffSchedulesDelete),
+    // Assign a landlord tariff to a site + recompute its pending reconciliation.
+    siteTariffGet: proc(V.adminSiteTariffGetInput, R.adminSiteTariffGet),
+    assignSiteTariff: proc(V.adminAssignSiteTariffInput, R.adminAssignSiteTariff),
   },
   session: {
     me: procNoInput(sessionMe),
@@ -104,6 +113,7 @@ export const appRouter = {
   invoices: {
     createUpload: proc(V.invoicesCreateUploadInput, R.invoicesCreateUpload),
     uploadAndParse: proc(V.invoicesUploadAndParseInput, R.invoicesUploadAndParse),
+    retryParse: proc(V.invoicesRetryParseInput, R.invoicesRetryParse),
     setPeriod: proc(V.invoicesSetPeriodInput, R.invoicesSetPeriod),
     get: proc(V.invoicesGetInput, R.invoicesGet),
     list: proc(V.invoicesListInput, R.invoicesList),

@@ -1,7 +1,21 @@
 "use client";
 
-import { useState } from "react";
-import { Building2, UserPlus, MapPin, ClipboardCheck, ExternalLink, Send } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Building2,
+  UserPlus,
+  MapPin,
+  ClipboardCheck,
+  Send,
+  ScrollText,
+  Trash2,
+  Upload,
+  Coins,
+  History,
+  Search,
+  ChevronDown,
+  ChevronRight,
+} from "lucide-react";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Grid } from "@astryxdesign/core/Grid";
 import { Card } from "@astryxdesign/core/Card";
@@ -42,12 +56,63 @@ export default function AdminPage() {
   const [siteMsg, setSiteMsg] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [siteBusy, setSiteBusy] = useState(false);
 
-  // Sparks QA queue — reconciliations awaiting sign-off.
+  // The unified work queue — every submitted bill still awaiting an operator response.
   const {
     data: queueData,
     loading: queueLoading,
     refetch: refetchQueue,
   } = useRPC(() => client.admin.listReviewQueue(), []);
+
+  // Reviewed history — bills already responded to. Searchable + paginated (it grows
+  // without bound). The search box is debounced so we don't fire a call per keystroke.
+  const REVIEWED_LIMIT = 25;
+  const [reviewedSearch, setReviewedSearch] = useState("");
+  const [reviewedQuery, setReviewedQuery] = useState("");
+  const [reviewedOffset, setReviewedOffset] = useState(0);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setReviewedQuery(reviewedSearch.trim());
+      setReviewedOffset(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [reviewedSearch]);
+  const {
+    data: reviewedData,
+    loading: reviewedLoading,
+    refetch: refetchReviewed,
+  } = useRPC(
+    () =>
+      client.admin.listReviewedBills({
+        query: reviewedQuery || undefined,
+        limit: REVIEWED_LIMIT,
+        offset: reviewedOffset,
+      }),
+    [reviewedQuery, reviewedOffset],
+  );
+  const reviewed = reviewedData?.reviewed ?? [];
+  const reviewedTotal = reviewedData?.total ?? 0;
+
+  // Provisioning/setup forms live behind a toggle so the work queue stays front-and-centre.
+  const [showProvisioning, setShowProvisioning] = useState(false);
+
+  // Org/site decommissioning (subscription ended). manageOrg opens the panel that lists
+  // the org's sites + the delete-organization flow.
+  const [manageOrg, setManageOrg] = useState<{ id: string; name: string } | null>(null);
+  const [orgDeleteConfirm, setOrgDeleteConfirm] = useState("");
+  const [orgActionBusy, setOrgActionBusy] = useState(false);
+  const [orgActionMsg, setOrgActionMsg] = useState<{ kind: "success" | "error"; text: string } | null>(
+    null,
+  );
+  const {
+    data: orgSitesData,
+    loading: orgSitesLoading,
+    refetch: refetchOrgSites,
+  } = useRPC(
+    manageOrg ? () => client.admin.listOrgSites({ organizationId: manageOrg.id }) : null,
+    [manageOrg?.id],
+  );
+  const orgSites = orgSitesData?.sites ?? [];
+
   const [reviewBusy, setReviewBusy] = useState(false);
   const [queueMsg, setQueueMsg] = useState<{ kind: "success" | "error"; text: string } | null>(
     null,
@@ -57,6 +122,28 @@ export default function AdminPage() {
   const [outSubject, setOutSubject] = useState("");
   const [outBody, setOutBody] = useState("");
   const [outFile, setOutFile] = useState<{ name: string; base64: string } | null>(null);
+
+  // The site the operator is assigning a landlord tariff to (null = closed). Carries the
+  // bill's billing period so the pending reconciliation can be recomputed on assign.
+  const [assignTo, setAssignTo] = useState<{
+    siteId: string;
+    siteName: string;
+    billingPeriodId: string | null;
+    periodStart: string | null;
+  } | null>(null);
+  const [assignName, setAssignName] = useState("Landlord tariff");
+  const [assignEffFrom, setAssignEffFrom] = useState("");
+  // The common landlord charge types, each an optional decimal rate. Blank = not charged.
+  const [assignRates, setAssignRates] = useState({
+    active: "",
+    demand: "",
+    fixed: "",
+    reactive: "",
+  });
+  const [assignBusy, setAssignBusy] = useState(false);
+  const [assignMsg, setAssignMsg] = useState<{ kind: "success" | "error"; text: string } | null>(
+    null,
+  );
 
   const organizations = orgData?.organizations ?? [];
   const queue = queueData?.queue ?? [];
@@ -82,6 +169,80 @@ export default function AdminPage() {
     reader.readAsDataURL(file);
   };
 
+  // Reference tariff schedules (Eskom / municipal published prices).
+  const { data: schedData, refetch: refetchSched } = useRPC(
+    () => client.admin.tariffSchedulesList(),
+    [],
+  );
+  const schedules = schedData?.schedules ?? [];
+  // Poll while any schedule is still extracting so its status flips to ready live.
+  const anyExtracting = schedules.some((s) => s.extractionStatus === "pending");
+  useEffect(() => {
+    if (!anyExtracting) return;
+    const id = setInterval(() => refetchSched(), 3000);
+    return () => clearInterval(id);
+  }, [anyExtracting, refetchSched]);
+  const [schName, setSchName] = useState("");
+  const [schProvider, setSchProvider] = useState("");
+  const [schFrom, setSchFrom] = useState("");
+  const [schTo, setSchTo] = useState("");
+  const [schFile, setSchFile] = useState<{ name: string; base64: string } | null>(null);
+  const [schBusy, setSchBusy] = useState(false);
+  const [schMsg, setSchMsg] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+
+  const pickSchedule = (file: File | undefined) => {
+    if (!file) {
+      setSchFile(null);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () =>
+      setSchFile({ name: file.name, base64: String(reader.result).split(",")[1] ?? "" });
+    reader.readAsDataURL(file);
+  };
+
+  const uploadSchedule = async () => {
+    if (!schName || !schProvider || !schFrom || !schFile) {
+      setSchMsg({ kind: "error", text: "Name, provider, effective-from date and a PDF are required." });
+      return;
+    }
+    setSchBusy(true);
+    setSchMsg(null);
+    try {
+      const res = await client.admin.tariffSchedulesCreate({
+        name: schName,
+        provider: schProvider,
+        effectiveFrom: new Date(schFrom),
+        effectiveTo: schTo ? new Date(schTo) : undefined,
+        filename: schFile.name,
+        contentBase64: schFile.base64,
+      });
+      setSchMsg({
+        kind: "success",
+        text: `Uploaded "${res.name}" — extracting rates with ${res.engine}. It'll show as ready below in a minute or two.`,
+      });
+      setSchName("");
+      setSchProvider("");
+      setSchFrom("");
+      setSchTo("");
+      setSchFile(null);
+      refetchSched();
+    } catch (err) {
+      setSchMsg({ kind: "error", text: err instanceof Error ? err.message : "Upload failed" });
+    } finally {
+      setSchBusy(false);
+    }
+  };
+
+  const deleteSchedule = async (id: string) => {
+    try {
+      await client.admin.tariffSchedulesDelete({ scheduleId: id });
+      refetchSched();
+    } catch (err) {
+      setSchMsg({ kind: "error", text: err instanceof Error ? err.message : "Delete failed" });
+    }
+  };
+
   const sendOutcome = async (status: "reviewed" | "flagged") => {
     if (!respondTo) return;
     if (!outSubject.trim() || !outBody.trim()) {
@@ -103,11 +264,12 @@ export default function AdminPage() {
         kind: "success",
         text:
           status === "reviewed"
-            ? "Sent — verified, and the customer's sealed PDF is unlocked."
-            : "Sent — flagged back to the customer with your notes.",
+            ? "Sent — reconciliation confirmed; the customer can download their sealed report."
+            : "Sent — closed with no reconciliation; no report was generated.",
       });
       setRespondTo(null);
       refetchQueue();
+      refetchReviewed();
     } catch (err) {
       setQueueMsg({
         kind: "error",
@@ -115,6 +277,104 @@ export default function AdminPage() {
       });
     } finally {
       setReviewBusy(false);
+    }
+  };
+
+  const openAssign = async (target: {
+    siteId: string;
+    siteName: string;
+    billingPeriodId: string | null;
+    periodStart: string | null;
+  }) => {
+    setAssignTo(target);
+    setAssignMsg(null);
+    setAssignBusy(false);
+    setAssignName("Landlord tariff");
+    // Default the effective-from date to the bill's period start so the assignment covers
+    // the (often historical) period being priced — otherwise the recompute stays pending.
+    setAssignEffFrom(target.periodStart ? new Date(target.periodStart).toISOString().slice(0, 10) : "");
+    setAssignRates({ active: "", demand: "", fixed: "", reactive: "" });
+    // Prefill from any landlord tariff already on file, so re-assigning starts from the
+    // current rates instead of a blank form.
+    try {
+      const cur = await client.admin.siteTariffGet({ siteId: target.siteId });
+      if (cur.rates.length > 0) {
+        const find = (ct: string) => {
+          const r = cur.rates.find((x) => x.chargeType === ct);
+          return r ? String(Number(r.rateValue)) : "";
+        };
+        setAssignRates({
+          active: find("active_energy"),
+          demand: find("demand"),
+          fixed: find("fixed"),
+          reactive: find("reactive_energy"),
+        });
+        if (cur.profile?.name) setAssignName(cur.profile.name);
+      }
+    } catch {
+      // Best-effort prefill; a blank form is still fine.
+    }
+  };
+
+  const submitAssign = async () => {
+    if (!assignTo) return;
+    if (!assignEffFrom) {
+      setAssignMsg({ kind: "error", text: "Pick the date the tariff takes effect from." });
+      return;
+    }
+    const decimal = /^\d+(\.\d{1,6})?$/;
+    const rates: Array<{ chargeType: string; unit: string; rateValue: string }> = [];
+    const add = (raw: string, chargeType: string, unit: string): boolean => {
+      const v = raw.trim();
+      if (!v) return true;
+      if (!decimal.test(v)) {
+        setAssignMsg({ kind: "error", text: `"${v}" isn't a valid rate — use a number like 2.20.` });
+        return false;
+      }
+      rates.push({ chargeType, unit, rateValue: v });
+      return true;
+    };
+    if (!add(assignRates.active, "active_energy", "c_per_kwh")) return;
+    if (!add(assignRates.demand, "demand", "r_per_kva")) return;
+    if (!add(assignRates.fixed, "fixed", "r_per_month")) return;
+    if (!add(assignRates.reactive, "reactive_energy", "c_per_kvarh")) return;
+    if (rates.length === 0) {
+      setAssignMsg({ kind: "error", text: "Enter at least one rate for the landlord tariff." });
+      return;
+    }
+    setAssignBusy(true);
+    setAssignMsg(null);
+    try {
+      const res = await client.admin.assignSiteTariff({
+        siteId: assignTo.siteId,
+        name: assignName.trim() || "Landlord tariff",
+        effectiveFrom: new Date(assignEffFrom),
+        rates: rates as Parameters<typeof client.admin.assignSiteTariff>[0]["rates"],
+        regenerateBillingPeriodId: assignTo.billingPeriodId ?? undefined,
+      });
+      setAssignTo(null);
+      setQueueMsg(
+        res.regenerateError
+          ? {
+              kind: "error",
+              text: `Tariff assigned to ${assignTo.siteName}, but recomputing the reconciliation failed: ${res.regenerateError}`,
+            }
+          : {
+              kind: "success",
+              text: res.regenerated
+                ? `Landlord tariff assigned to ${assignTo.siteName} and the reconciliation recomputed — the expected side is filled in.`
+                : `Landlord tariff assigned to ${assignTo.siteName}.`,
+            },
+      );
+      refetchQueue();
+      refetchReviewed();
+    } catch (err) {
+      setAssignMsg({
+        kind: "error",
+        text: err instanceof Error ? err.message : "Failed to assign the tariff.",
+      });
+    } finally {
+      setAssignBusy(false);
     }
   };
 
@@ -200,76 +460,170 @@ export default function AdminPage() {
     }
   };
 
+  const openManage = (id: string, name: string) => {
+    setManageOrg({ id, name });
+    setOrgDeleteConfirm("");
+    setOrgActionMsg(null);
+  };
+
+  const deleteOneSite = async (siteId: string, name: string) => {
+    if (!window.confirm(`Delete site "${name}" and all its meters, readings and bills? This can't be undone.`))
+      return;
+    setOrgActionBusy(true);
+    setOrgActionMsg(null);
+    try {
+      await client.sites.delete({ siteId });
+      setOrgActionMsg({ kind: "success", text: `Site "${name}" deleted.` });
+      refetchOrgSites();
+      refetch();
+    } catch (err) {
+      setOrgActionMsg({
+        kind: "error",
+        text: err instanceof Error ? err.message : "Failed to delete site.",
+      });
+    } finally {
+      setOrgActionBusy(false);
+    }
+  };
+
+  const deleteOrg = async () => {
+    if (!manageOrg) return;
+    if (orgDeleteConfirm.trim() !== manageOrg.name) {
+      setOrgActionMsg({ kind: "error", text: "Type the organization name exactly to confirm." });
+      return;
+    }
+    setOrgActionBusy(true);
+    setOrgActionMsg(null);
+    try {
+      const res = await client.admin.deleteOrganization({
+        organizationId: manageOrg.id,
+        confirmName: orgDeleteConfirm.trim(),
+      });
+      const deletedName = manageOrg.name;
+      setManageOrg(null);
+      setOrgDeleteConfirm("");
+      setCustMsg({
+        kind: "success",
+        text: `Deleted "${deletedName}" and its ${res.siteCount} site(s).`,
+      });
+      refetch();
+    } catch (err) {
+      setOrgActionMsg({
+        kind: "error",
+        text: err instanceof Error ? err.message : "Failed to delete organization.",
+      });
+    } finally {
+      setOrgActionBusy(false);
+    }
+  };
+
   return (
     <Stack gap={6}>
       <Stack gap={1}>
         <Heading level={2}>Operator admin</Heading>
-        <Text type="supporting">Provision customer accounts and the sites under each organization.</Text>
+        <Text type="supporting">
+          Review the bills customers send to Sparks, then track the ones you've finished.
+        </Text>
       </Stack>
 
-      <Grid columns={{ minWidth: 420, repeat: "fit" }} gap={6}>
-        {/* Provision a customer */}
+      {/* Assign a landlord tariff to a site (fills a pending reconciliation's expected side) */}
+      {assignTo ? (
         <Card padding={5}>
-          <form onSubmit={submitCustomer}>
-            <Stack gap={4}>
-              <Stack direction="horizontal" gap={2} align="center">
-                <span style={{ display: "inline-flex", color: PRIMARY }}><UserPlus size={16} /></span>
-                <Text weight="semibold">Provision a customer</Text>
-              </Stack>
-              {custMsg ? <Banner status={custMsg.kind} title={custMsg.text} /> : null}
-              <TextInput label="Contact name" value={cName} onChange={setCName} isDisabled={custBusy} width="100%" />
-              <TextInput label="Contact email" type="email" value={cEmail} onChange={setCEmail} isDisabled={custBusy} width="100%" />
-              <TextInput label="Organization name" value={orgName} onChange={setOrgName} isDisabled={custBusy} width="100%" />
-              <div style={{ display: "grid" }}>
-                <Button label={custBusy ? "Creating…" : "Create account & send invite"} type="submit" variant="primary" isLoading={custBusy} />
-              </div>
+          <Stack gap={4}>
+            <Stack direction="horizontal" gap={2} align="center">
+              <span style={{ display: "inline-flex", color: PRIMARY }}>
+                <Coins size={16} />
+              </span>
+              <Text weight="semibold">Assign landlord tariff — {assignTo.siteName}</Text>
             </Stack>
-          </form>
-        </Card>
-
-        {/* Add a site to an org */}
-        <Card padding={5}>
-          <form onSubmit={submitSite}>
-            <Stack gap={4}>
-              <Stack direction="horizontal" gap={2} align="center">
-                <span style={{ display: "inline-flex", color: PRIMARY }}><MapPin size={16} /></span>
-                <Text weight="semibold">Add a site to an organization</Text>
-              </Stack>
-              {siteMsg ? <Banner status={siteMsg.kind} title={siteMsg.text} /> : null}
-              <Selector
-                label="Organization"
-                placeholder="Select an organization…"
-                options={organizations.map((o) => ({ value: o.id, label: o.name }))}
-                value={siteOrgId}
-                onChange={setSiteOrgId}
+            <Text type="supporting">
+              Enter the landlord's stated rates. On save this becomes the site's landlord tariff
+              {assignTo.billingPeriodId
+                ? " and the bill's reconciliation is recomputed, filling in the pending “expected” side."
+                : "."}{" "}
+              Leave a charge blank if it doesn't apply.
+            </Text>
+            {assignMsg ? <Banner status={assignMsg.kind} title={assignMsg.text} /> : null}
+            <Grid columns={{ minWidth: 200, repeat: "fit" }} gap={3}>
+              <TextInput
+                label="Active energy (c/kWh)"
+                value={assignRates.active}
+                onChange={(v) => setAssignRates((r) => ({ ...r, active: v }))}
+                isDisabled={assignBusy}
+                width="100%"
               />
-              <TextInput label="Site name" value={siteName} onChange={setSiteName} isDisabled={siteBusy} width="100%" />
-              <TextInput label="Address line 1" value={siteAddr} onChange={setSiteAddr} isDisabled={siteBusy} width="100%" />
-              <Grid columns={2} gap={3}>
-                <TextInput label="City" value={siteCity} onChange={setSiteCity} isDisabled={siteBusy} width="100%" />
-                <TextInput label="Province" value={siteProvince} onChange={setSiteProvince} isDisabled={siteBusy} width="100%" />
-              </Grid>
-              <div style={{ display: "grid" }}>
-                <Button label={siteBusy ? "Adding…" : "Add site"} type="submit" variant="primary" isLoading={siteBusy} />
-              </div>
+              <TextInput
+                label="Demand (R/kVA)"
+                value={assignRates.demand}
+                onChange={(v) => setAssignRates((r) => ({ ...r, demand: v }))}
+                isDisabled={assignBusy}
+                width="100%"
+              />
+              <TextInput
+                label="Fixed / service (R/month)"
+                value={assignRates.fixed}
+                onChange={(v) => setAssignRates((r) => ({ ...r, fixed: v }))}
+                isDisabled={assignBusy}
+                width="100%"
+              />
+              <TextInput
+                label="Reactive energy (c/kVArh)"
+                value={assignRates.reactive}
+                onChange={(v) => setAssignRates((r) => ({ ...r, reactive: v }))}
+                isDisabled={assignBusy}
+                width="100%"
+              />
+            </Grid>
+            <Grid columns={{ minWidth: 200, repeat: "fit" }} gap={3}>
+              <TextInput
+                label="Tariff name"
+                value={assignName}
+                onChange={setAssignName}
+                isDisabled={assignBusy}
+                width="100%"
+              />
+              <Stack gap={1}>
+                <Text type="supporting">Effective from</Text>
+                <input
+                  type="date"
+                  value={assignEffFrom}
+                  disabled={assignBusy}
+                  onChange={(e) => setAssignEffFrom(e.target.value)}
+                />
+              </Stack>
+            </Grid>
+            <Stack direction="horizontal" gap={3} wrap="wrap">
+              <Button
+                label={assignBusy ? "Assigning…" : "Assign tariff & recompute"}
+                variant="primary"
+                isLoading={assignBusy}
+                onClick={submitAssign}
+              />
+              <Button
+                label="Cancel"
+                variant="ghost"
+                isDisabled={assignBusy}
+                onClick={() => setAssignTo(null)}
+              />
             </Stack>
-          </form>
+          </Stack>
         </Card>
-      </Grid>
+      ) : null}
 
-      {/* Sparks QA queue */}
+      {/* Unified work queue — everything awaiting an operator response */}
       <Card padding={5}>
         <Stack gap={3}>
           <Stack direction="horizontal" gap={2} align="center">
             <span style={{ display: "inline-flex", color: PRIMARY }}>
               <ClipboardCheck size={16} />
             </span>
-            <Text weight="semibold">Reconciliation QA queue</Text>
-            {queue.length > 0 ? <Badge variant="warning" label={`${queue.length} pending`} /> : null}
+            <Text weight="semibold">Needs review</Text>
+            {queue.length > 0 ? <Badge variant="warning" label={`${queue.length}`} /> : null}
           </Stack>
           <Text type="supporting">
-            Every reconciliation lands here as provisional. Verify to unlock the customer's sealed
-            dispute PDF, or flag it back for a fix. Customer-requested reviews are shown first.
+            Bills customers have sent to Sparks, waiting on you. Assign a landlord tariff where the
+            expected side is still pending, then review &amp; respond — verify to unlock the
+            customer's sealed dispute PDF, or send it back for a fix. Responded bills move to Reviewed.
           </Text>
           {queueMsg ? <Banner status={queueMsg.kind} title={queueMsg.text} /> : null}
           {queueLoading ? (
@@ -284,35 +638,48 @@ export default function AdminPage() {
               data={queue}
               columns={[
                 {
-                  key: "site",
-                  header: "Site / org",
+                  key: "who",
+                  header: "Submitted by",
                   renderCell: (q) => (
                     <Stack gap={0}>
-                      <Text weight="medium">{q.siteName ?? "—"}</Text>
+                      <Text weight="medium">{q.customerEmail ?? "Customer"}</Text>
                       <Text type="supporting">{q.organizationName ?? "—"}</Text>
                     </Stack>
                   ),
                 },
                 {
-                  key: "period",
-                  header: "Period",
+                  key: "site",
+                  header: "Site / period",
                   renderCell: (q) => (
-                    <Text type="supporting">
-                      {new Date(q.billingPeriodStart).toLocaleDateString()} –{" "}
-                      {new Date(q.billingPeriodEnd).toLocaleDateString()}
-                    </Text>
+                    <Stack gap={0}>
+                      <Text>{q.siteName ?? "Site"}</Text>
+                      <Text type="supporting">
+                        {new Date(q.billingPeriodStart).toLocaleDateString()} –{" "}
+                        {new Date(q.billingPeriodEnd).toLocaleDateString()}
+                      </Text>
+                    </Stack>
                   ),
                 },
                 {
-                  key: "discrepancy",
+                  key: "billed",
+                  header: "Billed",
+                  renderCell: (q) => <Text weight="medium">{randFmt(q.chargedTotalCents)}</Text>,
+                },
+                {
+                  key: "status",
                   header: "Discrepancy",
                   renderCell: (q) => {
+                    // No landlord tariff yet ⇒ the expected side is undetermined. Show a
+                    // clear status rather than a misleading R 0.00.
+                    if (q.state === "needs_tariff") {
+                      return <Badge variant="warning" label="Needs tariff" />;
+                    }
+                    if (q.expectedLandlordCents == null) {
+                      return <Badge variant="warning" label="Expected: pending" />;
+                    }
                     const d = q.discrepancyVsLandlordCents ?? 0;
                     return (
-                      <Text
-                        weight="medium"
-                        // biome-ignore lint/style/useNamingConvention: inline color
-                      >
+                      <Text weight="medium">
                         <span style={{ color: d > 0 ? "hsl(0 72% 45%)" : "hsl(142 71% 35%)" }}>
                           {d > 0 ? "+" : ""}
                           {randFmt(d)}
@@ -326,8 +693,6 @@ export default function AdminPage() {
                   header: "Flags",
                   renderCell: (q) => (
                     <Stack direction="horizontal" gap={1} wrap="wrap">
-                      {q.reviewRequestedAt ? <Badge variant="warning" label="Customer asked" /> : null}
-                      {q.reviewStatus === "flagged" ? <Badge variant="warning" label="Flagged" /> : null}
                       {q.dataIntegrityStatus === "gaps_present" ? (
                         <Badge label="Data gaps" />
                       ) : null}
@@ -338,18 +703,33 @@ export default function AdminPage() {
                   key: "actions",
                   header: "",
                   renderCell: (q) => (
-                    <Stack direction="horizontal" gap={2} wrap="wrap" align="center">
-                      <Button
-                        label="Open"
-                        variant="ghost"
-                        icon={<ExternalLink size={14} />}
-                        href={`/sites/${q.siteId}/reconciliation/${q.reconId}`}
-                      />
-                      <Button
-                        label="Review & respond"
-                        variant="primary"
-                        onClick={() => openRespond(q.reconId, q.siteName ?? "the site")}
-                      />
+                    <Stack direction="horizontal" gap={2} wrap="wrap">
+                      {q.expectedLandlordCents == null ? (
+                        <Button
+                          label="Assign tariff"
+                          variant={q.reconId ? "secondary" : "primary"}
+                          size="sm"
+                          icon={<Coins size={14} />}
+                          onClick={() =>
+                            openAssign({
+                              siteId: q.siteId,
+                              siteName: q.siteName ?? "the site",
+                              billingPeriodId: q.billingPeriodId ?? null,
+                              periodStart: q.billingPeriodStart
+                                ? new Date(q.billingPeriodStart).toISOString()
+                                : null,
+                            })
+                          }
+                        />
+                      ) : null}
+                      {q.reconId ? (
+                        <Button
+                          label="Review & respond"
+                          variant="primary"
+                          size="sm"
+                          onClick={() => openRespond(q.reconId as string, q.siteName ?? "the site")}
+                        />
+                      ) : null}
                     </Stack>
                   ),
                 },
@@ -370,8 +750,10 @@ export default function AdminPage() {
                   <Text weight="semibold">Send review outcome — {respondTo.siteName}</Text>
                 </Stack>
                 <Text type="supporting">
-                  Write the description that goes to the customer's Alerts inbox and email. Attach a
-                  document if you prepared one. "Verified" unlocks their sealed dispute PDF.
+                  Write the description that goes to the customer's Alerts inbox and email, and
+                  attach a document if you prepared one. Choose the outcome:{" "}
+                  <strong>Reconciliation found</strong> releases their sealed dispute report to
+                  download; <strong>No reconciliation</strong> closes the review with no report.
                 </Text>
                 <TextInput
                   label="Subject"
@@ -409,13 +791,13 @@ export default function AdminPage() {
                 </Stack>
                 <Stack direction="horizontal" gap={3} wrap="wrap">
                   <Button
-                    label={reviewBusy ? "Sending…" : "Send as Verified"}
+                    label={reviewBusy ? "Sending…" : "Reconciliation found — release report"}
                     variant="primary"
                     isLoading={reviewBusy}
                     onClick={() => sendOutcome("reviewed")}
                   />
                   <Button
-                    label="Send as Flagged"
+                    label="No reconciliation found"
                     variant="secondary"
                     isDisabled={reviewBusy}
                     onClick={() => sendOutcome("flagged")}
@@ -433,29 +815,453 @@ export default function AdminPage() {
         </Stack>
       </Card>
 
-      {/* Organizations overview */}
+      {/* Reviewed history — bills already responded to (searchable, paginated) */}
       <Card padding={5}>
         <Stack gap={3}>
-          <Text weight="semibold">Organizations</Text>
-          {loading ? (
+          <Stack direction="horizontal" gap={2} align="center">
+            <span style={{ display: "inline-flex", color: PRIMARY }}>
+              <History size={16} />
+            </span>
+            <Text weight="semibold">Reviewed</Text>
+            {reviewedTotal > 0 ? <Badge label={`${reviewedTotal}`} /> : null}
+          </Stack>
+          <Text type="supporting">
+            Bills you've responded to — verified or sent back — newest first. Search by site,
+            organization or customer.
+          </Text>
+          <Stack direction="horizontal" gap={2} align="center">
+            <span style={{ display: "inline-flex", color: "hsl(215 16% 47%)" }}>
+              <Search size={16} />
+            </span>
+            <TextInput
+              label=""
+              placeholder="Search reviewed bills…"
+              value={reviewedSearch}
+              onChange={setReviewedSearch}
+              width="100%"
+            />
+          </Stack>
+          {reviewedLoading ? (
             <Stack gap={2}>
               <Skeleton height={40} />
               <Skeleton height={40} />
             </Stack>
-          ) : organizations.length === 0 ? (
-            <Text type="supporting">No organizations yet. Provision a customer above.</Text>
+          ) : reviewed.length === 0 ? (
+            <Text type="supporting">
+              {reviewedQuery ? "No reviewed bills match your search." : "No bills reviewed yet."}
+            </Text>
+          ) : (
+            <>
+              <Table
+                data={reviewed}
+                columns={[
+                  {
+                    key: "who",
+                    header: "Submitted by",
+                    renderCell: (r) => (
+                      <Stack gap={0}>
+                        <Text weight="medium">{r.customerEmail ?? "Customer"}</Text>
+                        <Text type="supporting">{r.organizationName ?? "—"}</Text>
+                      </Stack>
+                    ),
+                  },
+                  {
+                    key: "site",
+                    header: "Site / period",
+                    renderCell: (r) => (
+                      <Stack gap={0}>
+                        <Text>{r.siteName ?? "Site"}</Text>
+                        <Text type="supporting">
+                          {new Date(r.billingPeriodStart).toLocaleDateString()} –{" "}
+                          {new Date(r.billingPeriodEnd).toLocaleDateString()}
+                        </Text>
+                      </Stack>
+                    ),
+                  },
+                  {
+                    key: "billed",
+                    header: "Billed",
+                    renderCell: (r) => <Text weight="medium">{randFmt(r.chargedTotalCents)}</Text>,
+                  },
+                  {
+                    key: "discrepancy",
+                    header: "Discrepancy",
+                    renderCell: (r) => {
+                      if (r.expectedLandlordCents == null) return <Text type="supporting">—</Text>;
+                      const d = r.discrepancyVsLandlordCents ?? 0;
+                      return (
+                        <Text weight="medium">
+                          <span style={{ color: d > 0 ? "hsl(0 72% 45%)" : "hsl(142 71% 35%)" }}>
+                            {d > 0 ? "+" : ""}
+                            {randFmt(d)}
+                          </span>
+                        </Text>
+                      );
+                    },
+                  },
+                  {
+                    key: "outcome",
+                    header: "Outcome",
+                    renderCell: (r) =>
+                      r.reviewStatus === "reviewed" ? (
+                        <Badge variant="success" label="Report released" />
+                      ) : (
+                        <Badge variant="neutral" label="No reconciliation" />
+                      ),
+                  },
+                  {
+                    key: "when",
+                    header: "Reviewed",
+                    renderCell: (r) => (
+                      <Text type="supporting">
+                        {r.reviewedAt ? new Date(r.reviewedAt).toLocaleDateString() : "—"}
+                      </Text>
+                    ),
+                  },
+                ]}
+                density="compact"
+                dividers="rows"
+              />
+              <Stack direction="horizontal" gap={3} align="center" justify="between" wrap="wrap">
+                <Text type="supporting">
+                  Showing {reviewedOffset + 1}–{Math.min(reviewedOffset + REVIEWED_LIMIT, reviewedTotal)}{" "}
+                  of {reviewedTotal}
+                </Text>
+                <Stack direction="horizontal" gap={2}>
+                  <Button
+                    label="Previous"
+                    variant="secondary"
+                    size="sm"
+                    isDisabled={reviewedOffset === 0}
+                    onClick={() => setReviewedOffset(Math.max(0, reviewedOffset - REVIEWED_LIMIT))}
+                  />
+                  <Button
+                    label="Next"
+                    variant="secondary"
+                    size="sm"
+                    isDisabled={reviewedOffset + REVIEWED_LIMIT >= reviewedTotal}
+                    onClick={() => setReviewedOffset(reviewedOffset + REVIEWED_LIMIT)}
+                  />
+                </Stack>
+              </Stack>
+            </>
+          )}
+        </Stack>
+      </Card>
+
+      {/* Reference tariff schedules */}
+      <Card padding={5}>
+        <Stack gap={4}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <span style={{ color: PRIMARY, display: "inline-flex" }}>
+              <ScrollText size={16} />
+            </span>
+            <Text weight="semibold">Reference tariff schedules</Text>
+          </span>
+          <Text type="supporting">
+            Upload a provider's published prices (e.g. Eskom's Schedule of Standard Prices). When a
+            customer sends a bill for review, the AI cross-references any charge that only names a
+            tariff against the matching schedule and includes the rate check in the review email.
+          </Text>
+          {schMsg ? <Banner status={schMsg.kind} title={schMsg.text} /> : null}
+          {schedules.some((s) => s.extractionError) ? (
+            <Banner
+              status="warning"
+              title="LlamaParse is failing"
+              description="One or more schedules fell back to pdftotext, so their rate tables are likely missing and exact-rate checks won't work. Check LLAMA_CLOUD_API_KEY and your LlamaCloud quota/status, then re-upload. (We also email this to the Sparks inbox.)"
+            />
+          ) : null}
+          <Stack direction="horizontal" gap={3} align="end" wrap="wrap">
+            <TextInput label="Schedule name" value={schName} onChange={setSchName} width={220} />
+            <TextInput
+              label="Provider"
+              description="e.g. Eskom, City of Johannesburg"
+              value={schProvider}
+              onChange={setSchProvider}
+              width={200}
+            />
+            <Stack gap={1}>
+              <Text type="supporting">Effective from</Text>
+              <input type="date" value={schFrom} onChange={(e) => setSchFrom(e.target.value)} />
+            </Stack>
+            <Stack gap={1}>
+              <Text type="supporting">Effective to (optional)</Text>
+              <input type="date" value={schTo} onChange={(e) => setSchTo(e.target.value)} />
+            </Stack>
+            <Stack gap={1}>
+              <Text type="supporting">Schedule PDF</Text>
+              <input
+                type="file"
+                accept="application/pdf"
+                onChange={(e) => pickSchedule(e.target.files?.[0])}
+              />
+            </Stack>
+            <Button
+              label={schBusy ? "Uploading…" : "Upload schedule"}
+              variant="primary"
+              icon={<Upload size={16} />}
+              isLoading={schBusy}
+              onClick={uploadSchedule}
+            />
+          </Stack>
+
+          {schedules.length === 0 ? (
+            <Text type="supporting">No reference schedules uploaded yet.</Text>
           ) : (
             <Table
-              data={organizations}
+              data={schedules}
               columns={[
-                { key: "name", header: "Organization", renderCell: (o) => <Text weight="medium">{o.name}</Text> },
-                { key: "ownerEmail", header: "Owner", renderCell: (o) => <Text type="supporting">{o.ownerEmail ?? "—"}</Text> },
-                { key: "siteCount", header: "Sites", renderCell: (o) => <Badge label={String(o.siteCount)} /> },
+                {
+                  key: "name",
+                  header: "Schedule",
+                  renderCell: (s) => <Text weight="medium">{s.name}</Text>,
+                },
+                {
+                  key: "provider",
+                  header: "Provider",
+                  renderCell: (s) => <Badge label={s.provider} />,
+                },
+                {
+                  key: "effective",
+                  header: "Effective",
+                  renderCell: (s) => (
+                    <Text type="supporting">
+                      {new Date(s.effectiveFrom).toLocaleDateString()}
+                      {s.effectiveTo ? ` – ${new Date(s.effectiveTo).toLocaleDateString()}` : " →"}
+                    </Text>
+                  ),
+                },
+                {
+                  key: "text",
+                  header: "Rates",
+                  renderCell: (s) =>
+                    s.extractionStatus === "pending" ? (
+                      <Badge variant="neutral" label="extracting…" />
+                    ) : s.extractionStatus === "failed" ? (
+                      <Badge variant="error" label="failed" />
+                    ) : s.extractionError ? (
+                      // Ready, but LlamaParse broke → we're on rate-table-less fallback.
+                      <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+                        <Badge variant="warning" label="LlamaParse failed — pdftotext" />
+                        <Text type="supporting">
+                          {s.textLength.toLocaleString()} chars · rates likely missing
+                        </Text>
+                      </span>
+                    ) : (
+                      <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+                        <Badge variant="success" label={s.extractionEngine ?? "ready"} />
+                        <Text type="supporting">{s.textLength.toLocaleString()} chars</Text>
+                      </span>
+                    ),
+                },
+                {
+                  key: "action",
+                  header: "",
+                  renderCell: (s) => (
+                    <Button
+                      label="Remove"
+                      variant="ghost"
+                      size="sm"
+                      icon={<Trash2 size={14} />}
+                      onClick={() => deleteSchedule(s.id)}
+                    />
+                  ),
+                },
               ]}
               density="compact"
               dividers="rows"
             />
           )}
+        </Stack>
+      </Card>
+
+      {/* Provisioning & setup — occasional actions, collapsed by default */}
+      <Card padding={5}>
+        <Stack gap={showProvisioning ? 6 : 0}>
+          <button
+            type="button"
+            onClick={() => setShowProvisioning((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              background: "none",
+              border: 0,
+              padding: 0,
+              cursor: "pointer",
+              font: "inherit",
+              color: "inherit",
+              width: "100%",
+              textAlign: "left",
+            }}
+          >
+            <span style={{ display: "inline-flex", color: PRIMARY }}>
+              {showProvisioning ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            </span>
+            <Text weight="semibold">Provisioning &amp; setup</Text>
+            <Text type="supporting">— provision customers, add sites, view organizations</Text>
+          </button>
+
+          {showProvisioning ? (
+            <Stack gap={6}>
+              <Grid columns={{ minWidth: 420, repeat: "fit" }} gap={6}>
+                {/* Provision a customer */}
+                <Card padding={5}>
+                  <form onSubmit={submitCustomer}>
+                    <Stack gap={4}>
+                      <Stack direction="horizontal" gap={2} align="center">
+                        <span style={{ display: "inline-flex", color: PRIMARY }}><UserPlus size={16} /></span>
+                        <Text weight="semibold">Provision a customer</Text>
+                      </Stack>
+                      {custMsg ? <Banner status={custMsg.kind} title={custMsg.text} /> : null}
+                      <TextInput label="Contact name" value={cName} onChange={setCName} isDisabled={custBusy} width="100%" />
+                      <TextInput label="Contact email" type="email" value={cEmail} onChange={setCEmail} isDisabled={custBusy} width="100%" />
+                      <TextInput label="Organization name" value={orgName} onChange={setOrgName} isDisabled={custBusy} width="100%" />
+                      <div style={{ display: "grid" }}>
+                        <Button label={custBusy ? "Creating…" : "Create account & send invite"} type="submit" variant="primary" isLoading={custBusy} />
+                      </div>
+                    </Stack>
+                  </form>
+                </Card>
+
+                {/* Add a site to an org */}
+                <Card padding={5}>
+                  <form onSubmit={submitSite}>
+                    <Stack gap={4}>
+                      <Stack direction="horizontal" gap={2} align="center">
+                        <span style={{ display: "inline-flex", color: PRIMARY }}><MapPin size={16} /></span>
+                        <Text weight="semibold">Add a site to an organization</Text>
+                      </Stack>
+                      {siteMsg ? <Banner status={siteMsg.kind} title={siteMsg.text} /> : null}
+                      <Selector
+                        label="Organization"
+                        placeholder="Select an organization…"
+                        options={organizations.map((o) => ({ value: o.id, label: o.name }))}
+                        value={siteOrgId}
+                        onChange={setSiteOrgId}
+                      />
+                      <TextInput label="Site name" value={siteName} onChange={setSiteName} isDisabled={siteBusy} width="100%" />
+                      <TextInput label="Address line 1" value={siteAddr} onChange={setSiteAddr} isDisabled={siteBusy} width="100%" />
+                      <Grid columns={2} gap={3}>
+                        <TextInput label="City" value={siteCity} onChange={setSiteCity} isDisabled={siteBusy} width="100%" />
+                        <TextInput label="Province" value={siteProvince} onChange={setSiteProvince} isDisabled={siteBusy} width="100%" />
+                      </Grid>
+                      <div style={{ display: "grid" }}>
+                        <Button label={siteBusy ? "Adding…" : "Add site"} type="submit" variant="primary" isLoading={siteBusy} />
+                      </div>
+                    </Stack>
+                  </form>
+                </Card>
+              </Grid>
+
+              {/* Organizations overview + decommissioning */}
+              <Stack gap={3}>
+                <Text weight="semibold">Organizations</Text>
+                {orgActionMsg ? <Banner status={orgActionMsg.kind} title={orgActionMsg.text} /> : null}
+                {loading ? (
+                  <Stack gap={2}>
+                    <Skeleton height={40} />
+                    <Skeleton height={40} />
+                  </Stack>
+                ) : organizations.length === 0 ? (
+                  <Text type="supporting">No organizations yet. Provision a customer above.</Text>
+                ) : (
+                  <Table
+                    data={organizations}
+                    columns={[
+                      { key: "name", header: "Organization", renderCell: (o) => <Text weight="medium">{o.name}</Text> },
+                      { key: "ownerEmail", header: "Owner", renderCell: (o) => <Text type="supporting">{o.ownerEmail ?? "—"}</Text> },
+                      { key: "siteCount", header: "Sites", renderCell: (o) => <Badge label={String(o.siteCount)} /> },
+                      {
+                        key: "manage",
+                        header: "",
+                        renderCell: (o) => (
+                          <Button label="Manage" variant="secondary" size="sm" onClick={() => openManage(o.id, o.name)} />
+                        ),
+                      },
+                    ]}
+                    density="compact"
+                    dividers="rows"
+                  />
+                )}
+
+                {manageOrg ? (
+                  <Card padding={5}>
+                    <Stack gap={4}>
+                      <Stack direction="horizontal" gap={2} align="center" justify="between" wrap="wrap">
+                        <Text weight="semibold">Manage — {manageOrg.name}</Text>
+                        <Button
+                          label="Close"
+                          variant="ghost"
+                          size="sm"
+                          isDisabled={orgActionBusy}
+                          onClick={() => setManageOrg(null)}
+                        />
+                      </Stack>
+
+                      <Stack gap={2}>
+                        <Text type="supporting">Sites</Text>
+                        {orgSitesLoading ? (
+                          <Skeleton height={36} />
+                        ) : orgSites.length === 0 ? (
+                          <Text type="supporting">No sites under this organization.</Text>
+                        ) : (
+                          <Table
+                            data={orgSites}
+                            columns={[
+                              { key: "name", header: "Site", renderCell: (s) => <Text weight="medium">{s.name}</Text> },
+                              { key: "city", header: "City", renderCell: (s) => <Text type="supporting">{s.city ?? "—"}</Text> },
+                              { key: "status", header: "Status", renderCell: (s) => <Badge label={s.status} /> },
+                              {
+                                key: "del",
+                                header: "",
+                                renderCell: (s) => (
+                                  <Button
+                                    label="Delete"
+                                    variant="ghost"
+                                    size="sm"
+                                    icon={<Trash2 size={14} />}
+                                    isDisabled={orgActionBusy}
+                                    onClick={() => deleteOneSite(s.id, s.name)}
+                                  />
+                                ),
+                              },
+                            ]}
+                            density="compact"
+                            dividers="rows"
+                          />
+                        )}
+                      </Stack>
+
+                      <Stack gap={2}>
+                        <Banner
+                          status="warning"
+                          title="Delete this organization"
+                          description="Removes the organization and ALL of its sites, meters, readings, bills and reconciliations. This can't be undone — use only when a customer ends their subscription. Their user login is left intact."
+                        />
+                        <TextInput
+                          label={`Type "${manageOrg.name}" to confirm`}
+                          value={orgDeleteConfirm}
+                          onChange={setOrgDeleteConfirm}
+                          isDisabled={orgActionBusy}
+                          width="100%"
+                        />
+                        <div style={{ display: "grid" }}>
+                          <Button
+                            label={orgActionBusy ? "Deleting…" : "Delete organization"}
+                            variant="destructive"
+                            isLoading={orgActionBusy}
+                            isDisabled={orgDeleteConfirm.trim() !== manageOrg.name}
+                            onClick={deleteOrg}
+                          />
+                        </div>
+                      </Stack>
+                    </Stack>
+                  </Card>
+                ) : null}
+              </Stack>
+            </Stack>
+          ) : null}
         </Stack>
       </Card>
     </Stack>

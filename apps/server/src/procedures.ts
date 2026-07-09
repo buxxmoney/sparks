@@ -25,8 +25,11 @@ export async function sessionMe(authContext: AuthContext): Promise<SessionMe> {
   const db = getDb();
   let organizationId = authContext.organizationId;
   if (!organizationId) {
+    // Same deterministic order as requireSession's firstMembershipOrg fallback, so
+    // the org shown here matches the one the request context resolves to.
     const first = await db.query.member.findFirst({
       where: eq(member.userId, authContext.userId),
+      orderBy: (m, { asc }) => [asc(m.createdAt), asc(m.id)],
     });
     organizationId = first?.organizationId || "";
   }
