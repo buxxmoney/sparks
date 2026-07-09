@@ -449,6 +449,20 @@ export const alertsAcknowledgeInput = z.object({
   deliveryId: z.string().uuid(),
 });
 
+// Operator-managed reference tariff schedules (Eskom/municipal published prices).
+export const tariffSchedulesCreateInput = z.object({
+  name: z.string().min(1).max(200),
+  provider: z.string().min(1).max(120),
+  effectiveFrom: z.coerce.date(),
+  effectiveTo: z.coerce.date().optional(),
+  filename: z.string().max(300),
+  contentBase64: z.string().min(1),
+});
+
+export const tariffSchedulesDeleteInput = z.object({
+  scheduleId: z.string().uuid(),
+});
+
 export const alertsAttachmentUrlInput = z.object({
   alertId: z.string().uuid(),
 });

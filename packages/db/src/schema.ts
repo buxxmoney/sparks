@@ -566,6 +566,36 @@ export const siteTariffAssignments = pgTable(
   }),
 );
 
+/**
+ * Reference utility tariff schedules (e.g. Eskom "Schedule of Standard Prices",
+ * a municipality's approved tariffs). These are the PROVIDER's published rates —
+ * distinct from the landlord/legal-ceiling tariffs used by the reconciliation
+ * engine (tariffProfiles/siteTariffAssignments). Uploaded by Sparks operators and
+ * used by the AI at "send to Sparks" time to look up the rate a bill only names
+ * (no printed rate) and sanity-check the amount. Surfaced in the internal review
+ * email only. We store the extracted text so cross-referencing doesn't re-OCR.
+ */
+export const tariffSchedules = pgTable(
+  "tariff_schedules",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    name: text("name").notNull(),
+    // The publishing utility, e.g. "Eskom", "City of Johannesburg". Matched against
+    // the tariff names printed on a bill to pick the applicable schedule.
+    provider: text("provider").notNull(),
+    effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
+    effectiveTo: timestamp("effective_to", { withTimezone: true }),
+    fileStorageKey: text("file_storage_key").notNull(),
+    // pdftotext output; null if extraction produced nothing usable (scanned doc).
+    extractedText: text("extracted_text"),
+    uploadedByUserId: text("uploaded_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    providerIdx: index("tariff_schedule_provider_idx").on(t.provider, t.effectiveFrom),
+  }),
+);
+
 /* ─────────────── Invoices ─────────────── */
 export const landlordInvoices = pgTable(
   "landlord_invoices",

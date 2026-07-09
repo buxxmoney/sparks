@@ -28,7 +28,13 @@ import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-
 import { auth } from "./auth";
 import { type BillingPeriodPolicy, materializePeriods } from "./billing";
 import { billReviewRequestEmail, sendEmail, siteInviteEmail } from "./email";
-import { deriveLineCategory, parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
+import {
+  analyzeInvoiceTariffs,
+  deriveLineCategory,
+  parseInvoiceWithClaude,
+  persistParsedInvoice,
+  type TariffAnalysis,
+} from "./invoices";
 import type { AuthContext } from "./middleware";
 import {
   ForbiddenError,
@@ -2450,6 +2456,67 @@ export async function invoicesRequestReview(ctx: AuthContext, input: unknown) {
   return { invoiceId: parsed.invoiceId, reviewRequestedAt: new Date() };
 }
 
+// Pick the reference tariff schedule that applies to this bill (provider named in
+// its charges + effective for the period) and run the AI cross-reference. Returns
+// null when no schedules are on file at all (the email just omits the section);
+// returns an available:false analysis with a note when schedules exist but none fit.
+async function computeTariffAnalysis(
+  lineRows: (typeof invoiceLineItems.$inferSelect)[],
+  periodStart: Date,
+  periodEnd: Date,
+): Promise<TariffAnalysis | null> {
+  const schedules = await db.query.tariffSchedules.findMany();
+  if (schedules.length === 0) return null;
+
+  const labels = lineRows.map((l) => (l.rawLabel ?? "").toLowerCase()).join(" | ");
+  const schedule = schedules
+    .filter(
+      (s) =>
+        labels.includes(s.provider.toLowerCase()) &&
+        s.effectiveFrom.getTime() <= periodEnd.getTime() &&
+        (!s.effectiveTo || s.effectiveTo.getTime() >= periodStart.getTime()),
+    )
+    .sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
+
+  if (!schedule) {
+    return {
+      available: false,
+      scheduleName: null,
+      provider: null,
+      note: "No reference tariff schedule on file matches this bill's provider and period. Upload one in operator admin to enable rate checks.",
+      lines: [],
+    };
+  }
+  if (!schedule.extractedText) {
+    return {
+      available: false,
+      scheduleName: schedule.name,
+      provider: schedule.provider,
+      note: "The matched schedule has no extracted text (a scanned PDF?). Re-upload a text-based copy.",
+      lines: [],
+    };
+  }
+
+  // Electricity charges are where named-tariff lookups matter most.
+  const charges = lineRows
+    .filter((l) => (l.confirmedUtility ?? l.utility ?? "") === "electricity")
+    .map((l) => ({
+      rawLabel: l.rawLabel,
+      unit: l.unit,
+      quantity: l.quantity !== null ? Number(l.quantity) : null,
+      rate: l.rate !== null ? Number(l.rate) : null,
+      amountRand: (l.confirmedValueCents ?? l.parsedValueCents ?? 0) / 100,
+    }));
+  if (charges.length === 0) return null;
+
+  return analyzeInvoiceTariffs({
+    scheduleName: schedule.name,
+    provider: schedule.provider,
+    scheduleText: schedule.extractedText,
+    charges,
+  });
+}
+
 // Assembles + sends the internal "please review this bill" email to the Sparks
 // review inbox (SPARKS_REVIEW_EMAIL). No-op with a log if that env is unset.
 async function sendReviewRequestEmail(
@@ -2487,6 +2554,17 @@ async function sendReviewRequestEmail(
     // leave null
   }
 
+  // Cross-reference the bill's charges against a provider's published tariff schedule
+  // (if one is on file that matches this bill). Best-effort — never blocks the email.
+  const tariffAnalysis = await computeTariffAnalysis(
+    lineRows,
+    invoice.billingPeriodStart,
+    invoice.billingPeriodEnd,
+  ).catch((err) => {
+    console.error(`[review-email] tariff analysis failed for invoice ${invoice.id}:`, err);
+    return null;
+  });
+
   const { subject, html } = billReviewRequestEmail({
     orgName: org?.name ?? "Customer",
     siteName: site?.name ?? "Site",
@@ -2507,6 +2585,7 @@ async function sendReviewRequestEmail(
       valueCents: l.confirmedValueCents ?? l.parsedValueCents ?? 0,
     })),
     adminUrl: `${process.env.WEB_URL || "http://localhost:3000"}/admin`,
+    tariffAnalysis,
   });
 
   // Attach the original invoice PDF if the stored object is present.

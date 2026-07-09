@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, inArray, sql } from "drizzle-orm";
+import { desc, eq, inArray, sql } from "drizzle-orm";
 import {
   getDb,
   landlordInvoices,
@@ -7,12 +7,20 @@ import {
   organization,
   reconciliations,
   sites,
+  tariffSchedules,
   user,
 } from "@sparks/db";
 import { auth } from "./auth";
+import { extractPdfText } from "./invoices";
 import { requirePlatformOperator, type AuthContext } from "./middleware";
 import { dispatchBillOutcome } from "./notifications";
-import { adminCreateCustomerInput, adminReviewReconciliationInput } from "./validators";
+import { putObject } from "./storage";
+import {
+  adminCreateCustomerInput,
+  adminReviewReconciliationInput,
+  tariffSchedulesCreateInput,
+  tariffSchedulesDeleteInput,
+} from "./validators";
 
 function slugify(name: string): string {
   return (
@@ -216,4 +224,79 @@ export async function adminReviewReconciliation(ctx: AuthContext, input: unknown
   }
 
   return { reconciliation: updated, delivery };
+}
+
+/* ─────────────── Reference tariff schedules (operator) ─────────────── */
+
+/**
+ * Operator-only: upload a provider's published tariff schedule (e.g. Eskom's
+ * Schedule of Standard Prices). Stores the PDF and its extracted text so the AI can
+ * later cross-reference bills against it. Extraction is best-effort — a scanned doc
+ * with no text layer still gets stored (extractedText null) and can be replaced.
+ */
+export async function adminTariffSchedulesCreate(ctx: AuthContext, input: unknown) {
+  const parsed = tariffSchedulesCreateInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+
+  const pdf = Buffer.from(parsed.contentBase64, "base64");
+  if (pdf.length === 0) {
+    throw new Error("Uploaded file is empty");
+  }
+
+  const scheduleId = randomUUID();
+  const fileStorageKey = `tariff-schedules/${scheduleId}.pdf`;
+  await putObject(fileStorageKey, pdf, "application/pdf");
+
+  const extractedText = await extractPdfText(pdf);
+
+  const [row] = await db
+    .insert(tariffSchedules)
+    .values({
+      id: scheduleId,
+      name: parsed.name,
+      provider: parsed.provider,
+      effectiveFrom: parsed.effectiveFrom,
+      effectiveTo: parsed.effectiveTo ?? null,
+      fileStorageKey,
+      extractedText,
+      uploadedByUserId: ctx.userId,
+    })
+    .returning();
+
+  return {
+    scheduleId: row.id,
+    name: row.name,
+    provider: row.provider,
+    textChars: extractedText?.length ?? 0,
+    textExtracted: Boolean(extractedText),
+  };
+}
+
+/** Operator-only: list uploaded reference schedules (metadata + text size). */
+export async function adminTariffSchedulesList(ctx: AuthContext) {
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+  const rows = await db
+    .select({
+      id: tariffSchedules.id,
+      name: tariffSchedules.name,
+      provider: tariffSchedules.provider,
+      effectiveFrom: tariffSchedules.effectiveFrom,
+      effectiveTo: tariffSchedules.effectiveTo,
+      createdAt: tariffSchedules.createdAt,
+      textLength: sql<number>`coalesce(length(${tariffSchedules.extractedText}), 0)::int`,
+    })
+    .from(tariffSchedules)
+    .orderBy(desc(tariffSchedules.effectiveFrom));
+  return { schedules: rows };
+}
+
+/** Operator-only: remove a reference schedule. */
+export async function adminTariffSchedulesDelete(ctx: AuthContext, input: unknown) {
+  const parsed = tariffSchedulesDeleteInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+  await db.delete(tariffSchedules).where(eq(tariffSchedules.id, parsed.scheduleId));
+  return { deleted: true };
 }

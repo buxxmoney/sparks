@@ -1,4 +1,5 @@
 import { Resend } from "resend";
+import type { TariffAnalysis } from "./invoices";
 
 // Default sender. Override with EMAIL_FROM once a verified domain is set up in
 // Resend; the sandbox `onboarding@resend.dev` works for testing.
@@ -118,6 +119,7 @@ export function billReviewRequestEmail(data: {
   note: string | null;
   lines: ReviewRequestLine[];
   adminUrl: string;
+  tariffAnalysis?: TariffAnalysis | null;
 }): { subject: string; html: string } {
   const rows = data.lines
     .map(
@@ -153,9 +155,59 @@ export function billReviewRequestEmail(data: {
         <tbody>${rows}</tbody>
       </table>
       <p style="color:#6b7280;font-size:12px;margin-top:8px">The original invoice PDF is attached. This grouping is the AI's best guess — verify it before signing off.</p>
+      ${tariffAnalysisHtml(data.tariffAnalysis)}
       ${button(data.adminUrl, "Open in Sparks admin")}
     </div>`,
   };
+}
+
+/** Renders the "Tariff analysis (AI)" block for the review email. */
+function tariffAnalysisHtml(a: TariffAnalysis | null | undefined): string {
+  if (!a) return ""; // no reference schedules on file — omit the section entirely
+  const heading = `<p style="margin:18px 0 6px;font-weight:600">Tariff analysis (AI)${
+    a.scheduleName ? ` — vs ${escapeHtml(a.scheduleName)}` : ""
+  }</p>`;
+  if (!a.available || a.lines.length === 0) {
+    return `${heading}<p style="color:#6b7280;font-size:12px">${escapeHtml(
+      a.note ?? "No tariff analysis available.",
+    )}</p>`;
+  }
+  const verdictChip = (v: string) => {
+    const map: Record<string, string> = {
+      match: "#dcfce7;color:#166534",
+      over: "#fee2e2;color:#991b1b",
+      under: "#fef9c3;color:#854d0e",
+      unknown: "#f3f4f6;color:#6b7280",
+    };
+    return `<span style="display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;background:${
+      map[v] ?? map.unknown
+    }">${escapeHtml(v)}</span>`;
+  };
+  const rows = a.lines
+    .map(
+      (l) => `<tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee">${escapeHtml(l.charge)}<br><span style="color:#6b7280;font-size:11px">${escapeHtml(l.detectedTariff)}</span></td>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee">${escapeHtml(l.scheduleRate ?? "—")}<br><span style="color:#6b7280;font-size:11px">${escapeHtml(l.scheduleRef ?? l.rateSource)}</span></td>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${escapeHtml(l.billed)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${escapeHtml(l.expected ?? "—")}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #eee">${verdictChip(l.verdict)}${
+          l.comment ? `<br><span style="color:#6b7280;font-size:11px">${escapeHtml(l.comment)}</span>` : ""
+        }</td>
+      </tr>`,
+    )
+    .join("");
+  return `${heading}
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;color:#6b7280;font-size:11px">
+        <th style="padding:6px 8px">Charge / tariff</th><th style="padding:6px 8px">Schedule rate / source</th>
+        <th style="padding:6px 8px;text-align:right">Billed</th><th style="padding:6px 8px;text-align:right">Expected</th>
+        <th style="padding:6px 8px">Check</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p style="color:#6b7280;font-size:12px;margin-top:6px">Rates cross-referenced by AI against ${escapeHtml(
+      a.provider ?? "the schedule",
+    )}. Treat as a guide and verify anything flagged.</p>`;
 }
 
 /**

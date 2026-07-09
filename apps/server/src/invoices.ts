@@ -10,7 +10,7 @@ import { eq } from "drizzle-orm";
  * vision parsing. Install locally with `brew install poppler`; a deploy host
  * needs the `poppler-utils` package.
  */
-async function extractPdfText(pdf: Buffer): Promise<string | null> {
+export async function extractPdfText(pdf: Buffer): Promise<string | null> {
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
@@ -437,4 +437,167 @@ export async function persistParsedInvoice(
       parseModel: parsed.parseModel,
     })
     .where(eq(landlordInvoices.id, invoiceId));
+}
+
+/* ─────────────── Tariff cross-referencing ─────────────── */
+
+export interface TariffAnalysisLine {
+  charge: string; // the invoice's charge label
+  detectedTariff: string; // the tariff/component this maps to
+  rateSource: "invoice" | "schedule" | "unknown";
+  scheduleRate: string | null; // e.g. "253.03 c/kWh"
+  scheduleRef: string | null; // where in the reference doc, e.g. "Table 5, p21"
+  billed: string; // amount billed, as R
+  expected: string | null; // qty × rate, as R (null if not computable)
+  verdict: "match" | "over" | "under" | "unknown";
+  comment: string | null;
+}
+
+export interface TariffAnalysis {
+  available: boolean;
+  scheduleName: string | null;
+  provider: string | null;
+  note: string | null; // e.g. "No reference schedule on file for Eskom."
+  lines: TariffAnalysisLine[];
+}
+
+interface AnalysisCharge {
+  rawLabel: string;
+  unit: string | null;
+  quantity: number | null;
+  rate: number | null; // rate PRINTED on the invoice, if any
+  amountRand: number;
+}
+
+/**
+ * Cross-reference a bill's charges against a provider's published tariff schedule.
+ * For each charge the AI: identifies the tariff/component, finds the applicable
+ * rate in the schedule text (with a table/page pointer), notes whether the rate was
+ * already printed on the invoice or looked up here, recomputes the expected amount,
+ * and flags matches/mismatches — saying "unknown" when it genuinely can't tell.
+ * Best-effort; returns available:false with a note if analysis can't run.
+ */
+export async function analyzeInvoiceTariffs(params: {
+  scheduleName: string;
+  provider: string;
+  scheduleText: string;
+  charges: AnalysisCharge[];
+}): Promise<TariffAnalysis> {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return {
+      available: false,
+      scheduleName: params.scheduleName,
+      provider: params.provider,
+      note: "Tariff analysis unavailable: ANTHROPIC_API_KEY not set.",
+      lines: [],
+    };
+  }
+  const client = new Anthropic();
+  // A reasoning task over a long reference doc — default to a stronger model.
+  const model = process.env.TARIFF_ANALYSIS_MODEL ?? "claude-sonnet-5";
+
+  const chargeLines = params.charges
+    .map(
+      (c, i) =>
+        `${i + 1}. "${c.rawLabel}" | unit=${c.unit ?? "?"} | qty=${c.quantity ?? "?"} | printedRate=${
+          c.rate ?? "none"
+        } | billed=R${c.amountRand.toFixed(2)}`,
+    )
+    .join("\n");
+
+  const prompt = `You are a South African utility-tariff analyst helping a reviewer check a tenant's electricity/utility bill.
+
+Below is a provider's published tariff schedule ("${params.scheduleName}", provider ${params.provider}), followed by the charge lines from a specific bill. For EACH charge line, work out the applicable tariff rate and whether the billed amount is right.
+
+<reference_schedule>
+${params.scheduleText}
+</reference_schedule>
+
+<bill_charges>
+${chargeLines}
+</bill_charges>
+
+Return ONLY a JSON object:
+{
+  "lines": [
+    {
+      "charge": "the bill charge label",
+      "detectedTariff": "the tariff/component it maps to (e.g. 'Businessrate active energy charge')",
+      "rateSource": "invoice | schedule | unknown",
+      "scheduleRate": "the applicable rate with unit, e.g. '253.03 c/kWh' (or null)",
+      "scheduleRef": "where in the schedule you found it, e.g. 'Table 5, p21' (or null)",
+      "expected": "expected amount in Rand as a plain number string from quantity × rate (or null if not computable)",
+      "verdict": "match | over | under | unknown",
+      "comment": "one short note; ALWAYS say plainly if you could not determine the rate"
+    }
+  ]
+}
+
+Rules:
+- If the invoice already printed a rate for the line, set rateSource "invoice" and still note the schedule's rate for comparison if you can find it.
+- If the line only NAMES a tariff (no printed rate), look the rate up in the schedule; set rateSource "schedule" and give scheduleRef.
+- If you genuinely cannot find or determine the rate, set rateSource "unknown", scheduleRate null, verdict "unknown", and say so in comment. NEVER guess a number.
+- verdict: "match" if expected ≈ billed (within ~2%), "over" if billed materially exceeds expected, "under" if below, else "unknown".
+- Be precise with SA number formats (comma decimals, space thousands). Do not invent values.`;
+
+  let text: string;
+  try {
+    const response = await client.messages.create({
+      model,
+      thinking: { type: "disabled" },
+      max_tokens: 8000,
+      messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+    });
+    const block = response.content.find((b) => b.type === "text");
+    text = block && block.type === "text" ? block.text : "";
+  } catch (err) {
+    console.error(`[tariff-analysis] Anthropic call failed (model=${model}):`, err);
+    return {
+      available: false,
+      scheduleName: params.scheduleName,
+      provider: params.provider,
+      note: `Tariff analysis could not run (${err instanceof Error ? err.message : "error"}).`,
+      lines: [],
+    };
+  }
+
+  const match = text.replace(/```(?:json)?/gi, "").match(/\{[\s\S]*\}/);
+  if (!match) {
+    return {
+      available: false,
+      scheduleName: params.scheduleName,
+      provider: params.provider,
+      note: "Tariff analysis returned no usable result.",
+      lines: [],
+    };
+  }
+  try {
+    const parsed = JSON.parse(match[0]) as { lines?: Partial<TariffAnalysisLine>[] };
+    const lines: TariffAnalysisLine[] = (parsed.lines ?? []).map((l, i) => ({
+      charge: l.charge ?? params.charges[i]?.rawLabel ?? "",
+      detectedTariff: l.detectedTariff ?? "—",
+      rateSource: (l.rateSource as TariffAnalysisLine["rateSource"]) ?? "unknown",
+      scheduleRate: l.scheduleRate ?? null,
+      scheduleRef: l.scheduleRef ?? null,
+      billed: `R${(params.charges[i]?.amountRand ?? 0).toFixed(2)}`,
+      expected: l.expected != null ? `R${Number(l.expected).toFixed(2)}` : null,
+      verdict: (l.verdict as TariffAnalysisLine["verdict"]) ?? "unknown",
+      comment: l.comment ?? null,
+    }));
+    return {
+      available: true,
+      scheduleName: params.scheduleName,
+      provider: params.provider,
+      note: null,
+      lines,
+    };
+  } catch {
+    return {
+      available: false,
+      scheduleName: params.scheduleName,
+      provider: params.provider,
+      note: "Tariff analysis result could not be parsed.",
+      lines: [],
+    };
+  }
 }

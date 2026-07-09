@@ -1,7 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { Building2, UserPlus, MapPin, ClipboardCheck, ExternalLink, Send } from "lucide-react";
+import {
+  Building2,
+  UserPlus,
+  MapPin,
+  ClipboardCheck,
+  ExternalLink,
+  Send,
+  ScrollText,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Grid } from "@astryxdesign/core/Grid";
 import { Card } from "@astryxdesign/core/Card";
@@ -80,6 +90,77 @@ export default function AdminPage() {
       setOutFile({ name: file.name, base64: result.split(",")[1] ?? "" });
     };
     reader.readAsDataURL(file);
+  };
+
+  // Reference tariff schedules (Eskom / municipal published prices).
+  const { data: schedData, refetch: refetchSched } = useRPC(
+    () => client.admin.tariffSchedulesList(),
+    [],
+  );
+  const schedules = schedData?.schedules ?? [];
+  const [schName, setSchName] = useState("");
+  const [schProvider, setSchProvider] = useState("");
+  const [schFrom, setSchFrom] = useState("");
+  const [schTo, setSchTo] = useState("");
+  const [schFile, setSchFile] = useState<{ name: string; base64: string } | null>(null);
+  const [schBusy, setSchBusy] = useState(false);
+  const [schMsg, setSchMsg] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+
+  const pickSchedule = (file: File | undefined) => {
+    if (!file) {
+      setSchFile(null);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () =>
+      setSchFile({ name: file.name, base64: String(reader.result).split(",")[1] ?? "" });
+    reader.readAsDataURL(file);
+  };
+
+  const uploadSchedule = async () => {
+    if (!schName || !schProvider || !schFrom || !schFile) {
+      setSchMsg({ kind: "error", text: "Name, provider, effective-from date and a PDF are required." });
+      return;
+    }
+    setSchBusy(true);
+    setSchMsg(null);
+    try {
+      const res = await client.admin.tariffSchedulesCreate({
+        name: schName,
+        provider: schProvider,
+        effectiveFrom: new Date(schFrom),
+        effectiveTo: schTo ? new Date(schTo) : undefined,
+        filename: schFile.name,
+        contentBase64: schFile.base64,
+      });
+      setSchMsg({
+        kind: "success",
+        text: `Uploaded "${res.name}" — ${
+          res.textExtracted
+            ? `${res.textChars.toLocaleString()} characters extracted`
+            : "no text layer found (scanned PDF?)"
+        }.`,
+      });
+      setSchName("");
+      setSchProvider("");
+      setSchFrom("");
+      setSchTo("");
+      setSchFile(null);
+      refetchSched();
+    } catch (err) {
+      setSchMsg({ kind: "error", text: err instanceof Error ? err.message : "Upload failed" });
+    } finally {
+      setSchBusy(false);
+    }
+  };
+
+  const deleteSchedule = async (id: string) => {
+    try {
+      await client.admin.tariffSchedulesDelete({ scheduleId: id });
+      refetchSched();
+    } catch (err) {
+      setSchMsg({ kind: "error", text: err instanceof Error ? err.message : "Delete failed" });
+    }
   };
 
   const sendOutcome = async (status: "reviewed" | "flagged") => {
@@ -423,6 +504,112 @@ export default function AdminPage() {
               </Stack>
             </Card>
           ) : null}
+        </Stack>
+      </Card>
+
+      {/* Reference tariff schedules */}
+      <Card padding={5}>
+        <Stack gap={4}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <span style={{ color: PRIMARY, display: "inline-flex" }}>
+              <ScrollText size={16} />
+            </span>
+            <Text weight="semibold">Reference tariff schedules</Text>
+          </span>
+          <Text type="supporting">
+            Upload a provider's published prices (e.g. Eskom's Schedule of Standard Prices). When a
+            customer sends a bill for review, the AI cross-references any charge that only names a
+            tariff against the matching schedule and includes the rate check in the review email.
+          </Text>
+          {schMsg ? <Banner status={schMsg.kind} title={schMsg.text} /> : null}
+          <Stack direction="horizontal" gap={3} align="end" wrap="wrap">
+            <TextInput label="Schedule name" value={schName} onChange={setSchName} width={220} />
+            <TextInput
+              label="Provider"
+              description="e.g. Eskom, City of Johannesburg"
+              value={schProvider}
+              onChange={setSchProvider}
+              width={200}
+            />
+            <Stack gap={1}>
+              <Text type="supporting">Effective from</Text>
+              <input type="date" value={schFrom} onChange={(e) => setSchFrom(e.target.value)} />
+            </Stack>
+            <Stack gap={1}>
+              <Text type="supporting">Effective to (optional)</Text>
+              <input type="date" value={schTo} onChange={(e) => setSchTo(e.target.value)} />
+            </Stack>
+            <Stack gap={1}>
+              <Text type="supporting">Schedule PDF</Text>
+              <input
+                type="file"
+                accept="application/pdf"
+                onChange={(e) => pickSchedule(e.target.files?.[0])}
+              />
+            </Stack>
+            <Button
+              label={schBusy ? "Uploading…" : "Upload schedule"}
+              variant="primary"
+              icon={<Upload size={16} />}
+              isLoading={schBusy}
+              onClick={uploadSchedule}
+            />
+          </Stack>
+
+          {schedules.length === 0 ? (
+            <Text type="supporting">No reference schedules uploaded yet.</Text>
+          ) : (
+            <Table
+              data={schedules}
+              columns={[
+                {
+                  key: "name",
+                  header: "Schedule",
+                  renderCell: (s) => <Text weight="medium">{s.name}</Text>,
+                },
+                {
+                  key: "provider",
+                  header: "Provider",
+                  renderCell: (s) => <Badge label={s.provider} />,
+                },
+                {
+                  key: "effective",
+                  header: "Effective",
+                  renderCell: (s) => (
+                    <Text type="supporting">
+                      {new Date(s.effectiveFrom).toLocaleDateString()}
+                      {s.effectiveTo ? ` – ${new Date(s.effectiveTo).toLocaleDateString()}` : " →"}
+                    </Text>
+                  ),
+                },
+                {
+                  key: "text",
+                  header: "Rates text",
+                  renderCell: (s) =>
+                    s.textLength > 0 ? (
+                      <Text type="supporting">{s.textLength.toLocaleString()} chars</Text>
+                    ) : (
+                      <Badge variant="warning" label="no text" />
+                    ),
+                },
+                {
+                  key: "action",
+                  header: "",
+                  renderCell: (s) => (
+                    <Button
+                      label="Remove"
+                      variant="ghost"
+                      size="sm"
+                      icon={<Trash2 size={14} />}
+                      onClick={() => deleteSchedule(s.id)}
+                    />
+                  ),
+                },
+              ]}
+              density="compact"
+              dividers="rows"
+            />
+          )}
         </Stack>
       </Card>
 
