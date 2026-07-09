@@ -8,11 +8,11 @@ import {
   Scale,
   Activity,
   CalendarRange,
+  Gauge,
   Radio,
   MapPin,
   Clock,
   Settings,
-  BarChart3,
 } from "lucide-react";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Grid } from "@astryxdesign/core/Grid";
@@ -22,12 +22,14 @@ import { Text } from "@astryxdesign/core/Text";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
-import { Table } from "@astryxdesign/core/Table";
+import { StatusDot } from "@astryxdesign/core/StatusDot";
+import { Table, proportional } from "@astryxdesign/core/Table";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Link } from "@astryxdesign/core/Link";
 import { useRPC } from "@/lib/useRPC";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 import { client } from "@/lib/client";
-import { MetricStat, METRIC_HINTS } from "@/components/metric";
+import { MetricStat, METRIC_HINTS, formatReading } from "@/components/metric";
 import { ConsumptionChart } from "@/components/charts/ConsumptionChart";
 
 type BadgeVariant = "success" | "warning" | "error" | "neutral";
@@ -39,20 +41,35 @@ const DEVICE_BADGE: Record<string, BadgeVariant> = {
   offline: "error",
 };
 
-const PRIMARY = "hsl(221 83% 53%)";
+const MUTED_INK = "var(--color-text-secondary, hsl(215 16% 47%))";
 
-function num(value: string | number | null | undefined, digits = 2): string {
-  if (value == null) return "—";
-  const n = typeof value === "number" ? value : Number.parseFloat(value);
-  return Number.isNaN(n) ? "—" : n.toFixed(digits);
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-// Section-card header: an accented icon + title, with optional right-aligned content.
+// Compact relative time for device heartbeats — "3 min ago" reads faster in a
+// table than a full timestamp, and staleness is the thing that matters here.
+function timeAgo(at: string | Date): string {
+  const d = new Date(at);
+  const min = Math.floor((Date.now() - d.getTime()) / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min} min ago`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return d.toLocaleDateString([], { day: "numeric", month: "short" });
+}
+
+function shortTime(at: string | Date): string {
+  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// Section header: a quiet icon + title, with optional right-aligned content.
+// The icon stays in muted ink — section headers are wayfinding, not data.
 function CardHead({ icon, title, right }: { icon: ReactNode; title: string; right?: ReactNode }) {
   return (
-    <Stack direction="horizontal" justify="between" align="center" gap={2}>
+    <Stack direction="horizontal" justify="between" align="center" gap={2} wrap="wrap">
       <Stack direction="horizontal" gap={2} align="center">
-        <span style={{ display: "inline-flex", color: PRIMARY }}>{icon}</span>
+        <span style={{ display: "inline-flex", color: MUTED_INK }}>{icon}</span>
         <Text weight="semibold">{title}</Text>
       </Stack>
       {right}
@@ -63,7 +80,14 @@ function CardHead({ icon, title, right }: { icon: ReactNode; title: string; righ
 function InfoField({ label, children }: { label: string; children: ReactNode }) {
   return (
     <Stack gap={1}>
-      <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "hsl(215 16% 47%)" }}>
+      <span
+        style={{
+          fontSize: 11,
+          textTransform: "uppercase",
+          letterSpacing: "0.05em",
+          color: MUTED_INK,
+        }}
+      >
         {label}
       </span>
       <Text size="sm">{children}</Text>
@@ -97,6 +121,12 @@ export default function SiteDetailsPage() {
   const reading = latest?.reading;
   const devices = devicesData?.devices ?? [];
   const intervals = demand?.intervals ?? [];
+  // Below this width the devices table's minimum column widths exceed the
+  // viewport and it spills; re-arrange each row into a stacked card instead.
+  // The same breakpoint shrinks the header action buttons so three of them
+  // don't crowd a phone.
+  const isNarrow = useMediaQuery("(max-width: 640px)");
+  const btnSize = isNarrow ? "sm" : "md";
 
   // Reactive power isn't stored on the instantaneous reading, but it's the third
   // side of the power triangle: Q = √(S² − P²), with S = apparent (kVA), P = active
@@ -108,14 +138,15 @@ export default function SiteDetailsPage() {
     activeKw != null && apparentKva != null && !Number.isNaN(activeKw) && !Number.isNaN(apparentKva)
       ? Math.sqrt(Math.max(0, apparentKva * apparentKva - activeKw * activeKw))
       : null;
-
   if (loading) {
     return (
       <Stack gap={6}>
         <Skeleton width={260} height={32} />
-        <Grid columns={{ minWidth: 340, repeat: "fit" }} gap={6}>
-          <Skeleton height={190} />
-          <Skeleton height={190} />
+        <Grid columns={{ minWidth: 200, repeat: "fill" }} gap={4}>
+          <Skeleton height={110} />
+          <Skeleton height={110} />
+          <Skeleton height={110} />
+          <Skeleton height={110} />
         </Grid>
         <Skeleton height={320} />
       </Stack>
@@ -137,129 +168,202 @@ export default function SiteDetailsPage() {
         <Stack gap={2}>
           <Link href="/dashboard">
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <ArrowLeft size={16} /> Back to Overview
+              <ArrowLeft size={16} /> Back to sites
             </span>
           </Link>
           <Stack direction="horizontal" gap={3} align="center">
             <Heading level={2}>{site.name}</Heading>
-            <Badge variant="success" label={site.status} />
+            <Badge variant="success" label={capitalize(site.status)} />
           </Stack>
           <Stack direction="horizontal" gap={2} align="center" wrap="wrap">
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "hsl(215 16% 47%)" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: MUTED_INK }}>
               <MapPin size={14} />
               <Text type="supporting">
                 {[site.city, site.province].filter(Boolean).join(", ") || "No address on file"}
               </Text>
             </span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "hsl(215 16% 47%)" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: MUTED_INK }}>
               <Clock size={14} />
               <Text type="supporting">{site.timezone}</Text>
             </span>
           </Stack>
         </Stack>
         <Stack direction="horizontal" gap={2} wrap="wrap">
-          <Button label="Settings" variant="secondary" icon={<Settings size={16} />} href={`/sites/${siteId}/settings`} />
-          <Button label="Invoices" variant="secondary" icon={<FileText size={16} />} href={`/sites/${siteId}/invoices`} />
-          <Button label="Reconciliations" variant="primary" icon={<Scale size={16} />} href={`/sites/${siteId}/reconciliation`} />
+          <Button label="Reconciliations" variant="primary" size={btnSize} icon={<Scale size={16} />} href={`/sites/${siteId}/reconciliation`} />
+          <Button label="Invoices" variant="secondary" size={btnSize} icon={<FileText size={16} />} href={`/sites/${siteId}/invoices`} />
+          <Button label="Settings" variant="secondary" size={btnSize} icon={<Settings size={16} />} href={`/sites/${siteId}/settings`} />
         </Stack>
       </Stack>
 
-      {/* Live overview — asymmetric tile layout: the three current-load tiles
-          stack in a wider left column (apparent → reactive → active), with the
-          billing-period card beside them. Flex-wrap collapses to a single column
-          on narrow viewports. */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 24, alignItems: "flex-start" }}>
-        {/* Current load — three stacked power tiles */}
-        <div style={{ flex: "2 1 420px", display: "flex", flexDirection: "column", gap: 12 }}>
-          <CardHead
-            icon={<Activity size={16} />}
-            title="Current load"
-            right={
-              reading?.time ? (
-                <Text type="supporting" size="sm">as of {new Date(reading.time).toLocaleString()}</Text>
-              ) : null
-            }
-          />
-          {reading ? (
-            <>
-              <Card padding={4}>
-                <MetricStat label="Apparent Power" hint={METRIC_HINTS.apparentPower} value={num(apparentKva)} unit="kVA" accent="success" />
-              </Card>
-              <Card padding={4}>
-                <MetricStat label="Reactive Power" hint={METRIC_HINTS.reactivePower} value={num(reactiveKvar)} unit="kVAr" accent="warning" />
-              </Card>
-              <Card padding={4}>
-                <MetricStat label="Active Power" hint={METRIC_HINTS.activePower} value={num(activeKw)} unit="kW" accent="primary" />
-              </Card>
-            </>
-          ) : (
-            <Card padding={4}>
+      {/* Live overview — Current load (power) leads on the left with apparent
+          power as the hero figure and active/reactive beneath it. On the right,
+          energy used this billing period sits directly above the peak-demand
+          block. Grid (not row-flex) so each card stretches to fill its column —
+          row-flex wrappers let the cards shrink-wrap and left the tiles ragged.
+          On narrow viewports the columns stack: load → energy → max demand. */}
+      <Grid columns={{ minWidth: 340, repeat: "fill" }} gap={4}>
+        <Card padding={5} height="100%">
+          <Stack gap={4} height="100%">
+            <CardHead
+              icon={<Activity size={16} />}
+              title="Current load"
+              right={
+                reading?.time ? (
+                  <Stack direction="horizontal" gap={2} align="center">
+                    <StatusDot variant="success" label="Live" isPulsing />
+                    <Text type="supporting" size="sm">Updated {shortTime(reading.time)}</Text>
+                  </Stack>
+                ) : null
+              }
+            />
+            {reading ? (
+              <>
+                <MetricStat
+                  label="Apparent Power"
+                  hint={METRIC_HINTS.apparentPower}
+                  value={formatReading(apparentKva, 1)}
+                  unit="kVA"
+                  size="lg"
+                />
+                <div style={{ borderTop: "1px solid var(--color-border, #ebebeb)" }} />
+                <Grid columns={{ minWidth: 130, repeat: "fill" }} gap={4}>
+                  <MetricStat label="Active Power" hint={METRIC_HINTS.activePower} value={formatReading(activeKw, 1)} unit="kW" size="sm" />
+                  <MetricStat label="Reactive Power" hint={METRIC_HINTS.reactivePower} value={formatReading(reactiveKvar, 1)} unit="kVAr" size="sm" />
+                </Grid>
+              </>
+            ) : (
               <Text type="supporting">No live readings yet for this site.</Text>
-            </Card>
-          )}
-        </div>
+            )}
+          </Stack>
+        </Card>
 
-        {/* Billing period — energy/demand totals for the current billing period */}
-        <div style={{ flex: "1 1 300px" }}>
+        {/* Right column: energy-to-date above maximum demand; the demand card
+            grows to keep the column bottom-aligned with the load card. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
           <Card padding={5}>
             <Stack gap={4}>
               <CardHead
                 icon={<CalendarRange size={16} />}
-                title="Billing period"
+                title="Billing period to date"
                 right={
                   mtd?.periodStart ? (
-                    <Text type="supporting" size="sm">since {new Date(mtd.periodStart).toLocaleDateString()}</Text>
+                    <Text type="supporting" size="sm">
+                      since {new Date(mtd.periodStart).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })}
+                    </Text>
                   ) : null
                 }
               />
-              <Stack gap={5}>
-                <MetricStat label="Active Energy" hint={METRIC_HINTS.activeEnergy} value={num(mtd?.activeEnergyKwh)} unit="kWh" accent="primary" />
-                <MetricStat label="Peak Demand" hint={METRIC_HINTS.peakDemand} value={num(mtd?.peakDemandKva)} unit="kVA" accent="warning" />
-                <MetricStat label="Reactive Energy" hint={METRIC_HINTS.reactiveEnergy} value={num(mtd?.reactiveEnergyKvarh)} unit="kVArh" />
-              </Stack>
+              <Grid columns={{ minWidth: 140, repeat: "fill" }} gap={5}>
+                <MetricStat label="Active Energy" hint={METRIC_HINTS.activeEnergy} value={formatReading(mtd?.activeEnergyKwh, 0)} unit="kWh" />
+                <MetricStat label="Reactive Energy" hint={METRIC_HINTS.reactiveEnergy} value={formatReading(mtd?.reactiveEnergyKvarh, 0)} unit="kVArh" />
+              </Grid>
             </Stack>
           </Card>
-        </div>
-      </div>
 
-      {/* Historical — 24h power series + energy across billing periods (switchable) */}
+          <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+            <Card padding={5} height="100%">
+              <Stack gap={4} height="100%">
+                <CardHead
+                  icon={<Gauge size={16} />}
+                  title="Maximum demand"
+                  right={
+                    mtd?.periodStart ? (
+                      <Text type="supporting" size="sm">
+                        since {new Date(mtd.periodStart).toLocaleDateString([], { day: "numeric", month: "short" })}
+                      </Text>
+                    ) : null
+                  }
+                />
+                <MetricStat
+                  label="Peak Network Demand"
+                  hint={METRIC_HINTS.peakDemand}
+                  value={formatReading(mtd?.peakDemandKva, 1)}
+                  unit="kVA"
+                  size="lg"
+                />
+                <Text type="supporting" size="sm">
+                  Highest {site.demandIntervalMinutes}-minute interval average this billing period.
+                </Text>
+              </Stack>
+            </Card>
+          </div>
+        </div>
+      </Grid>
+
+      {/* Historical — 24h power series + energy across billing periods (switchable).
+          The chart owns its header row (title + metric selector). */}
       <Card padding={5}>
-        <Stack gap={3}>
-          <CardHead icon={<BarChart3 size={16} />} title="Historical" />
-          <ConsumptionChart intervals={intervals} energyByPeriod={energyByPeriod ?? null} />
-        </Stack>
+        <ConsumptionChart intervals={intervals} energyByPeriod={energyByPeriod ?? null} />
       </Card>
 
       {/* Devices */}
       <Card padding={5}>
         <Stack gap={3}>
           <CardHead icon={<Radio size={16} />} title="Devices & Connectivity" />
-          {devices.length > 0 ? (
+          {devices.length > 0 && isNarrow ? (
+            <Stack gap={3}>
+              {devices.map((d) => (
+                <div
+                  key={d.id}
+                  style={{
+                    border: "1px solid var(--color-border, #ebebeb)",
+                    borderRadius: "var(--radius-inner, 4px)",
+                    padding: 12,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <Stack direction="horizontal" justify="between" align="center" gap={2}>
+                    <Text weight="medium">{d.serialNumber}</Text>
+                    <Badge variant={DEVICE_BADGE[d.status] ?? "neutral"} label={capitalize(d.status)} />
+                  </Stack>
+                  <Stack direction="horizontal" justify="between" align="center" gap={2}>
+                    <Text type="supporting" size="sm">{d.connectivityMode?.toUpperCase() ?? "—"}</Text>
+                    <Text type="supporting" size="sm">
+                      {d.lastSeenAt ? `Seen ${timeAgo(d.lastSeenAt)}` : "Never seen"}
+                    </Text>
+                  </Stack>
+                </div>
+              ))}
+            </Stack>
+          ) : devices.length > 0 ? (
+            // Explicit column widths: without them each column takes the
+            // 240px default minimum, overflowing the card even on desktop.
+            // Table brings its own horizontal scroll wrapper for mobile.
             <Table
               data={devices}
               columns={[
                 {
                   key: "serialNumber",
                   header: "Serial",
-                  renderCell: (d) => <Text weight="medium">{d.serialNumber}</Text>,
+                  width: proportional(2, { minWidth: 150 }),
+                  renderCell: (d) => (
+                    <span style={{ whiteSpace: "nowrap" }}>
+                      <Text weight="medium">{d.serialNumber}</Text>
+                    </span>
+                  ),
                 },
                 {
                   key: "status",
                   header: "Status",
-                  renderCell: (d) => <Badge variant={DEVICE_BADGE[d.status] ?? "neutral"} label={d.status} />,
+                  width: proportional(1, { minWidth: 110 }),
+                  renderCell: (d) => <Badge variant={DEVICE_BADGE[d.status] ?? "neutral"} label={capitalize(d.status)} />,
                 },
                 {
                   key: "connectivityMode",
                   header: "Link",
+                  width: proportional(1, { minWidth: 90 }),
                   renderCell: (d) => <Text type="supporting">{d.connectivityMode?.toUpperCase() ?? "—"}</Text>,
                 },
                 {
                   key: "lastSeenAt",
                   header: "Last Seen",
+                  width: proportional(1, { minWidth: 110 }),
                   renderCell: (d) => (
-                    <Text type="supporting">
-                      {d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString() : "Never"}
-                    </Text>
+                    <span style={{ whiteSpace: "nowrap" }}>
+                      <Text type="supporting">{d.lastSeenAt ? timeAgo(d.lastSeenAt) : "Never"}</Text>
+                    </span>
                   ),
                 },
               ]}

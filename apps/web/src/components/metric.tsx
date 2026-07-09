@@ -16,14 +16,22 @@ const infoButtonStyle: React.CSSProperties = {
   cursor: "help",
 };
 
-// Accent colours for the big stat value. Fixed light-mode palette matching the
-// consumption chart (MediaTheme is pinned to light).
-const ACCENT_COLOR: Record<string, string> = {
-  default: "inherit",
-  primary: "hsl(221 83% 53%)",
-  success: "hsl(142 71% 40%)",
-  warning: "hsl(26 83% 14%)",
-};
+/**
+ * Format a numeric reading for display: thousands separators, fixed decimals.
+ * Accepts the string-typed numerics the API returns; "—" for missing/invalid.
+ */
+export function formatReading(
+  value: string | number | null | undefined,
+  digits = 2,
+): string {
+  if (value == null) return "—";
+  const n = typeof value === "number" ? value : Number.parseFloat(value);
+  if (Number.isNaN(n)) return "—";
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
 
 /**
  * A metric label with a small `?` affordance. Hovering (or focusing, for keyboard
@@ -55,31 +63,39 @@ export function InfoLabel({
   );
 }
 
-/** A single stat: an info-labelled caption above a large value with an optional unit. */
+// Value type scale: "lg" is the one hero figure a block leads with, "md" the
+// standard tile value, "sm" a supporting sub-value inside a block.
+const VALUE_SIZE = { sm: 20, md: 26, lg: 38 } as const;
+
+/**
+ * A single stat: an info-labelled caption above a large value with an optional
+ * unit. The value stays in primary ink — identity comes from the label, not
+ * from color-coding each metric a different hue.
+ */
 export function MetricStat({
   label,
   hint,
   value,
   unit,
-  accent,
+  size = "md",
 }: {
   label: string;
   hint: string;
   value: ReactNode;
   unit?: string;
-  accent?: "default" | "primary" | "success" | "warning";
+  size?: keyof typeof VALUE_SIZE;
 }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <InfoLabel label={label} hint={hint} />
       <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
         <span
           style={{
-            fontSize: 24,
+            fontSize: VALUE_SIZE[size],
             fontWeight: 600,
-            fontVariantNumeric: "tabular-nums",
-            letterSpacing: "-0.01em",
-            color: ACCENT_COLOR[accent ?? "default"],
+            lineHeight: 1.1,
+            letterSpacing: "-0.02em",
+            color: "var(--color-text-primary, inherit)",
           }}
         >
           {value}

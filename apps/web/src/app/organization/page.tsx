@@ -79,14 +79,21 @@ export default function OrganizationPage() {
   if (!organizationId) return null;
 
   if (loadError) {
+    // Heading pinned top-left (matches Sites/Alerts); the denial itself is
+    // centered in the remaining space rather than left-aligned under it.
     return (
-      <Stack maxWidth={720}>
-        <EmptyState
-          icon={<Building size={28} />}
-          title="Owners only"
-          description="Organization management is available to organization owners."
-          actions={<Button label="Go to dashboard" variant="secondary" href="/dashboard" />}
-        />
+      <Stack gap={6} height="100%">
+        <Heading level={2}>Organization</Heading>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ width: "100%", maxWidth: 440 }}>
+            <EmptyState
+              icon={<Building size={28} />}
+              title="Owners only"
+              description="Organization management is available to organization owners."
+              actions={<Button label="Go to dashboard" variant="secondary" href="/dashboard" />}
+            />
+          </div>
+        </div>
       </Stack>
     );
   }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { BarChart3 } from "lucide-react";
 import {
   Area,
   AreaChart,
@@ -48,20 +49,33 @@ type PowerKey = "apparent" | "active";
 type EnergyKey = "energy" | "reactive";
 type MetricKey = PowerKey | EnergyKey;
 
+// Series hues follow the entity, not the chart: active power/energy is always
+// blue, apparent always aqua, reactive always violet — the same quantity keeps
+// the same color wherever it appears. (Palette CVD-validated as a set.)
+const HUE = {
+  active: "#2a78d6",
+  apparent: "#1baf7a",
+  reactive: "#4a3aa7",
+} as const;
+
+// Chart chrome stays recessive: hairline solid gridlines, muted axis ink.
+const GRID = "#e7e5e4";
+const AXIS_INK = "#898781";
+
 const POWER: Record<
   PowerKey,
   { label: string; field: keyof IntervalRow; unit: string; color: string; hint: string }
 > = {
-  apparent: { label: "Apparent power (kVA)", field: "avgDemandKva", unit: "kVA", color: "hsl(142 71% 40%)", hint: METRIC_HINTS.apparentPower },
-  active: { label: "Active power (kW)", field: "avgDemandKw", unit: "kW", color: "hsl(221 83% 53%)", hint: METRIC_HINTS.demandInterval },
+  apparent: { label: "Apparent power (kVA)", field: "avgDemandKva", unit: "kVA", color: HUE.apparent, hint: METRIC_HINTS.apparentPower },
+  active: { label: "Active power (kW)", field: "avgDemandKw", unit: "kW", color: HUE.active, hint: METRIC_HINTS.demandInterval },
 };
 
 const ENERGY: Record<
   EnergyKey,
   { label: string; field: keyof EnergyPeriodRow; unit: string; color: string; hint: string }
 > = {
-  energy: { label: "Energy consumption (kWh)", field: "activeEnergyKwh", unit: "kWh", color: "hsl(221 83% 53%)", hint: METRIC_HINTS.activeEnergy },
-  reactive: { label: "Reactive energy (kVArh)", field: "reactiveEnergyKvarh", unit: "kVArh", color: "hsl(38 92% 50%)", hint: METRIC_HINTS.reactiveEnergy },
+  energy: { label: "Energy consumption (kWh)", field: "activeEnergyKwh", unit: "kWh", color: HUE.active, hint: METRIC_HINTS.activeEnergy },
+  reactive: { label: "Reactive energy (kVArh)", field: "reactiveEnergyKvarh", unit: "kVArh", color: HUE.reactive, hint: METRIC_HINTS.reactiveEnergy },
 };
 
 const isEnergy = (k: MetricKey): k is EnergyKey => k === "energy" || k === "reactive";
@@ -90,14 +104,20 @@ function fmtTime(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// Axis ticks read faster compacted (216k, 1.2M) — the tooltip carries exact values.
+const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+const exact = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+
+const TICK = { fontSize: 11, fill: AXIS_INK };
+
+// biome-ignore lint/suspicious/noExplicitAny: recharts tooltip content props are untyped
 function ChartTooltip({ active, payload, label, unit }: any) {
   if (!active || !payload?.length) return null;
   return (
     <div
       style={{
         borderRadius: 8,
-        border: "1px solid hsl(214 32% 91%)",
+        border: `1px solid ${GRID}`,
         background: "#fff",
         padding: "8px 12px",
         fontSize: 12,
@@ -116,7 +136,7 @@ function ChartTooltip({ active, payload, label, unit }: any) {
           }}
         />
         <span style={{ fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>
-          {Number(payload[0].value).toFixed(2)} {unit}
+          {exact.format(Number(payload[0].value))} {unit}
         </span>
       </div>
     </div>
@@ -132,8 +152,8 @@ function EmptyChart({ message }: { message: string }) {
         alignItems: "center",
         justifyContent: "center",
         borderRadius: 8,
-        border: "1px dashed hsl(214 32% 85%)",
-        color: "hsl(215 16% 47%)",
+        border: `1px dashed ${GRID}`,
+        color: AXIS_INK,
         fontSize: 14,
         textAlign: "center",
         padding: "0 24px",
@@ -153,16 +173,26 @@ export function ConsumptionChart({
 }) {
   const [metricKey, setMetricKey] = useState<MetricKey>("energy");
 
-  const selector = (
-    <div style={{ width: 260 }}>
-      <Selector
-        label="Chart metric"
-        isLabelHidden
-        options={SELECTOR_OPTIONS}
-        value={metricKey}
-        onChange={(v) => setMetricKey(v as MetricKey)}
-      />
-    </div>
+  // Single header row: static section title + the metric selector. The selector
+  // is the sole statement of which metric is shown — no duplicate label above it.
+  const header = (hint: string) => (
+    <Stack direction="horizontal" justify="between" align="center" wrap="wrap" gap={3}>
+      <Stack direction="horizontal" gap={2} align="center">
+        <span style={{ display: "inline-flex", color: AXIS_INK }}>
+          <BarChart3 size={16} />
+        </span>
+        <InfoLabel label="History" hint={hint} strong />
+      </Stack>
+      <div style={{ width: "min(260px, 100%)" }}>
+        <Selector
+          label="Chart metric"
+          isLabelHidden
+          options={SELECTOR_OPTIONS}
+          value={metricKey}
+          onChange={(v) => setMetricKey(v as MetricKey)}
+        />
+      </div>
+    </Stack>
   );
 
   // ── Energy view: one bar per billing period, compared across all periods. ──
@@ -177,10 +207,7 @@ export function ConsumptionChart({
 
     return (
       <Stack gap={4}>
-        <Stack direction="horizontal" justify="between" align="center" wrap="wrap" gap={3}>
-          <InfoLabel label={`${metric.label} — per billing period`} hint={metric.hint} strong />
-          {selector}
-        </Stack>
+        {header(metric.hint)}
 
         {/* Always tell the user what the buckets represent (§ user requirement). */}
         <Text type="supporting" size="sm">
@@ -195,11 +222,11 @@ export function ConsumptionChart({
           <div style={{ height: 256, width: "100%" }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={data} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(214 32% 91%)" vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: "hsl(215 16% 47%)" }} tickLine={false} axisLine={{ stroke: "hsl(214 32% 91%)" }} minTickGap={8} />
-                <YAxis tick={{ fontSize: 11, fill: "hsl(215 16% 47%)" }} tickLine={false} axisLine={false} width={44} />
-                <Tooltip content={(p) => <ChartTooltip {...p} unit={metric.unit} />} cursor={{ fill: "hsl(214 32% 91% / 0.4)" }} />
-                <Bar dataKey="value" fill={metric.color} radius={[3, 3, 0, 0]} isAnimationActive={false} />
+                <CartesianGrid stroke={GRID} vertical={false} />
+                <XAxis dataKey="label" tick={TICK} tickLine={false} axisLine={{ stroke: GRID }} minTickGap={8} />
+                <YAxis tick={TICK} tickFormatter={(v: number) => compact.format(v)} tickLine={false} axisLine={false} width={44} />
+                <Tooltip content={(p) => <ChartTooltip {...p} unit={metric.unit} />} cursor={{ fill: "rgb(120 113 108 / 0.08)" }} />
+                <Bar dataKey="value" fill={metric.color} maxBarSize={24} radius={[4, 4, 0, 0]} isAnimationActive={false} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -217,10 +244,11 @@ export function ConsumptionChart({
 
   return (
     <Stack gap={4}>
-      <Stack direction="horizontal" justify="between" align="center" wrap="wrap" gap={3}>
-        <InfoLabel label={`${metric.label} — last 24 hours`} hint={metric.hint} strong />
-        {selector}
-      </Stack>
+      {header(metric.hint)}
+
+      <Text type="supporting" size="sm">
+        Average demand per metering interval over the last 24 hours.
+      </Text>
 
       {data.length === 0 ? (
         <EmptyChart message="No interval data in this window yet." />
@@ -228,17 +256,21 @@ export function ConsumptionChart({
         <div style={{ height: 256, width: "100%" }}>
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-              <defs>
-                <linearGradient id={`fill-${metricKey}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={metric.color} stopOpacity={0.35} />
-                  <stop offset="100%" stopColor={metric.color} stopOpacity={0.02} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(214 32% 91%)" vertical={false} />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "hsl(215 16% 47%)" }} tickLine={false} axisLine={{ stroke: "hsl(214 32% 91%)" }} minTickGap={24} />
-              <YAxis tick={{ fontSize: 11, fill: "hsl(215 16% 47%)" }} tickLine={false} axisLine={false} width={44} />
+              <CartesianGrid stroke={GRID} vertical={false} />
+              <XAxis dataKey="label" tick={TICK} tickLine={false} axisLine={{ stroke: GRID }} minTickGap={24} />
+              <YAxis tick={TICK} tickFormatter={(v: number) => compact.format(v)} tickLine={false} axisLine={false} width={44} />
               <Tooltip content={(p) => <ChartTooltip {...p} unit={metric.unit} />} />
-              <Area type="monotone" dataKey="value" stroke={metric.color} strokeWidth={2} fill={`url(#fill-${metricKey})`} isAnimationActive={false} />
+              <Area
+                type="monotone"
+                dataKey="value"
+                stroke={metric.color}
+                strokeWidth={2}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                fill={metric.color}
+                fillOpacity={0.1}
+                isAnimationActive={false}
+              />
             </AreaChart>
           </ResponsiveContainer>
         </div>

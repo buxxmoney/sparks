@@ -3,25 +3,27 @@
 import { usePathname } from "next/navigation";
 import {
   SideNav,
-  SideNavHeading,
   SideNavSection,
   SideNavItem,
+  useSideNavCollapse,
 } from "@astryxdesign/core/SideNav";
 import { Badge } from "@astryxdesign/core/Badge";
 import {
   LayoutDashboard,
   Bell,
   Building,
+  Building2,
   Gauge,
   FileText,
   Scale,
   Settings,
   ShieldCheck,
 } from "lucide-react";
-import { Logo } from "@/components/Logo";
+
 import { client } from "@/lib/client";
 import { useOrganization } from "@/lib/useOrganization";
 import { useRPC } from "@/lib/useRPC";
+import { HAIRLINE } from "./constants";
 
 // Derive the active site id from the URL. "new" is the create-site route, not a
 // site id, so it must not surface the per-site sub-nav.
@@ -34,10 +36,10 @@ function useNavContext() {
 
 const ICON_SIZE = 18;
 
-// Shared navigation body rendered inside BOTH the desktop SideNav and the
-// mobile drawer (MobileNav accepts the same SideNavSection/SideNavItem children),
-// so the two stay in sync from one source.
-export function NavSections() {
+// Navigation body of the SideNav. On mobile, AppShell transports the whole
+// SideNav (this included) into its drawer automatically — one source of truth
+// for both. Kept as its own component so sections stay readable.
+function NavSections() {
   const { pathname, siteId } = useNavContext();
   const { isPlatformOperator, isOrgOwner } = useOrganization();
   const { data: unread } = useRPC(() => client.alerts.unreadCount(), []);
@@ -47,7 +49,7 @@ export function NavSections() {
     <>
       <SideNavSection title="Platform">
         <SideNavItem
-          label="Overview"
+          label="Sites"
           icon={<LayoutDashboard size={ICON_SIZE} />}
           href="/dashboard"
           isSelected={pathname === "/dashboard"}
@@ -111,18 +113,97 @@ export function NavSections() {
   );
 }
 
-// Persistent desktop sidebar.
-export function AppSideNav() {
+// Sticky sidebar footer: the active organization in a square-cornered box,
+// with the copyright line under a hairline that matches the shell dividers.
+// Both collapse gracefully when the sidebar is in icon-only mode.
+function OrgFooter() {
+  const { isCollapsed } = useSideNavCollapse();
+  const { organizationId, orgRole } = useOrganization();
+  const { data: memberships } = useRPC(() => client.session.listMemberships(), []);
+  const org = memberships?.find((m) => m.organizationId === organizationId);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          border: HAIRLINE,
+          borderRadius: "var(--radius-inner, 4px)",
+          padding: isCollapsed ? 6 : "8px 10px",
+          justifyContent: isCollapsed ? "center" : "flex-start",
+        }}
+        title={org?.organizationName}
+      >
+        <span
+          style={{
+            display: "inline-flex",
+            width: 26,
+            height: 26,
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: "var(--radius-inner, 4px)",
+            background: "var(--color-accent, #262626)",
+            color: "var(--color-on-accent, #ffffff)",
+            flexShrink: 0,
+          }}
+        >
+          <Building2 size={14} />
+        </span>
+        {!isCollapsed && (
+          <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+            <span
+              style={{
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {org?.organizationName ?? "Organization"}
+            </span>
+            {orgRole ? (
+              <span style={{ fontSize: 11, color: "var(--color-text-secondary, #737373)" }}>
+                {orgRole.charAt(0).toUpperCase() + orgRole.slice(1)}
+              </span>
+            ) : null}
+          </span>
+        )}
+      </div>
+      {!isCollapsed && (
+        <div
+          style={{
+            borderTop: HAIRLINE,
+            paddingTop: 8,
+            fontSize: 11,
+            color: "var(--color-text-secondary, #737373)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          © Sparks Metering 2026
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Persistent desktop sidebar. Collapse state is controlled from AppChrome
+// (rather than left uncontrolled here) so the header's logo cell in Topbar can
+// read the same boolean and size itself to match — that's what keeps the
+// vertical divider between header-logo and sidenav continuous at any width.
+export function AppSideNav({
+  isCollapsed,
+  onCollapsedChange,
+}: {
+  isCollapsed: boolean;
+  onCollapsedChange: (isCollapsed: boolean) => void;
+}) {
   return (
     <SideNav
-      header={
-        <SideNavHeading
-          icon={<Logo size={22} />}
-          heading="Sparks"
-          subheading="Energy Reconciliation"
-          headingHref="/dashboard"
-        />
-      }
+      collapsible={{ isCollapsed, onCollapsedChange }}
+      footer={<OrgFooter />}
     >
       <NavSections />
     </SideNav>

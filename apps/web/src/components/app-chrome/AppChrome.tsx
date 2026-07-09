@@ -1,10 +1,9 @@
 "use client";
 
 import { AppShell } from "@astryxdesign/core/AppShell";
-import { MobileNav } from "@astryxdesign/core/MobileNav";
 import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
-import { AppSideNav, NavSections } from "./Sidebar";
+import { useState, type ReactNode } from "react";
+import { AppSideNav } from "./Sidebar";
 import { Topbar } from "./Topbar";
 
 // Routes that render bare (no app shell): auth screens + the root redirect.
@@ -13,21 +12,11 @@ function isBareRoute(pathname: string): boolean {
   return pathname === "/" || pathname.startsWith("/auth") || pathname.startsWith("/invite");
 }
 
-function titleFor(pathname: string): string {
-  if (pathname === "/dashboard") return "Overview";
-  if (pathname === "/admin") return "Operator admin";
-  if (/^\/sites\/new$/.test(pathname)) return "New Site";
-  if (/\/settings$/.test(pathname)) return "Site Settings";
-  if (/^\/sites\/[^/]+$/.test(pathname)) return "Site Dashboard";
-  if (/\/invoices\/[^/]+$/.test(pathname)) return "Invoice";
-  if (/\/invoices$/.test(pathname)) return "Invoices";
-  if (/\/reconciliation\/[^/]+$/.test(pathname)) return "Reconciliation";
-  if (/\/reconciliation$/.test(pathname)) return "Reconciliations";
-  return "Sparks";
-}
-
 export function AppChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname() || "/";
+  // Lifted (not left uncontrolled inside SideNav) so Topbar can size the
+  // header's logo cell to match — see Sidebar.tsx's AppSideNav comment.
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   // Auth screens and the root redirect render bare (they bring their own
   // full-screen AuthShell layout).
@@ -37,19 +26,55 @@ export function AppChrome({ children }: { children: ReactNode }) {
 
   return (
     <AppShell
-      topNav={<Topbar title={titleFor(pathname)} />}
-      sideNav={<AppSideNav />}
-      mobileNav={
-        <MobileNav header="Sparks">
-          <NavSections />
-        </MobileNav>
+      topNav={<Topbar isSidebarCollapsed={isSidebarCollapsed} />}
+      sideNav={
+        <AppSideNav isCollapsed={isSidebarCollapsed} onCollapsedChange={setIsSidebarCollapsed} />
       }
+      // Config form (not a <MobileNav> element!) — passing an element disables
+      // AppShell's built-in drawer wiring entirely, which left mobile with no
+      // hamburger and no way to navigate. With the config form the shell
+      // transports the sideNav content into its own drawer below `md` and
+      // injects the toggle into the top bar.
+      mobileNav={{ breakpoint: "md" }}
+      // "section" draws hairline dividers between the nav areas and the
+      // content — a full-width line under the top bar and a full-height line
+      // beside the sidebar, which frame the Sparks logo in the top-left corner.
+      variant="section"
       contentPadding={4}
       height="fill"
     >
       {/* Center page content and cap its width so wide viewports don't leave
-          all the whitespace on the right. Pages fill this container. */}
-      <div style={{ width: "100%", maxWidth: 1160, marginInline: "auto" }}>{children}</div>
+          all the whitespace on the right. Pages fill this container; the
+          footer sits below them, pushed to the viewport bottom on short pages. */}
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 1160,
+          marginInline: "auto",
+          minHeight: "100%",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <div style={{ flexGrow: 1 }}>{children}</div>
+        <footer
+          style={{
+            marginTop: 40,
+            borderTop: "1px solid var(--color-border, #ebebeb)",
+            paddingBlock: 16,
+            display: "flex",
+            flexWrap: "wrap",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 12,
+            color: "var(--color-text-secondary, #737373)",
+          }}
+        >
+          <span>© 2026 Sparks Metering (Pty) Ltd. All rights reserved.</span>
+          <span>Live metering &amp; billing reconciliation</span>
+        </footer>
+      </div>
     </AppShell>
   );
 }

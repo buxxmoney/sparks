@@ -7,7 +7,7 @@ import { Stack } from "@astryxdesign/core/Stack";
 import { Grid } from "@astryxdesign/core/Grid";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Text } from "@astryxdesign/core/Text";
-import { Badge } from "@astryxdesign/core/Badge";
+import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -21,13 +21,18 @@ import { client } from "@/lib/client";
 // either light or dark mode without reaching for specific theme tokens).
 const iconTileStyle: React.CSSProperties = {
   display: "inline-flex",
-  width: 40,
-  height: 40,
+  width: 36,
+  height: 36,
   alignItems: "center",
   justifyContent: "center",
-  borderRadius: 10,
-  background: "color-mix(in srgb, currentColor 10%, transparent)",
+  borderRadius: "var(--radius-inner, 4px)",
+  background: "color-mix(in srgb, currentColor 8%, transparent)",
+  flexShrink: 0,
 };
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 const GRID_COLUMNS = { minWidth: 260, repeat: "fill" } as const;
 
@@ -82,9 +87,17 @@ export default function DashboardPage() {
           {sites.map((site) => (
             <ClickableCard key={site.id} label={site.name} href={`/sites/${site.id}`} padding={5}>
               <Stack gap={3} height="100%">
-                <span style={iconTileStyle}>
-                  <Building2 size={20} />
-                </span>
+                {/* Icon tile on the left, live status quietly in the corner —
+                    matches the stat-tile language of the site dashboard. */}
+                <Stack direction="horizontal" justify="between" align="center" gap={2}>
+                  <span style={iconTileStyle}>
+                    <Building2 size={18} />
+                  </span>
+                  <Stack direction="horizontal" gap={2} align="center">
+                    <StatusDot variant="success" label={capitalize(site.status)} />
+                    <Text type="supporting" size="sm">{capitalize(site.status)}</Text>
+                  </Stack>
+                </Stack>
                 <Stack gap={1}>
                   <Text weight="semibold">{site.name}</Text>
                   <Stack direction="horizontal" gap={1} align="center">
@@ -95,7 +108,6 @@ export default function DashboardPage() {
                     </Text>
                   </Stack>
                 </Stack>
-                <Badge variant="success" label={site.status} />
               </Stack>
             </ClickableCard>
           ))}

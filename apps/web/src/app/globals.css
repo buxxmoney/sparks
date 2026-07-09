@@ -2,6 +2,42 @@
 @import '@astryxdesign/core/astryx.css';
 @import '@astryxdesign/theme-neutral/theme.css';
 
+/* Squarer geometry (brand direction): tighten the theme's radius scale so
+   cards, buttons, and inputs read crisp rather than pillowy. --radius-full is
+   left alone so status dots and count badges stay round. */
+[data-astryx-theme="neutral"] {
+  --radius-none: 0.125rem;
+  --radius-inner: 0.25rem;
+  --radius-element: 0.375rem;
+  --radius-container: 0.375rem;
+  --radius-page: 0.5rem;
+
+  /* Brand accent — Sparks green (sampled from the logo). Repoints the theme's
+     neutral near-black accent to the brand emerald, so primary buttons, focus
+     rings and other accented surfaces carry the brand. --color-accent-muted is
+     a soft green wash for selected/hover backgrounds. Kept dark enough to hold
+     white text (~6:1). */
+  --color-accent: #0c6c30;
+  --color-accent-muted: #e6f1ea;
+  --color-on-accent: #ffffff;
+  --color-text-accent: #0b5f2b;
+  --color-icon-accent: #0c6c30;
+}
+
+/* The MediaTheme wrapper re-declares --color-accent to near-black on the
+   [data-astryx-media] element itself, which beats the root override above by
+   inheritance proximity — so the brand green must be re-asserted at that level
+   too, or primary buttons stay black. */
+[data-astryx-theme="neutral"] [data-astryx-media] {
+  --color-accent: #0c6c30;
+}
+
+/* Badges hard-code the pill radius internally; square them off to match the
+   brand geometry. Status dots are a separate component and stay circular. */
+.astryx-badge {
+  border-radius: var(--radius-inner, 0.25rem);
+}
+
 /* App surface + font. The Astryx theme drives component colours; this only sets
    the page background behind the shell and the base font metrics. */
 body {
@@ -15,7 +51,7 @@ body {
   overflow: visible;
 }
 .recharts-default-tooltip {
-  border-radius: 0.75rem !important;
+  border-radius: 0.25rem !important;
   border: 1px solid hsl(214 32% 91%) !important;
   box-shadow: 0 4px 16px rgb(15 23 42 / 0.08) !important;
 }

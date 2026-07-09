@@ -122,15 +122,22 @@ export default function AdminPage() {
     `R ${(cents / 100).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   // listOrganizations is operator-gated; a non-operator gets FORBIDDEN.
+  // Heading pinned top-left (matches Sites/Alerts); the denial itself is
+  // centered in the remaining space rather than left-aligned under it.
   if (error) {
     return (
-      <Stack maxWidth={720}>
-        <EmptyState
-          icon={<Building2 size={28} />}
-          title="Operators only"
-          description="This area is for Sparks platform operators. If you reached it by mistake, head back to your dashboard."
-          actions={<Button label="Go to dashboard" variant="secondary" href="/dashboard" />}
-        />
+      <Stack gap={6} height="100%">
+        <Heading level={2}>Operator admin</Heading>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ width: "100%", maxWidth: 440 }}>
+            <EmptyState
+              icon={<Building2 size={28} />}
+              title="Operators only"
+              description="This area is for Sparks platform operators. If you reached it by mistake, head back to your dashboard."
+              actions={<Button label="Go to dashboard" variant="secondary" href="/dashboard" />}
+            />
+          </div>
+        </div>
       </Stack>
     );
   }
