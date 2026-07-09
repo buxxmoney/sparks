@@ -1877,7 +1877,23 @@ async function findOrCreateInvoicePeriod(
   const existing = await db.query.billingPeriods.findFirst({
     where: and(eq(billingPeriods.siteId, siteId), eq(billingPeriods.periodStart, start)),
   });
-  if (existing) return existing;
+  if (existing) {
+    // Keep the end in sync — otherwise editing an invoice's period end (which keeps
+    // the same start) would silently no-op, matching the old period and dropping the
+    // change ("Save period does nothing").
+    if (existing.periodEnd.getTime() !== end.getTime()) {
+      const [updated] = await db
+        .update(billingPeriods)
+        .set({
+          periodEnd: end,
+          label: start.toLocaleString("en-ZA", { month: "long", year: "numeric" }),
+        })
+        .where(eq(billingPeriods.id, existing.id))
+        .returning();
+      return updated;
+    }
+    return existing;
+  }
   const [created] = await db
     .insert(billingPeriods)
     .values({

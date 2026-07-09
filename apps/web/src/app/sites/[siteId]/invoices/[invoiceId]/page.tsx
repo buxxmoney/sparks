@@ -264,7 +264,10 @@ export default function InvoiceDetailPage() {
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             <CalendarRange size={16} color="hsl(221 83% 45%)" />
             <Text weight="semibold">Billing period</Text>
-            <Text type="supporting">— read from the invoice; fix it here if it's wrong</Text>
+            <Text type="supporting">
+              — the dates we read from your invoice. They set the period your usage is reconciled
+              against, so check they match your bill and adjust if needed.
+            </Text>
           </span>
           {isPendingConfirm ? (
             <Stack direction="horizontal" gap={3} align="end" wrap="wrap">
