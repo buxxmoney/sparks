@@ -14,6 +14,7 @@ import {
 } from "@sparks/db";
 import { and, asc, eq } from "drizzle-orm";
 import { parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
+import { PreconditionError } from "./middleware";
 import { hashBuffer, renderHtmlToPdf, renderReportHtml } from "./reports";
 import { putObject } from "./storage";
 
@@ -430,7 +431,11 @@ export async function generateReportPdf(
   });
 
   if (!meter) {
-    throw new Error("Meter for site not found");
+    // A sealed dispute PDF is meter-measured evidence, so it needs a meter installed
+    // on the site. Surface this as an actionable message, not a generic 500.
+    throw new PreconditionError(
+      "This site has no meter installed, so a sealed dispute PDF can't be generated — it relies on meter-measured usage. You can still send the customer your written review outcome.",
+    );
   }
 
   // Get device data
@@ -439,7 +444,9 @@ export async function generateReportPdf(
   });
 
   if (!device) {
-    throw new Error("Device for meter not found");
+    throw new PreconditionError(
+      "The meter on this site isn't linked to a device yet, so a sealed dispute PDF can't be generated.",
+    );
   }
 
   // Get tariff names and validate legal_ceiling attorney status
