@@ -203,3 +203,48 @@ export async function dispatchInvoiceParsed(params: {
     console.error(`[notify] invoice-parsed alert failed for ${params.invoiceId}:`, err);
   }
 }
+
+/**
+ * In-app confirmation for the customer that their bill has been SENT to Sparks for
+ * review — closing the loop (ready → sent → outcome) in their Alerts inbox.
+ * App-inbox only; best-effort; never throws.
+ */
+export async function dispatchReviewSubmitted(params: {
+  invoiceId: string;
+  siteId: string;
+  organizationId: string;
+  siteName: string;
+}): Promise<void> {
+  try {
+    const db = getDb();
+    const recipients = await resolveRecipients(params.organizationId, params.siteId);
+    if (recipients.length === 0) return;
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        organizationId: params.organizationId,
+        siteId: params.siteId,
+        type: "review_submitted",
+        severity: "info",
+        title: `Sent to Sparks — ${params.siteName}`,
+        message:
+          "Your bill has been sent to Sparks for review. We'll check the charges against your meter and let you know the outcome.",
+        payload: { invoiceId: params.invoiceId },
+        status: "open",
+      })
+      .returning();
+
+    for (const r of recipients) {
+      await db.insert(alertDeliveries).values({
+        alertId: alert.id,
+        channel: "app",
+        recipientUserId: r.id,
+        status: "sent",
+        sentAt: new Date(),
+      });
+    }
+  } catch (err) {
+    console.error(`[notify] review-submitted alert failed for ${params.invoiceId}:`, err);
+  }
+}

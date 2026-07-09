@@ -200,6 +200,7 @@ export const alertType = pgEnum("alert_type", [
   "demand_spike",
   "invoice_ready",
   "invoice_parsed",
+  "review_submitted",
 ]);
 export const alertSeverity = pgEnum("alert_severity", ["info", "warning", "critical"]);
 export const alertStatus = pgEnum("alert_status", ["open", "acknowledged", "resolved"]);

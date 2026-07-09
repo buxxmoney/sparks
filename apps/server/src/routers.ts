@@ -52,7 +52,7 @@ import {
   generateReconciliation,
   priceSegments,
 } from "./reconciliation";
-import { dispatchInvoiceParsed } from "./notifications";
+import { dispatchInvoiceParsed, dispatchReviewSubmitted } from "./notifications";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
 import {
@@ -2491,6 +2491,15 @@ export async function invoicesRequestReview(ctx: AuthContext, input: unknown) {
   void sendReviewRequestEmail(invoice, parsed.note ?? null).catch((err) =>
     console.error(`[review-email] failed for invoice ${parsed.invoiceId}:`, err),
   );
+
+  // Confirm to the customer, in their Alerts inbox, that the bill is now with Sparks.
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, invoice.siteId) });
+  void dispatchReviewSubmitted({
+    invoiceId: invoice.id,
+    siteId: invoice.siteId,
+    organizationId: site?.organizationId ?? "",
+    siteName: site?.name ?? "your site",
+  });
 
   return { invoiceId: parsed.invoiceId, reviewRequestedAt: new Date() };
 }
