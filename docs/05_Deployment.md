@@ -1,6 +1,30 @@
-# 05 — Private Staging Deployment (on your domain, gated with Cloudflare Access)
+# 05 — Deployment
 
-Goal: get Sparks onto **your domain** so you + your brother can test end-to-end from any device, but **private** — nobody else can even load it. Approach: two subdomains behind **Cloudflare Access** (an email allowlist gate).
+## ★ ACTUAL LIVE STATE (2026-07-08) — read this first
+
+**Sparks is DEPLOYED and public** (Cloudflare Access was skipped for now — decided it's fine while login-gated with no real data):
+- **Web:** `https://app.sparksmetering.com` → **Vercel** (project is misnamed "sparks-server" — cosmetic; Root Directory=`apps/web`, Framework=Next.js, Build Command override=`next build`, env `NEXT_PUBLIC_API_URL=https://api.sparksmetering.com`).
+- **API:** `https://api.sparksmetering.com` → **Railway** (service `@sparks/server`, builder=Dockerfile from the root `Dockerfile`).
+- **DB:** Neon — prod + local dev currently **share** the `ep-lingering-unit-aiq90862` branch (the other branch `ep-empty-dew` is migrated but unused). Both = 29 tables (migrations 0001–0008).
+- **Storage:** Cloudflare R2 (auto-selected in prod via `R2_*`). **Email:** Resend, `sparksmetering.com` domain verified → delivers to real addresses.
+- **Auto-deploy:** every push to `main` redeploys BOTH Railway and Vercel.
+- **DNS (Cloudflare):** `api` CNAME→railway **orange/Proxied**; `app` CNAME→`*.vercel-dns.com` **grey/DNS-only**; SSL mode **Full**.
+
+**Deploy gotchas already solved (don't repeat):**
+1. Railway ran the package `start` script `bun dist/index.js` (no build) → crash-loop `Module not found "dist/index.js"`. Fixed: `start`=`tsx src/index.ts`, added `tsx` dep, bound server to `0.0.0.0` (commit `cdf4366`).
+2. Railway auto-split the monorepo into two services; deleted the crashing `@sparks/web` one, kept `@sparks/server`.
+3. Vercel scoped the Turbo build to `@sparks/server` and deployed the backend as a crashing serverless fn. Fix: **set Root Directory=`apps/web` at import time** (delete + re-import if needed) and set Build Command override=`next build`.
+4. `NEXT_PUBLIC_API_URL` is frozen at build time — a typo (missing `.com`) gave `ERR_NAME_NOT_RESOLVED` on signup; fixing it needs a **redeploy**.
+
+**Still to do:** SMS (Twilio env empty — `sms.ts` no-ops); close public `/auth/signup`; scope Railway's rebuild watch-path to `apps/server` (it rebuilds on every push); split prod DB from dev.
+
+**Run scripts against prod** (from `apps/server`, they load `.env` = the prod DB): `bun scripts/make-operator.ts <email>`, `bun scripts/seed-demo-data.ts <siteId>` (simulate a meter: device + tariffs + a day of readings), `scripts/test-email.ts`, `scripts/test-sms.ts`.
+
+---
+
+## (Original plan) Private Staging Deployment with Cloudflare Access
+
+Goal: get Sparks onto **your domain** so you + your brother can test end-to-end from any device, but **private** — nobody else can even load it. Approach: two subdomains behind **Cloudflare Access** (an email allowlist gate). *(NOTE: Access was skipped — see the LIVE STATE section above. Keep this for when you want to lock it down.)*
 
 ```
 app.sparksmetering.com   → Vercel   (the Next.js web app)   ← Cloudflare Access gate (you two only)
