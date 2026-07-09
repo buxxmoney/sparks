@@ -58,6 +58,12 @@ export default function AdminPage() {
     loading: queueLoading,
     refetch: refetchQueue,
   } = useRPC(() => client.admin.listReviewQueue(), []);
+  // Bills customers have sent for review (incl. ones with no reconciliation yet).
+  const { data: submittedData, loading: submittedLoading } = useRPC(
+    () => client.admin.listSubmittedInvoices(),
+    [],
+  );
+  const submissions = submittedData?.submissions ?? [];
   const [reviewBusy, setReviewBusy] = useState(false);
   const [queueMsg, setQueueMsg] = useState<{ kind: "success" | "error"; text: string } | null>(
     null,
@@ -333,6 +339,89 @@ export default function AdminPage() {
           </form>
         </Card>
       </Grid>
+
+      {/* Bills submitted for review (the "who sent what" inbox) */}
+      <Card padding={5}>
+        <Stack gap={3}>
+          <Stack direction="horizontal" gap={2} align="center">
+            <span style={{ display: "inline-flex", color: PRIMARY }}>
+              <Send size={16} />
+            </span>
+            <Text weight="semibold">Bills submitted for review</Text>
+            {submissions.length > 0 ? (
+              <Badge variant="warning" label={`${submissions.length}`} />
+            ) : null}
+          </Stack>
+          <Text type="supporting">
+            Bills customers have sent to Sparks. Ones without a reconciliation yet need a landlord
+            tariff assigned to the site before the reconciliation can be generated.
+          </Text>
+          {submittedLoading ? (
+            <Stack gap={2}>
+              <Skeleton height={40} />
+            </Stack>
+          ) : submissions.length === 0 ? (
+            <Text type="supporting">No bills submitted for review yet.</Text>
+          ) : (
+            <Table
+              data={submissions}
+              columns={[
+                {
+                  key: "who",
+                  header: "Submitted by",
+                  renderCell: (s) => (
+                    <Stack gap={0}>
+                      <Text weight="medium">{s.customerEmail ?? "Customer"}</Text>
+                      <Text type="supporting">{s.organizationName ?? "—"}</Text>
+                    </Stack>
+                  ),
+                },
+                {
+                  key: "site",
+                  header: "Site / period",
+                  renderCell: (s) => (
+                    <Stack gap={0}>
+                      <Text>{s.siteName ?? "Site"}</Text>
+                      <Text type="supporting">
+                        {new Date(s.billingPeriodStart).toLocaleDateString()} –{" "}
+                        {new Date(s.billingPeriodEnd).toLocaleDateString()}
+                      </Text>
+                    </Stack>
+                  ),
+                },
+                {
+                  key: "total",
+                  header: "Total",
+                  renderCell: (s) => (
+                    <Text weight="medium">R {((s.confirmedTotalCents ?? 0) / 100).toFixed(2)}</Text>
+                  ),
+                },
+                {
+                  key: "when",
+                  header: "Submitted",
+                  renderCell: (s) => (
+                    <Text type="supporting">
+                      {s.reviewRequestedAt ? new Date(s.reviewRequestedAt).toLocaleString() : "—"}
+                    </Text>
+                  ),
+                },
+                {
+                  key: "state",
+                  header: "",
+                  renderCell: (s) =>
+                    s.hasReconciliation ? (
+                      <Badge variant="success" label="In QA queue" />
+                    ) : (
+                      <Badge variant="warning" label="Needs tariff" />
+                    ),
+                },
+              ]}
+              density="compact"
+              dividers="rows"
+            />
+          )}
+        </Stack>
+      </Card>
 
       {/* Sparks QA queue */}
       <Card padding={5}>

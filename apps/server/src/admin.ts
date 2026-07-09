@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { desc, eq, inArray, sql } from "drizzle-orm";
+import { desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import {
   getDb,
   landlordInvoices,
@@ -169,6 +169,51 @@ export async function adminListReviewQueue(ctx: AuthContext) {
     });
 
   return { queue };
+}
+
+/**
+ * Operator-only: bills customers have explicitly SENT to Sparks for review. This is
+ * the "who submitted what" list — it includes submissions that don't yet have a
+ * reconciliation (e.g. the site has no landlord tariff, so it isn't in the QA queue
+ * yet). `hasReconciliation` distinguishes the two so the operator knows the next step.
+ */
+export async function adminListSubmittedInvoices(ctx: AuthContext) {
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+
+  const rows = await db
+    .select({
+      invoiceId: landlordInvoices.id,
+      siteId: landlordInvoices.siteId,
+      siteName: sites.name,
+      organizationName: organization.name,
+      customerEmail: user.email,
+      billingPeriodStart: landlordInvoices.billingPeriodStart,
+      billingPeriodEnd: landlordInvoices.billingPeriodEnd,
+      confirmedTotalCents: landlordInvoices.confirmedTotalCents,
+      reviewRequestedAt: landlordInvoices.reviewRequestedAt,
+      status: landlordInvoices.status,
+    })
+    .from(landlordInvoices)
+    .leftJoin(sites, eq(sites.id, landlordInvoices.siteId))
+    .leftJoin(organization, sql`${organization.id} = ${sites.organizationId}`)
+    .leftJoin(user, eq(user.id, landlordInvoices.uploadedByUserId))
+    .where(isNotNull(landlordInvoices.reviewRequestedAt))
+    .orderBy(desc(landlordInvoices.reviewRequestedAt));
+
+  // Which submissions already produced a reconciliation (those show in the QA queue).
+  const reconRows = await db
+    .select({ invoiceId: reconciliations.invoiceId })
+    .from(reconciliations);
+  const withRecon = new Set(reconRows.map((r) => r.invoiceId));
+
+  const submissions = rows.map((r) => ({
+    ...r,
+    confirmedTotalCents: r.confirmedTotalCents ?? 0,
+    hasReconciliation: withRecon.has(r.invoiceId),
+  }));
+
+  return { submissions };
 }
 
 /**

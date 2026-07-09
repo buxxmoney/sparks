@@ -14,6 +14,7 @@ export const appRouter = {
     createCustomer: proc(V.adminCreateCustomerInput, A.adminCreateCustomer),
     listOrganizations: procNoInput(A.adminListOrganizations),
     listReviewQueue: procNoInput(A.adminListReviewQueue),
+    listSubmittedInvoices: procNoInput(A.adminListSubmittedInvoices),
     reviewReconciliation: proc(V.adminReviewReconciliationInput, A.adminReviewReconciliation),
     tariffSchedulesCreate: proc(V.tariffSchedulesCreateInput, A.adminTariffSchedulesCreate),
     tariffSchedulesList: procNoInput(A.adminTariffSchedulesList),
