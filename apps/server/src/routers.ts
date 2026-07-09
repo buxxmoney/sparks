@@ -2527,13 +2527,21 @@ async function computeTariffAnalysis(
     .sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
 
   if (!schedule) {
-    return {
-      available: false,
-      scheduleName: null,
-      provider: null,
-      note: "No reference tariff schedule on file matches this bill's provider and period. Upload one in operator admin to enable rate checks.",
-      lines: [],
-    };
+    // Explain WHY there was no match — provider miss vs. effective-date miss — so the
+    // operator knows exactly what to upload (rather than a vague "no schedule").
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const providerMatches = schedules.filter((s) => labels.includes(s.provider.toLowerCase()));
+    let note: string;
+    if (providerMatches.length === 0) {
+      const have = [...new Set(schedules.map((s) => s.provider))].join(", ") || "none";
+      note = `This bill's charges don't reference a provider we have a reference schedule for (on file: ${have}). Upload the applicable provider's schedule in operator admin.`;
+    } else {
+      const s = providerMatches.sort(
+        (a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime(),
+      )[0];
+      note = `We have a ${s.provider} schedule ("${s.name}", effective from ${fmt(s.effectiveFrom)}), but none on file covers this bill's period (${fmt(periodStart)} → ${fmt(periodEnd)}). SA tariffs run Apr–Mar, so upload the ${s.provider} schedule for that tariff year to enable rate checks on this bill.`;
+    }
+    return { available: false, scheduleName: null, provider: null, note, lines: [] };
   }
   if (!schedule.extractedText) {
     return {
