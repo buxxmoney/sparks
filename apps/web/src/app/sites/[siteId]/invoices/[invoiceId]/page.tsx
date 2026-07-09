@@ -169,7 +169,11 @@ export default function InvoiceDetailPage() {
     }
   };
 
-  if (invoiceLoading) {
+  // Only show the full-page skeleton on the FIRST load. During background polling
+  // (every 2s while parsing) `invoiceLoading` briefly flips true on each refetch —
+  // if we returned the skeleton then, the page would flicker skeleton ↔ content.
+  // Once we have the invoice, keep rendering it (the "Reading…" card handles parsing).
+  if (invoiceLoading && !invoice) {
     return (
       <Stack gap={5}>
         <Skeleton height={32} width={220} />

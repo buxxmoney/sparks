@@ -2117,6 +2117,37 @@ export async function invoicesSetPeriod(ctx: AuthContext, input: unknown) {
     })
     .where(eq(landlordInvoices.id, parsed.invoiceId));
 
+  // Reflect the period the customer entered on the site's Billing cycle setting —
+  // to them these are the same thing, so Settings → Billing cycle should match. We
+  // infer a day-of-month cycle anchored on the period's start day. Only rewrite when
+  // it actually differs, so re-saving the same dates doesn't churn policy versions.
+  const anchorDay = start.getUTCDate();
+  const currentPolicy = await db.query.billingCyclePolicies.findFirst({
+    where: and(
+      eq(billingCyclePolicies.siteId, invoice.siteId),
+      isNull(billingCyclePolicies.effectiveTo),
+    ),
+  });
+  if (
+    !currentPolicy ||
+    currentPolicy.recurrence !== "day_of_month" ||
+    currentPolicy.anchorDay !== anchorDay
+  ) {
+    if (currentPolicy) {
+      await db
+        .update(billingCyclePolicies)
+        .set({ effectiveTo: new Date() })
+        .where(eq(billingCyclePolicies.id, currentPolicy.id));
+    }
+    await db.insert(billingCyclePolicies).values({
+      id: randomUUID(),
+      siteId: invoice.siteId,
+      recurrence: "day_of_month",
+      anchorDay,
+      version: (currentPolicy?.version ?? 0) + 1,
+    });
+  }
+
   return {
     invoiceId: parsed.invoiceId,
     billingPeriodStart: period.periodStart,
