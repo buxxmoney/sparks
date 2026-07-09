@@ -11,7 +11,9 @@ import {
   user,
 } from "@sparks/db";
 import { auth } from "./auth";
+import { sendEmail } from "./email";
 import { extractPdfText } from "./invoices";
+import { llamaParseConfigured, parseScheduleToMarkdown } from "./llamaparse";
 import { requirePlatformOperator, type AuthContext } from "./middleware";
 import { dispatchBillOutcome } from "./notifications";
 import { putObject } from "./storage";
@@ -248,8 +250,8 @@ export async function adminTariffSchedulesCreate(ctx: AuthContext, input: unknow
   const fileStorageKey = `tariff-schedules/${scheduleId}.pdf`;
   await putObject(fileStorageKey, pdf, "application/pdf");
 
-  const extractedText = await extractPdfText(pdf);
-
+  // Extraction (LlamaParse for the rate tables) can take minutes, so create the row
+  // immediately in "pending" and extract in the background — the admin list polls.
   const [row] = await db
     .insert(tariffSchedules)
     .values({
@@ -259,18 +261,115 @@ export async function adminTariffSchedulesCreate(ctx: AuthContext, input: unknow
       effectiveFrom: parsed.effectiveFrom,
       effectiveTo: parsed.effectiveTo ?? null,
       fileStorageKey,
-      extractedText,
+      extractionStatus: "pending",
       uploadedByUserId: ctx.userId,
     })
     .returning();
+
+  void runScheduleExtraction(scheduleId, pdf, parsed.filename).catch((err) =>
+    console.error(`[schedule] background extraction crashed for ${scheduleId}:`, err),
+  );
 
   return {
     scheduleId: row.id,
     name: row.name,
     provider: row.provider,
-    textChars: extractedText?.length ?? 0,
-    textExtracted: Boolean(extractedText),
+    status: "pending" as const,
+    engine: llamaParseConfigured() ? "llamaparse" : "pdftotext",
   };
+}
+
+// Background: extract a schedule's text. Prefer LlamaParse (reads image-based rate
+// tables); fall back to pdftotext (descriptions only) when LlamaParse is unconfigured
+// or fails. Records extraction_status = ready/failed.
+async function runScheduleExtraction(
+  scheduleId: string,
+  pdf: Buffer,
+  filename: string,
+): Promise<void> {
+  const db = getDb();
+  let text: string | null = null;
+  let engine: "llamaparse" | "pdftotext" | null = null;
+  let llamaError: string | null = null;
+
+  // Prefer LlamaParse for the rate tables. If it's configured but fails, keep the
+  // reason (llamaError) so we can flag that the good extractor is broken — even when
+  // the pdftotext fallback still yields (rate-table-less) text.
+  if (llamaParseConfigured()) {
+    const { markdown, error } = await parseScheduleToMarkdown(pdf, filename);
+    if (markdown) {
+      text = markdown;
+      engine = "llamaparse";
+      // Partial success (some chunks failed) still yields usable text but is worth
+      // flagging — keep the error so operators are told.
+      if (error) llamaError = error;
+    } else {
+      llamaError = error;
+    }
+  }
+  if (!text) {
+    try {
+      text = await extractPdfText(pdf);
+      if (text) engine = "pdftotext";
+    } catch (err) {
+      console.error(`[schedule] pdftotext fallback failed for ${scheduleId}:`, err);
+    }
+  }
+
+  await db
+    .update(tariffSchedules)
+    .set({
+      extractedText: text,
+      extractionStatus: text ? "ready" : "failed",
+      extractionEngine: engine,
+      extractionError: llamaError,
+    })
+    .where(eq(tariffSchedules.id, scheduleId));
+  console.log(
+    `[schedule] ${scheduleId} extraction ${text ? `ready via ${engine} (${text.length} chars)` : "failed"}` +
+      (llamaError ? ` — LlamaParse error: ${llamaError}` : ""),
+  );
+
+  // If LlamaParse was expected but failed, make it KNOWN to operators (not just
+  // logged) — otherwise schedules silently lose their rate tables.
+  if (llamaError) {
+    await notifyOperatorsLlamaParseFailed(scheduleId, llamaError, Boolean(text)).catch(() => {});
+  }
+}
+
+/** Email the Sparks operator inbox that LlamaParse extraction is broken. */
+async function notifyOperatorsLlamaParseFailed(
+  scheduleId: string,
+  error: string,
+  fellBackToPdftotext: boolean,
+): Promise<void> {
+  const to = (process.env.SPARKS_REVIEW_EMAIL ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (to.length === 0) {
+    console.warn("[schedule] SPARKS_REVIEW_EMAIL not set — cannot alert on LlamaParse failure.");
+    return;
+  }
+  const db = getDb();
+  const sched = await db.query.tariffSchedules.findFirst({
+    where: eq(tariffSchedules.id, scheduleId),
+  });
+  await sendEmail({
+    to,
+    subject: "⚠️ LlamaParse extraction failed for a tariff schedule",
+    html: `<div style="font-family:system-ui,sans-serif;max-width:560px;color:#111827">
+      <h2 style="margin:0 0 8px">LlamaParse extraction failed</h2>
+      <p>Schedule <strong>${sched?.name ?? scheduleId}</strong> (${sched?.provider ?? "?"}) could not be parsed by LlamaParse.</p>
+      <p style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;font-family:monospace;font-size:12px">${error}</p>
+      <p>${
+        fellBackToPdftotext
+          ? "It fell back to pdftotext, so the schedule is usable but its <strong>rate tables are likely missing</strong> — exact-rate checks won't work until this is fixed and the schedule is re-uploaded."
+          : "No fallback text was produced — this schedule has no usable text."
+      }</p>
+      <p style="color:#6b7280;font-size:12px">Check the LLAMA_CLOUD_API_KEY, LlamaCloud quota/status, then re-upload the schedule.</p>
+    </div>`,
+  }).catch((e) => console.error("[schedule] failed to email LlamaParse-failure alert:", e));
 }
 
 /** Operator-only: list uploaded reference schedules (metadata + text size). */
@@ -285,6 +384,9 @@ export async function adminTariffSchedulesList(ctx: AuthContext) {
       effectiveFrom: tariffSchedules.effectiveFrom,
       effectiveTo: tariffSchedules.effectiveTo,
       createdAt: tariffSchedules.createdAt,
+      extractionStatus: tariffSchedules.extractionStatus,
+      extractionEngine: tariffSchedules.extractionEngine,
+      extractionError: tariffSchedules.extractionError,
       textLength: sql<number>`coalesce(length(${tariffSchedules.extractedText}), 0)::int`,
     })
     .from(tariffSchedules)

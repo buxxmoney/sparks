@@ -586,8 +586,17 @@ export const tariffSchedules = pgTable(
     effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
     effectiveTo: timestamp("effective_to", { withTimezone: true }),
     fileStorageKey: text("file_storage_key").notNull(),
-    // pdftotext output; null if extraction produced nothing usable (scanned doc).
+    // LlamaParse markdown (tables preserved) or pdftotext fallback; null until the
+    // background extraction finishes.
     extractedText: text("extracted_text"),
+    // "pending" while extracting, "ready" once text is stored, "failed" otherwise.
+    extractionStatus: text("extraction_status").notNull().default("pending"),
+    // Which engine actually produced the stored text: "llamaparse" | "pdftotext".
+    extractionEngine: text("extraction_engine"),
+    // Set when LlamaParse was configured but failed (even if pdftotext fallback
+    // succeeded) — so operators can see the good extractor is broken, not silently
+    // degrade to rate-table-less text.
+    extractionError: text("extraction_error"),
     uploadedByUserId: text("uploaded_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

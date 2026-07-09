@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Building2,
   UserPlus,
@@ -98,6 +98,13 @@ export default function AdminPage() {
     [],
   );
   const schedules = schedData?.schedules ?? [];
+  // Poll while any schedule is still extracting so its status flips to ready live.
+  const anyExtracting = schedules.some((s) => s.extractionStatus === "pending");
+  useEffect(() => {
+    if (!anyExtracting) return;
+    const id = setInterval(() => refetchSched(), 3000);
+    return () => clearInterval(id);
+  }, [anyExtracting, refetchSched]);
   const [schName, setSchName] = useState("");
   const [schProvider, setSchProvider] = useState("");
   const [schFrom, setSchFrom] = useState("");
@@ -135,11 +142,7 @@ export default function AdminPage() {
       });
       setSchMsg({
         kind: "success",
-        text: `Uploaded "${res.name}" — ${
-          res.textExtracted
-            ? `${res.textChars.toLocaleString()} characters extracted`
-            : "no text layer found (scanned PDF?)"
-        }.`,
+        text: `Uploaded "${res.name}" — extracting rates with ${res.engine}. It'll show as ready below in a minute or two.`,
       });
       setSchName("");
       setSchProvider("");
@@ -522,6 +525,13 @@ export default function AdminPage() {
             tariff against the matching schedule and includes the rate check in the review email.
           </Text>
           {schMsg ? <Banner status={schMsg.kind} title={schMsg.text} /> : null}
+          {schedules.some((s) => s.extractionError) ? (
+            <Banner
+              status="warning"
+              title="LlamaParse is failing"
+              description="One or more schedules fell back to pdftotext, so their rate tables are likely missing and exact-rate checks won't work. Check LLAMA_CLOUD_API_KEY and your LlamaCloud quota/status, then re-upload. (We also email this to the Sparks inbox.)"
+            />
+          ) : null}
           <Stack direction="horizontal" gap={3} align="end" wrap="wrap">
             <TextInput label="Schedule name" value={schName} onChange={setSchName} width={220} />
             <TextInput
@@ -584,12 +594,25 @@ export default function AdminPage() {
                 },
                 {
                   key: "text",
-                  header: "Rates text",
+                  header: "Rates",
                   renderCell: (s) =>
-                    s.textLength > 0 ? (
-                      <Text type="supporting">{s.textLength.toLocaleString()} chars</Text>
+                    s.extractionStatus === "pending" ? (
+                      <Badge variant="neutral" label="extracting…" />
+                    ) : s.extractionStatus === "failed" ? (
+                      <Badge variant="error" label="failed" />
+                    ) : s.extractionError ? (
+                      // Ready, but LlamaParse broke → we're on rate-table-less fallback.
+                      <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+                        <Badge variant="warning" label="LlamaParse failed — pdftotext" />
+                        <Text type="supporting">
+                          {s.textLength.toLocaleString()} chars · rates likely missing
+                        </Text>
+                      </span>
                     ) : (
-                      <Badge variant="warning" label="no text" />
+                      <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+                        <Badge variant="success" label={s.extractionEngine ?? "ready"} />
+                        <Text type="supporting">{s.textLength.toLocaleString()} chars</Text>
+                      </span>
                     ),
                 },
                 {
