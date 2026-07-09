@@ -10,16 +10,19 @@ import { Heading } from "@astryxdesign/core/Heading";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
-import { Bell, CheckCircle2, Download, FileText, Scale } from "lucide-react";
+import { Bell, CheckCircle2, ChevronRight, Download, FileText, Scale } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 type AlertPayload = {
   reconId?: string;
+  invoiceId?: string;
   verified?: boolean;
   attachmentName?: string | null;
 } | null;
 
 export default function AlertsPage() {
+  const router = useRouter();
   const { data, loading, refetch } = useRPC(() => client.alerts.list(), []);
   const [busy, setBusy] = useState(false);
   const alerts = data?.alerts ?? [];
@@ -80,30 +83,66 @@ export default function AlertsPage() {
             const payload = a.payload as AlertPayload;
             const unread = !a.readAt;
             const verified = payload?.verified === true;
+            // Where this alert takes you: the invoice (parse-ready) or the
+            // reconciliation (review outcome), on the alert's site.
+            const targetHref = a.siteId
+              ? payload?.invoiceId
+                ? `/sites/${a.siteId}/invoices/${payload.invoiceId}`
+                : payload?.reconId
+                  ? `/sites/${a.siteId}/reconciliation/${payload.reconId}`
+                  : null
+              : null;
+            const openAlert = async () => {
+              if (!targetHref) return;
+              if (unread) await client.alerts.acknowledge({ deliveryId: a.deliveryId }).catch(() => {});
+              router.push(targetHref);
+            };
             return (
               <Card key={a.deliveryId} padding={5}>
                 <Stack gap={3}>
-                  <Stack direction="horizontal" justify="between" align="start" gap={3} wrap="wrap">
-                    <Stack direction="horizontal" gap={2} align="center">
-                      <span
-                        style={{
-                          display: "inline-flex",
-                          color: verified ? "hsl(142 71% 35%)" : "hsl(38 92% 40%)",
-                        }}
-                      >
-                        {verified ? <CheckCircle2 size={18} /> : <FileText size={18} />}
-                      </span>
-                      <Text weight="semibold">{a.title}</Text>
-                      {unread ? <Badge variant="warning" label="New" /> : null}
-                    </Stack>
-                    <Text type="supporting">{new Date(a.createdAt).toLocaleString()}</Text>
-                  </Stack>
+                  {/* Clickable header + message → opens the invoice/reconciliation. */}
+                  <div
+                    onClick={targetHref ? openAlert : undefined}
+                    onKeyDown={
+                      targetHref
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") openAlert();
+                          }
+                        : undefined
+                    }
+                    role={targetHref ? "button" : undefined}
+                    tabIndex={targetHref ? 0 : undefined}
+                    style={{ cursor: targetHref ? "pointer" : "default" }}
+                  >
+                    <Stack gap={3}>
+                      <Stack direction="horizontal" justify="between" align="start" gap={3} wrap="wrap">
+                        <Stack direction="horizontal" gap={2} align="center">
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              color: verified ? "hsl(142 71% 35%)" : "hsl(38 92% 40%)",
+                            }}
+                          >
+                            {verified ? <CheckCircle2 size={18} /> : <FileText size={18} />}
+                          </span>
+                          <Text weight="semibold">{a.title}</Text>
+                          {unread ? <Badge variant="warning" label="New" /> : null}
+                        </Stack>
+                        <Stack direction="horizontal" gap={2} align="center">
+                          <Text type="supporting">{new Date(a.createdAt).toLocaleString()}</Text>
+                          {targetHref ? (
+                            <ChevronRight size={18} style={{ opacity: 0.4, flexShrink: 0 }} />
+                          ) : null}
+                        </Stack>
+                      </Stack>
 
-                  {a.message ? (
-                    <div style={{ whiteSpace: "pre-wrap", fontSize: 14, lineHeight: 1.6 }}>
-                      {a.message}
-                    </div>
-                  ) : null}
+                      {a.message ? (
+                        <div style={{ whiteSpace: "pre-wrap", fontSize: 14, lineHeight: 1.6 }}>
+                          {a.message}
+                        </div>
+                      ) : null}
+                    </Stack>
+                  </div>
 
                   <Stack direction="horizontal" gap={2} wrap="wrap">
                     {payload?.reconId && a.siteId ? (
