@@ -46,6 +46,7 @@ import {
   generateReconciliation,
   priceSegments,
 } from "./reconciliation";
+import { dispatchInvoiceParsed } from "./notifications";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
 import {
@@ -73,6 +74,7 @@ import {
   invoicesLockInput,
   invoicesReopenInput,
   invoicesRequestReviewInput,
+  invoicesRetryParseInput,
   invoicesSetPeriodInput,
   invoicesUpdateLineItemInput,
   invoicesUploadAndParseInput,
@@ -1886,14 +1888,15 @@ async function findOrCreateInvoicePeriod(
   return created;
 }
 
+// Upload an invoice and start parsing ASYNCHRONOUSLY. Parsing calls out to Claude
+// (and poppler) and can take seconds-to-minutes on scanned bills, which is too long
+// to hold an HTTP request open (the client would spin and the edge could time out).
+// So we store the PDF, create the invoice row in a "parsing" state, kick the parse
+// off in the background, and return immediately. The client polls invoices.get and
+// a completion alert lands in the inbox when it finishes. See runInvoiceParse.
 export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
   const parsed = invoicesUploadAndParseInput.parse(input);
   await requireSiteEditor(ctx, parsed.siteId);
-
-  // Correlate every log line for this upload so a 500 is traceable end-to-end.
-  const traceId = randomUUID().slice(0, 8);
-  const log = (msg: string) => console.log(`[upload ${traceId}] ${msg}`);
-  log(`start site=${parsed.siteId} user=${ctx.userId}`);
 
   const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
   if (!site) {
@@ -1904,50 +1907,21 @@ export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
   if (pdfBuffer.length === 0) {
     throw new Error("Uploaded file is empty");
   }
-  log(`decoded pdf: ${pdfBuffer.length} bytes`);
 
-  // Parse FIRST so the billing period comes from the invoice itself (not a picker).
-  // This calls out to Claude (and optionally poppler) — the most failure-prone step.
-  let parsedInvoice: Awaited<ReturnType<typeof parseInvoiceWithClaude>>;
-  try {
-    parsedInvoice = await parseInvoiceWithClaude(pdfBuffer);
-  } catch (err) {
-    log(`parse FAILED: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
-    throw err;
-  }
-  log(
-    `parsed: ${parsedInvoice.lineItems.length} line items, model=${parsedInvoice.parseModel}, ` +
-      `period=${parsedInvoice.periodStart ?? "?"}→${parsedInvoice.periodEnd ?? "?"}`,
-  );
-
-  const { start, end } = invoicePeriodBounds(parsedInvoice.periodStart, parsedInvoice.periodEnd);
-  const period = await findOrCreateInvoicePeriod(
-    parsed.siteId,
-    start,
-    end,
-    site.demandIntervalMinutes ?? 30,
-  );
-  log(`billing period ${period.id} (${start.toISOString()}→${end.toISOString()})`);
-
+  // Store the PDF up front (fast) so the row references it and the background job
+  // (and any retry) can re-read it. The real billing period isn't known until the
+  // parse runs, so create the row with placeholder period dates it will overwrite.
   const fileHash = createHash("sha256").update(pdfBuffer).digest("hex");
-  const fileStorageKey = `invoices/${parsed.siteId}/${period.id}/${randomUUID()}.pdf`;
-  try {
-    await putObject(fileStorageKey, pdfBuffer, "application/pdf");
-  } catch (err) {
-    log(
-      `storage putObject FAILED for ${fileStorageKey}: ${err instanceof Error ? err.message : err}`,
-    );
-    throw err;
-  }
-  log(`stored pdf at ${fileStorageKey}`);
+  const fileStorageKey = `invoices/${parsed.siteId}/pending/${randomUUID()}.pdf`;
+  await putObject(fileStorageKey, pdfBuffer, "application/pdf");
 
+  const placeholder = new Date();
   const [invoice] = await db
     .insert(landlordInvoices)
     .values({
       siteId: parsed.siteId,
-      billingPeriodId: period.id,
-      billingPeriodStart: period.periodStart,
-      billingPeriodEnd: period.periodEnd,
+      billingPeriodStart: placeholder,
+      billingPeriodEnd: placeholder,
       fileStorageKey,
       fileHash,
       status: "uploaded",
@@ -1955,16 +1929,116 @@ export async function invoicesUploadAndParse(ctx: AuthContext, input: unknown) {
     })
     .returning();
 
-  await persistParsedInvoice(invoice.id, parsedInvoice);
-  log(`done: invoice ${invoice.id} persisted`);
+  // Fire-and-forget: the Railway server is a persistent process, so the parse keeps
+  // running after we respond. Errors are recorded on the row (parseError) by
+  // runInvoiceParse itself; the .catch here is just a last-resort log.
+  void runInvoiceParse(invoice.id).catch((err) =>
+    console.error(`[upload] background parse crashed for invoice ${invoice.id}:`, err),
+  );
 
-  return {
-    invoiceId: invoice.id,
-    status: "parsed_pending_confirm" as const,
-    lineItemCount: parsedInvoice.lineItems.length,
-    parseModel: parsedInvoice.parseModel,
-    periodDetected: Boolean(parsedInvoice.periodStart && parsedInvoice.periodEnd),
-  };
+  return { invoiceId: invoice.id, status: "parsing" as const };
+}
+
+// Background worker: read the stored PDF, parse it with Claude, detect the billing
+// period, persist the line items, and notify the customer. Records a failure reason
+// on the invoice (parseError) and reverts it to "uploaded" (retryable) on any error.
+// Safe to call fire-and-forget; it owns its own error handling.
+async function runInvoiceParse(invoiceId: string): Promise<void> {
+  const traceId = randomUUID().slice(0, 8);
+  const log = (msg: string) => console.log(`[parse ${traceId}] invoice=${invoiceId} ${msg}`);
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, invoiceId),
+  });
+  if (!invoice) {
+    log("not found — skipping");
+    return;
+  }
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, invoice.siteId) });
+
+  await db
+    .update(landlordInvoices)
+    .set({ status: "parsing", parseError: null })
+    .where(eq(landlordInvoices.id, invoiceId));
+
+  try {
+    log("reading stored pdf");
+    const pdfBuffer = await getObject(invoice.fileStorageKey);
+    const parsedInvoice = await parseInvoiceWithClaude(pdfBuffer);
+    log(`parsed ${parsedInvoice.lineItems.length} line items, model=${parsedInvoice.parseModel}`);
+
+    const { start, end } = invoicePeriodBounds(parsedInvoice.periodStart, parsedInvoice.periodEnd);
+    const period = await findOrCreateInvoicePeriod(
+      invoice.siteId,
+      start,
+      end,
+      site?.demandIntervalMinutes ?? 30,
+    );
+    await db
+      .update(landlordInvoices)
+      .set({
+        billingPeriodId: period.id,
+        billingPeriodStart: period.periodStart,
+        billingPeriodEnd: period.periodEnd,
+      })
+      .where(eq(landlordInvoices.id, invoiceId));
+
+    // persistParsedInvoice flips status to "parsed_pending_confirm" and inserts lines.
+    await persistParsedInvoice(invoiceId, parsedInvoice);
+    log("done — pending confirm");
+
+    await dispatchInvoiceParsed({
+      invoiceId,
+      siteId: invoice.siteId,
+      organizationId: site?.organizationId ?? "",
+      siteName: site?.name ?? "your site",
+      ok: true,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`FAILED: ${message}`);
+    await db
+      .update(landlordInvoices)
+      .set({ status: "uploaded", parseError: message })
+      .where(eq(landlordInvoices.id, invoiceId));
+
+    await dispatchInvoiceParsed({
+      invoiceId,
+      siteId: invoice.siteId,
+      organizationId: site?.organizationId ?? "",
+      siteName: site?.name ?? "your site",
+      ok: false,
+      errorMessage: message,
+    });
+  }
+}
+
+// Re-run parsing after a failure (or if it got stuck). Clears the error and kicks
+// the background job off again against the already-stored PDF.
+export async function invoicesRetryParse(ctx: AuthContext, input: unknown) {
+  const parsed = invoicesRetryParseInput.parse(input);
+
+  const invoice = await db.query.landlordInvoices.findFirst({
+    where: eq(landlordInvoices.id, parsed.invoiceId),
+  });
+  if (!invoice) {
+    throw new PreconditionError("Invoice not found");
+  }
+  await requireSiteEditor(ctx, invoice.siteId);
+  if (invoice.status !== "uploaded" && invoice.status !== "parsing") {
+    throw new ForbiddenError("This invoice has already been parsed.");
+  }
+
+  await db
+    .update(landlordInvoices)
+    .set({ status: "uploaded", parseError: null })
+    .where(eq(landlordInvoices.id, parsed.invoiceId));
+
+  void runInvoiceParse(parsed.invoiceId).catch((err) =>
+    console.error(`[retry] background parse crashed for invoice ${parsed.invoiceId}:`, err),
+  );
+
+  return { invoiceId: parsed.invoiceId, status: "parsing" as const };
 }
 
 // Correct the billing period on an invoice (dates come from the invoice; the user

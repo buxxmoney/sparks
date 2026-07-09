@@ -114,13 +114,13 @@ export default function InvoicesPage() {
                 onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               />
               <Text type="supporting">
-                The billing period and line items are read from the invoice — you review and confirm
-                them (and can fix the period) on the next screen.
+                We'll read the billing period and line items from the invoice on the next screen —
+                it takes a few seconds, and you can review and confirm them there.
               </Text>
             </Stack>
             <div style={{ display: "grid" }}>
               <Button
-                label={uploadLoading ? "Uploading & parsing…" : "Upload & parse"}
+                label={uploadLoading ? "Uploading…" : "Upload invoice"}
                 variant="primary"
                 isLoading={uploadLoading}
                 onClick={handleUpload}

@@ -104,6 +104,7 @@ export const appRouter = {
   invoices: {
     createUpload: proc(V.invoicesCreateUploadInput, R.invoicesCreateUpload),
     uploadAndParse: proc(V.invoicesUploadAndParseInput, R.invoicesUploadAndParse),
+    retryParse: proc(V.invoicesRetryParseInput, R.invoicesRetryParse),
     setPeriod: proc(V.invoicesSetPeriodInput, R.invoicesSetPeriod),
     get: proc(V.invoicesGetInput, R.invoicesGet),
     list: proc(V.invoicesListInput, R.invoicesList),

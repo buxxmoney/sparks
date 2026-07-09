@@ -429,6 +429,10 @@ export const invoicesReopenInput = z.object({
   invoiceId: z.string().uuid(),
 });
 
+export const invoicesRetryParseInput = z.object({
+  invoiceId: z.string().uuid(),
+});
+
 // Operator review outcome: the operator's written description document, delivered
 // to the customer's inbox + email (+ SMS nudge). status verifies (unlocks the
 // sealed PDF) or flags. Optional PDF attachment (base64) — the "description doc".

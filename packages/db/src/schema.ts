@@ -199,6 +199,7 @@ export const alertType = pgEnum("alert_type", [
   "power_restored",
   "demand_spike",
   "invoice_ready",
+  "invoice_parsed",
 ]);
 export const alertSeverity = pgEnum("alert_severity", ["info", "warning", "critical"]);
 export const alertStatus = pgEnum("alert_status", ["open", "acknowledged", "resolved"]);
@@ -587,6 +588,9 @@ export const landlordInvoices = pgTable(
     status: invoiceStatus("status").notNull().default("uploaded"),
     parseModel: text("parse_model"),
     parsedRaw: jsonb("parsed_raw"),
+    // Set when async parsing fails, so the review screen can show why and offer a
+    // retry. Null while parsing/queued and once parsing has succeeded.
+    parseError: text("parse_error"),
     confirmedActiveCents: integer("confirmed_active_cents"),
     confirmedDemandCents: integer("confirmed_demand_cents"),
     confirmedReactiveCents: integer("confirmed_reactive_cents"),
