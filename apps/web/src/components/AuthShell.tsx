@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { Logo } from "./Logo";
+import Image from "next/image";
+import sparksLogo from "@/assets/sparks-logo.png";
 import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Text } from "@astryxdesign/core/Text";
@@ -37,21 +38,12 @@ export function AuthShell({
             gap: 8,
           }}
         >
-          <span
-            style={{
-              display: "inline-flex",
-              width: 56,
-              height: 56,
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: 14,
-              background: "hsl(222 47% 11%)",
-              color: "hsl(217 91% 60%)",
-              marginBottom: 4,
-            }}
-          >
-            <Logo size={32} />
-          </span>
+          <Image
+            src={sparksLogo}
+            alt="Sparks — Energy Reconciliation"
+            priority
+            style={{ height: 56, width: "auto", maxWidth: "100%", marginBottom: 4 }}
+          />
           <Heading level={1}>{title}</Heading>
           {subtitle ? <Text type="supporting">{subtitle}</Text> : null}
         </div>

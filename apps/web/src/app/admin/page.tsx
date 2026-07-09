@@ -15,6 +15,9 @@ import {
   Search,
   ChevronDown,
   ChevronRight,
+  Cpu,
+  Plus,
+  Copy,
 } from "lucide-react";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Grid } from "@astryxdesign/core/Grid";
@@ -113,6 +116,25 @@ export default function AdminPage() {
   );
   const orgSites = orgSitesData?.sites ?? [];
 
+  // Hardware provisioning for a chosen site (device → meter → mint the JWT offline).
+  const [manageSite, setManageSite] = useState<{ id: string; name: string } | null>(null);
+  const {
+    data: hardwareData,
+    loading: hardwareLoading,
+    refetch: refetchHardware,
+  } = useRPC(
+    manageSite ? () => client.admin.listSiteHardware({ siteId: manageSite.id }) : null,
+    [manageSite?.id],
+  );
+  const hardwareDevices = hardwareData?.devices ?? [];
+  const [devSerial, setDevSerial] = useState("");
+  const [devModel, setDevModel] = useState("rpi");
+  const [addMeterFor, setAddMeterFor] = useState<string | null>(null);
+  const [meterSerial, setMeterSerial] = useState("");
+  const [hwBusy, setHwBusy] = useState(false);
+  const [hwMsg, setHwMsg] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const [copiedMeter, setCopiedMeter] = useState<string | null>(null);
+
   const [reviewBusy, setReviewBusy] = useState(false);
   const [queueMsg, setQueueMsg] = useState<{ kind: "success" | "error"; text: string } | null>(
     null,
@@ -121,7 +143,8 @@ export default function AdminPage() {
   const [respondTo, setRespondTo] = useState<{ reconId: string; siteName: string } | null>(null);
   const [outSubject, setOutSubject] = useState("");
   const [outBody, setOutBody] = useState("");
-  const [outFile, setOutFile] = useState<{ name: string; base64: string } | null>(null);
+  // Zero or more PDF documents to attach to the outcome.
+  const [outFiles, setOutFiles] = useState<{ name: string; base64: string }[]>([]);
 
   // The site the operator is assigning a landlord tariff to (null = closed). Carries the
   // bill's billing period so the pending reconciliation can be recomputed on assign.
@@ -152,22 +175,23 @@ export default function AdminPage() {
     setRespondTo({ reconId, siteName });
     setOutSubject("Your bill review is complete");
     setOutBody("");
-    setOutFile(null);
+    setOutFiles([]);
     setQueueMsg(null);
   };
 
-  const pickFile = (file: File | undefined) => {
-    if (!file) {
-      setOutFile(null);
-      return;
+  const pickFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    for (const file of Array.from(files)) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = String(reader.result).split(",")[1] ?? "";
+        setOutFiles((cur) => [...cur, { name: file.name, base64 }]);
+      };
+      reader.readAsDataURL(file);
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result);
-      setOutFile({ name: file.name, base64: result.split(",")[1] ?? "" });
-    };
-    reader.readAsDataURL(file);
   };
+
+  const removeOutFile = (idx: number) => setOutFiles((cur) => cur.filter((_, i) => i !== idx));
 
   // Reference tariff schedules (Eskom / municipal published prices).
   const { data: schedData, refetch: refetchSched } = useRPC(
@@ -257,8 +281,7 @@ export default function AdminPage() {
         status,
         subject: outSubject,
         body: outBody,
-        attachmentBase64: outFile?.base64,
-        attachmentName: outFile?.name,
+        attachments: outFiles.length > 0 ? outFiles : undefined,
       });
       setQueueMsg({
         kind: "success",
@@ -515,6 +538,102 @@ export default function AdminPage() {
     } finally {
       setOrgActionBusy(false);
     }
+  };
+
+  const openHardware = (id: string, name: string) => {
+    setManageSite((cur) => (cur?.id === id ? null : { id, name }));
+    setDevSerial("");
+    setDevModel("rpi");
+    setAddMeterFor(null);
+    setMeterSerial("");
+    setHwMsg(null);
+  };
+
+  const provisionDevice = async () => {
+    if (!manageSite || !devSerial.trim()) {
+      setHwMsg({ kind: "error", text: "Enter a device serial number." });
+      return;
+    }
+    setHwBusy(true);
+    setHwMsg(null);
+    try {
+      await client.admin.provisionDevice({
+        siteId: manageSite.id,
+        serialNumber: devSerial.trim(),
+        hardwareModel: devModel.trim() || "rpi",
+      });
+      setHwMsg({ kind: "success", text: `Device "${devSerial.trim()}" added. Now add a meter to it.` });
+      setDevSerial("");
+      refetchHardware();
+    } catch (err) {
+      setHwMsg({ kind: "error", text: err instanceof Error ? err.message : "Failed to add device." });
+    } finally {
+      setHwBusy(false);
+    }
+  };
+
+  const provisionMeter = async (deviceId: string) => {
+    if (!meterSerial.trim()) {
+      setHwMsg({ kind: "error", text: "Enter a meter serial number." });
+      return;
+    }
+    setHwBusy(true);
+    setHwMsg(null);
+    try {
+      const res = await client.admin.provisionMeter({
+        deviceId,
+        serialNumber: meterSerial.trim(),
+      });
+      setHwMsg({
+        kind: "success",
+        text: `Meter added (meterId ${res.meterId}). Mint its JWT offline and flash it onto the Pi.`,
+      });
+      setAddMeterFor(null);
+      setMeterSerial("");
+      refetchHardware();
+    } catch (err) {
+      setHwMsg({ kind: "error", text: err instanceof Error ? err.message : "Failed to add meter." });
+    } finally {
+      setHwBusy(false);
+    }
+  };
+
+  const removeDevice = async (deviceId: string, serial: string) => {
+    if (!window.confirm(`Delete device "${serial}" and all its meters + readings? This can't be undone.`))
+      return;
+    setHwBusy(true);
+    try {
+      await client.admin.deleteDevice({ deviceId });
+      refetchHardware();
+    } catch (err) {
+      setHwMsg({ kind: "error", text: err instanceof Error ? err.message : "Failed to delete device." });
+    } finally {
+      setHwBusy(false);
+    }
+  };
+
+  const removeMeter = async (meterId: string, serial: string) => {
+    if (!window.confirm(`Delete meter "${serial}" and its readings? This can't be undone.`)) return;
+    setHwBusy(true);
+    try {
+      await client.admin.deleteMeter({ meterId });
+      refetchHardware();
+    } catch (err) {
+      setHwMsg({ kind: "error", text: err instanceof Error ? err.message : "Failed to delete meter." });
+    } finally {
+      setHwBusy(false);
+    }
+  };
+
+  const copyMintCommand = (meterId: string) => {
+    const cmd = `bun scripts/mint-device-jwt.ts ${meterId} --key device-signing.private.pem`;
+    navigator.clipboard?.writeText(cmd).then(
+      () => {
+        setCopiedMeter(meterId);
+        setTimeout(() => setCopiedMeter(null), 2000);
+      },
+      () => setHwMsg({ kind: "error", text: "Couldn't copy — command is in the meter row." }),
+    );
   };
 
   return (
@@ -781,13 +900,33 @@ export default function AdminPage() {
                   />
                 </Stack>
                 <Stack gap={1}>
-                  <Text type="supporting">Attach a document (optional, PDF)</Text>
+                  <Text type="supporting">Attach documents (optional, PDF — you can add several)</Text>
                   <input
                     type="file"
                     accept="application/pdf"
+                    multiple
                     disabled={reviewBusy}
-                    onChange={(e) => pickFile(e.target.files?.[0])}
+                    onChange={(e) => {
+                      pickFiles(e.target.files);
+                      e.target.value = ""; // allow re-picking the same file / adding more
+                    }}
                   />
+                  {outFiles.length > 0 ? (
+                    <Stack gap={1}>
+                      {outFiles.map((f, i) => (
+                        <Stack key={`${f.name}-${i}`} direction="horizontal" gap={2} align="center">
+                          <Text type="supporting">{f.name}</Text>
+                          <Button
+                            label="Remove"
+                            variant="ghost"
+                            size="sm"
+                            isDisabled={reviewBusy}
+                            onClick={() => removeOutFile(i)}
+                          />
+                        </Stack>
+                      ))}
+                    </Stack>
+                  ) : null}
                 </Stack>
                 <Stack direction="horizontal" gap={3} wrap="wrap">
                   <Button
@@ -1213,6 +1352,19 @@ export default function AdminPage() {
                               { key: "city", header: "City", renderCell: (s) => <Text type="supporting">{s.city ?? "—"}</Text> },
                               { key: "status", header: "Status", renderCell: (s) => <Badge label={s.status} /> },
                               {
+                                key: "hw",
+                                header: "",
+                                renderCell: (s) => (
+                                  <Button
+                                    label={manageSite?.id === s.id ? "Hide hardware" : "Hardware"}
+                                    variant="secondary"
+                                    size="sm"
+                                    icon={<Cpu size={14} />}
+                                    onClick={() => openHardware(s.id, s.name)}
+                                  />
+                                ),
+                              },
+                              {
                                 key: "del",
                                 header: "",
                                 renderCell: (s) => (
@@ -1232,6 +1384,102 @@ export default function AdminPage() {
                           />
                         )}
                       </Stack>
+
+                      {/* Hardware provisioning for the selected site */}
+                      {manageSite ? (
+                        <Card padding={4}>
+                          <Stack gap={3}>
+                            <Text weight="semibold">Devices &amp; meters — {manageSite.name}</Text>
+                            <Banner
+                              status="info"
+                              title="How onboarding works"
+                              description="Add the device (Pi), then a meter on it. Copy the meter's mint command, run it OFFLINE with your private key to create the JWT, and flash that token onto the Pi. It then streams to /ingest/raw."
+                            />
+                            {hwMsg ? <Banner status={hwMsg.kind} title={hwMsg.text} /> : null}
+
+                            <Stack direction="horizontal" gap={2} align="end" wrap="wrap">
+                              <TextInput label="New device serial" value={devSerial} onChange={setDevSerial} isDisabled={hwBusy} width={200} />
+                              <TextInput label="Model" value={devModel} onChange={setDevModel} isDisabled={hwBusy} width={120} />
+                              <Button label={hwBusy ? "Adding…" : "Add device"} variant="primary" size="sm" icon={<Plus size={14} />} isLoading={hwBusy} onClick={provisionDevice} />
+                            </Stack>
+
+                            {hardwareLoading ? (
+                              <Skeleton height={40} />
+                            ) : hardwareDevices.length === 0 ? (
+                              <Text type="supporting">No devices yet. Add one above.</Text>
+                            ) : (
+                              <Stack gap={3}>
+                                {hardwareDevices.map((d) => (
+                                  <Card key={d.id} padding={4}>
+                                    <Stack gap={2}>
+                                      <Stack direction="horizontal" justify="between" align="center" wrap="wrap" gap={2}>
+                                        <Stack direction="horizontal" gap={2} align="center">
+                                          <span style={{ display: "inline-flex", color: PRIMARY }}><Cpu size={14} /></span>
+                                          <Text weight="medium">{d.serialNumber}</Text>
+                                          <Badge label={d.status} />
+                                          <Text type="supporting">{d.hardwareModel}</Text>
+                                        </Stack>
+                                        <Stack direction="horizontal" gap={2}>
+                                          <Button label="Add meter" variant="secondary" size="sm" icon={<Plus size={14} />} isDisabled={hwBusy} onClick={() => { setAddMeterFor(d.id); setMeterSerial(""); setHwMsg(null); }} />
+                                          <Button label="Remove" variant="ghost" size="sm" icon={<Trash2 size={14} />} isDisabled={hwBusy} onClick={() => removeDevice(d.id, d.serialNumber)} />
+                                        </Stack>
+                                      </Stack>
+
+                                      {addMeterFor === d.id ? (
+                                        <Stack direction="horizontal" gap={2} align="end" wrap="wrap">
+                                          <TextInput label="Meter serial" value={meterSerial} onChange={setMeterSerial} isDisabled={hwBusy} width={200} />
+                                          <Button label={hwBusy ? "Saving…" : "Save meter"} variant="primary" size="sm" isLoading={hwBusy} onClick={() => provisionMeter(d.id)} />
+                                          <Button label="Cancel" variant="ghost" size="sm" isDisabled={hwBusy} onClick={() => setAddMeterFor(null)} />
+                                        </Stack>
+                                      ) : null}
+
+                                      {d.meters.length === 0 ? (
+                                        <Text type="supporting">No meters on this device yet.</Text>
+                                      ) : (
+                                        <Table
+                                          data={d.meters}
+                                          columns={[
+                                            { key: "serial", header: "Meter", renderCell: (m) => <Text>{m.serialNumber}</Text> },
+                                            {
+                                              key: "id",
+                                              header: "meterId (JWT claim)",
+                                              renderCell: (m) => (
+                                                <code style={{ fontSize: 11, color: "hsl(215 16% 40%)" }}>{m.id}</code>
+                                              ),
+                                            },
+                                            {
+                                              key: "mint",
+                                              header: "",
+                                              renderCell: (m) => (
+                                                <Button
+                                                  label={copiedMeter === m.id ? "Copied!" : "Copy mint cmd"}
+                                                  variant="secondary"
+                                                  size="sm"
+                                                  icon={<Copy size={14} />}
+                                                  onClick={() => copyMintCommand(m.id)}
+                                                />
+                                              ),
+                                            },
+                                            {
+                                              key: "del",
+                                              header: "",
+                                              renderCell: (m) => (
+                                                <Button label="Delete" variant="ghost" size="sm" icon={<Trash2 size={14} />} isDisabled={hwBusy} onClick={() => removeMeter(m.id, m.serialNumber)} />
+                                              ),
+                                            },
+                                          ]}
+                                          density="compact"
+                                          dividers="rows"
+                                        />
+                                      )}
+                                    </Stack>
+                                  </Card>
+                                ))}
+                              </Stack>
+                            )}
+                          </Stack>
+                        </Card>
+                      ) : null}
 
                       <Stack gap={2}>
                         <Banner

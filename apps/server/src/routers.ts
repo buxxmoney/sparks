@@ -2937,9 +2937,23 @@ export async function alertsAttachmentUrl(ctx: AuthContext, input: unknown) {
   if (!row) {
     throw new ForbiddenError("Alert not found for this user");
   }
-  const key = (row.payload as { attachmentKey?: string | null } | null)?.attachmentKey;
+  // An alert can carry several attachments. Collect the valid keys (new `attachments`
+  // array + the legacy single `attachmentKey`); the requested key must be one of them so
+  // a caller can't sign an arbitrary object.
+  const payload = row.payload as
+    | { attachments?: { key: string; name: string }[]; attachmentKey?: string | null }
+    | null;
+  const validKeys = [
+    ...(payload?.attachments ?? []).map((a) => a.key),
+    ...(payload?.attachmentKey ? [payload.attachmentKey] : []),
+  ];
+  const key = parsed.attachmentKey
+    ? validKeys.includes(parsed.attachmentKey)
+      ? parsed.attachmentKey
+      : undefined
+    : validKeys[0];
   if (!key || !(await objectExists(key))) {
-    throw new PreconditionError("This alert has no attachment");
+    throw new PreconditionError("This attachment is not available.");
   }
   return { url: await signObjectUrl(key, 3600) };
 }

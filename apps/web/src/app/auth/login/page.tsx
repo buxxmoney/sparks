@@ -7,7 +7,8 @@ import { Heading } from "@astryxdesign/core/Heading";
 import { Link } from "@astryxdesign/core/Link";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { Logo } from "@/components/Logo";
+import Image from "next/image";
+import sparksLogo from "@/assets/sparks-logo.png";
 import { client } from "@/lib/client";
 import { clearSelectedOrganization } from "@/lib/useOrganizationContext";
 import { useState } from "react";
@@ -91,20 +92,12 @@ export default function LoginPage() {
             gap: 8,
           }}
         >
-          <span
-            style={{
-              display: "inline-flex",
-              width: 56,
-              height: 56,
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: 14,
-              background: "hsl(222 47% 11%)",
-              color: "hsl(217 91% 60%)",
-            }}
-          >
-            <Logo size={32} />
-          </span>
+          <Image
+            src={sparksLogo}
+            alt="Sparks — Energy Reconciliation"
+            priority
+            style={{ height: 56, width: "auto", maxWidth: "100%" }}
+          />
           <Heading level={1}>Welcome back</Heading>
           <div style={{ marginTop: 6 }}>
             <Text type="supporting">Sign in to your Sparks account</Text>

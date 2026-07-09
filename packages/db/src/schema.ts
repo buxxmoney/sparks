@@ -499,6 +499,35 @@ export const dataGaps = pgTable(
   }),
 );
 
+/* ─────────────── Raw device telemetry (immutable landing) ─────────────── */
+/**
+ * Every meter payload the device streams to `POST /ingest/raw`, stored VERBATIM as
+ * jsonb. This is the immutable source of truth: identity (`meter_id` from the device's
+ * signed JWT) + `recorded_at` (the device's own timestamp) + the raw `payload`. All
+ * downstream structured tables (readings/demand_intervals/…) are DERIVED from these
+ * rows, so changing what we calculate never requires re-ingesting or altering the
+ * device contract. Unique on (meter_id, recorded_at) makes an offline-buffer replay
+ * idempotent — a device that reconnects and re-sends its backlog can't double-insert.
+ */
+export const rawMeterReadings = pgTable(
+  "raw_meter_readings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    meterId: uuid("meter_id")
+      .notNull()
+      .references(() => meters.id, { onDelete: "cascade" }),
+    // The device's own reading timestamp (payload.timestamp), NOT server clock.
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+    // When the server actually received it (differs from recordedAt after an offline gap).
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    payload: jsonb("payload").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    uq: uniqueIndex("raw_meter_reading_uq").on(t.meterId, t.recordedAt),
+  }),
+);
+
 /* ─────────────── Tariffs ─────────────── */
 export const tariffProfiles = pgTable(
   "tariff_profiles",

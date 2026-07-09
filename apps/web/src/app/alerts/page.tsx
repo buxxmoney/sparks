@@ -18,6 +18,8 @@ type AlertPayload = {
   reconId?: string;
   invoiceId?: string;
   verified?: boolean;
+  // New: several attachments. `attachmentName` is the legacy single-attachment shape.
+  attachments?: { key: string; name: string }[];
   attachmentName?: string | null;
 } | null;
 
@@ -43,8 +45,8 @@ export default function AlertsPage() {
     await refetch();
   };
 
-  const downloadAttachment = async (alertId: string) => {
-    const { url } = await client.alerts.attachmentUrl({ alertId });
+  const downloadAttachment = async (alertId: string, attachmentKey?: string) => {
+    const { url } = await client.alerts.attachmentUrl({ alertId, attachmentKey });
     window.open(url, "_blank");
   };
 
@@ -155,7 +157,17 @@ export default function AlertsPage() {
                         href={`/sites/${a.siteId}/reconciliation/${payload.reconId}`}
                       />
                     ) : null}
-                    {payload?.attachmentName ? (
+                    {/* New multi-attachment shape, then legacy single. */}
+                    {(payload?.attachments ?? []).map((att) => (
+                      <Button
+                        key={att.key}
+                        label={`Download ${att.name}`}
+                        variant="secondary"
+                        icon={<Download size={16} />}
+                        onClick={() => downloadAttachment(a.alertId, att.key)}
+                      />
+                    ))}
+                    {!payload?.attachments && payload?.attachmentName ? (
                       <Button
                         label={`Download ${payload.attachmentName}`}
                         variant="secondary"

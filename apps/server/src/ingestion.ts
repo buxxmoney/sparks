@@ -1,8 +1,17 @@
 import { Hono } from "hono";
-import { db, devices, meters, readings, deviceHealthSamples, sites } from "@sparks/db";
+import {
+  db,
+  devices,
+  meters,
+  rawMeterReadings,
+  readings,
+  deviceHealthSamples,
+  sites,
+} from "@sparks/db";
 import { eq } from "drizzle-orm";
-import { createHash, createHmac, timingSafeEqual, randomBytes } from "node:crypto";
+import { createHash, createHmac, createVerify, timingSafeEqual, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { deriveReadings } from "./derivation";
 import { aggregateDemandIntervals, detectDataGaps } from "./workers";
 
 const ingestReadingsBatchInput = z.object({
@@ -115,8 +124,165 @@ async function authenticateSignedRequest(
   return { ok: true, rawBody, deviceId };
 }
 
+/* ────────────────────────── Device JWT auth (RS256, asymmetric) ──────────────────────────
+ * The NEW raw-ingestion path (`POST /ingest/raw`) authenticates with a JWT the device
+ * carries as `Authorization: Bearer <jwt>`. The tokens are minted OFFLINE with an RSA
+ * private key that never touches the server; the server holds ONLY the PUBLIC key
+ * (`DEVICE_INGEST_JWT_PUBLIC_KEY`, PEM/SPKI) and verifies the signature per request. The
+ * token's `meterId` (or `sub`) claim says which meter the payload came from.
+ * ------------------------------------------------------------------------------------------ */
+
+interface DeviceJwtClaims {
+  meterId?: string;
+  sub?: string;
+  deviceId?: string;
+  exp?: number;
+  nbf?: number;
+  iat?: number;
+  [k: string]: unknown;
+}
+
+function decodeJwtSegment(seg: string): unknown {
+  return JSON.parse(Buffer.from(seg, "base64url").toString("utf8"));
+}
+
+/**
+ * Verify a compact RS256 JWT against a PEM public key. Returns the claims, or null on any
+ * failure. The algorithm is PINNED to RS256 and always verified with an RSA public key, so
+ * a token can't downgrade to HS256/"none" (algorithm-confusion). `exp`/`nbf` are honored
+ * when present. Exported for tests. PURE apart from the clock.
+ */
+export function verifyDeviceJwt(token: string, publicKeyPem: string): DeviceJwtClaims | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, signatureB64] = parts;
+
+  let header: { alg?: string };
+  try {
+    header = decodeJwtSegment(headerB64) as { alg?: string };
+  } catch {
+    return null;
+  }
+  if (header.alg !== "RS256") return null;
+
+  let signature: Buffer;
+  try {
+    signature = Buffer.from(signatureB64, "base64url");
+  } catch {
+    return null;
+  }
+
+  let signatureOk = false;
+  try {
+    const verifier = createVerify("RSA-SHA256");
+    verifier.update(`${headerB64}.${payloadB64}`);
+    verifier.end();
+    signatureOk = verifier.verify(publicKeyPem, signature);
+  } catch {
+    return null; // malformed key or signature bytes
+  }
+  if (!signatureOk) return null;
+
+  let claims: DeviceJwtClaims;
+  try {
+    claims = decodeJwtSegment(payloadB64) as DeviceJwtClaims;
+  } catch {
+    return null;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof claims.exp === "number" && now >= claims.exp) return null;
+  if (typeof claims.nbf === "number" && now < claims.nbf) return null;
+  return claims;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function createIngestionRouter() {
   const router = new Hono();
+
+  // NEW: raw telemetry landing. The device streams its meter payload (the exact JSON it
+  // produces) — a single object OR an array (a flush of its offline buffer). We store each
+  // verbatim as (meter_id, recorded_at, payload); NOTHING is parsed into structured tables
+  // here. Auth is the device JWT (RS256, verified with the public key).
+  router.post("/raw", async (c) => {
+    const publicKey = process.env.DEVICE_INGEST_JWT_PUBLIC_KEY;
+    if (!publicKey) {
+      console.error("[ingest/raw] DEVICE_INGEST_JWT_PUBLIC_KEY is not set — cannot verify devices");
+      return c.json({ error: "Ingestion is not configured" }, 503);
+    }
+
+    const authz = c.req.header("authorization") ?? "";
+    const token = /^bearer\s+/i.test(authz) ? authz.replace(/^bearer\s+/i, "").trim() : "";
+    if (!token) {
+      return c.json({ error: "Missing bearer token" }, 401);
+    }
+
+    const claims = verifyDeviceJwt(token, publicKey);
+    if (!claims) {
+      return c.json({ error: "Invalid or expired token" }, 401);
+    }
+    const meterId = (claims.meterId ?? claims.sub ?? "").toString();
+    if (!UUID_RE.test(meterId)) {
+      return c.json({ error: "Token is missing a valid meterId claim" }, 401);
+    }
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const items = Array.isArray(body) ? body : [body];
+    if (items.length === 0) {
+      return c.json({ accepted: 0 });
+    }
+
+    // The meter must exist (the raw row FKs it). One lookup for the whole batch.
+    const meterList = await db.select({ id: meters.id }).from(meters).where(eq(meters.id, meterId)).limit(1);
+    if (!meterList[0]) {
+      return c.json({ error: "Unknown meter" }, 404);
+    }
+
+    const rows: { meterId: string; recordedAt: Date; payload: unknown }[] = [];
+    for (const item of items) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return c.json({ error: "Each reading must be a JSON object" }, 400);
+      }
+      const ts = (item as { timestamp?: unknown }).timestamp;
+      const recordedAt =
+        typeof ts === "string" || typeof ts === "number" || ts instanceof Date ? new Date(ts) : null;
+      if (!recordedAt || Number.isNaN(recordedAt.getTime())) {
+        return c.json({ error: "Each reading needs a valid `timestamp`" }, 400);
+      }
+      rows.push({ meterId, recordedAt, payload: item });
+    }
+
+    try {
+      // Idempotent on (meter_id, recorded_at): a replayed offline buffer can't double-insert.
+      await db
+        .insert(rawMeterReadings)
+        .values(rows)
+        .onConflictDoNothing({
+          target: [rawMeterReadings.meterId, rawMeterReadings.recordedAt],
+        });
+    } catch (err) {
+      console.error("[ingest/raw] failed to store raw readings:", err);
+      return c.json({ error: "Failed to store readings" }, 500);
+    }
+
+    // Derive structured readings + demand intervals so the graphs/reconciliation update live.
+    // Best-effort: the raw rows are already durably stored (the source of truth), so a
+    // derivation failure must NOT fail the ingest — it can be re-derived from raw later.
+    try {
+      await deriveReadings(meterId, rows);
+    } catch (err) {
+      console.error(`[ingest/raw] derivation failed for meter ${meterId} (raw is stored):`, err);
+    }
+
+    return c.json({ accepted: rows.length });
+  });
 
   router.post("/readings", async (c) => {
     const authResult = await authenticateSignedRequest(c);

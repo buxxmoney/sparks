@@ -1,10 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { desc, eq, isNotNull, sql } from "drizzle-orm";
 import {
   alerts,
+  devices,
   getDb,
   landlordInvoices,
   member,
+  meters,
   organization,
   reconciliations,
   sites,
@@ -21,9 +23,14 @@ import { dispatchBillOutcome } from "./notifications";
 import { putObject } from "./storage";
 import {
   adminCreateCustomerInput,
+  adminDeleteDeviceInput,
+  adminDeleteMeterInput,
   adminDeleteOrganizationInput,
   adminListOrgSitesInput,
   adminListReviewedBillsInput,
+  adminListSiteHardwareInput,
+  adminProvisionDeviceInput,
+  adminProvisionMeterInput,
   adminReviewReconciliationInput,
   tariffSchedulesCreateInput,
   tariffSchedulesDeleteInput,
@@ -210,6 +217,128 @@ export async function adminDeleteOrganization(ctx: AuthContext, input: unknown) 
   });
 
   return { deleted: parsed.organizationId, siteCount: orgSites.length };
+}
+
+/* ─────────────── Hardware provisioning (operator) ─────────────── */
+
+/**
+ * Operator-only: the devices under a site, each with its meters. Powers the admin
+ * provisioning screen so an operator can onboard real hardware in-app (get the meterId
+ * needed to mint the device's ingest JWT) instead of running scripts. See [[raw-ingestion-pipeline]].
+ */
+export async function adminListSiteHardware(ctx: AuthContext, input: unknown) {
+  const parsed = adminListSiteHardwareInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+
+  const deviceRows = await db
+    .select({
+      id: devices.id,
+      serialNumber: devices.serialNumber,
+      hardwareModel: devices.hardwareModel,
+      status: devices.status,
+      lastSeenAt: devices.lastSeenAt,
+      createdAt: devices.createdAt,
+    })
+    .from(devices)
+    .where(eq(devices.siteId, parsed.siteId))
+    .orderBy(desc(devices.createdAt));
+
+  const meterRows = await db
+    .select({
+      id: meters.id,
+      deviceId: meters.deviceId,
+      serialNumber: meters.serialNumber,
+      model: meters.model,
+      createdAt: meters.createdAt,
+    })
+    .from(meters)
+    .where(eq(meters.siteId, parsed.siteId));
+
+  return {
+    devices: deviceRows.map((d) => ({
+      ...d,
+      meters: meterRows.filter((m) => m.deviceId === d.id),
+    })),
+  };
+}
+
+/**
+ * Operator-only: register a new device (Raspberry Pi) under a site. With the JWT ingest
+ * model there is no HMAC key/commission handshake — the device authenticates with its
+ * offline-minted JWT — so we just create the row. `api_key_hash` is NOT NULL in the schema
+ * (legacy HMAC path), so we store a random, meaningless hash: it can never be used to sign
+ * because no one holds its preimage.
+ */
+export async function adminProvisionDevice(ctx: AuthContext, input: unknown) {
+  const parsed = adminProvisionDeviceInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
+  if (!site) {
+    throw new PreconditionError("Site not found");
+  }
+
+  const deviceId = randomUUID();
+  await db.insert(devices).values({
+    id: deviceId,
+    siteId: parsed.siteId,
+    serialNumber: parsed.serialNumber,
+    hardwareModel: parsed.hardwareModel,
+    apiKeyHash: createHash("sha256").update(randomUUID()).digest("hex"),
+    status: "provisioning",
+  });
+
+  return { deviceId };
+}
+
+/**
+ * Operator-only: add a meter under a device. Returns the meterId — the value that goes in
+ * the device JWT's `meterId` claim (mint offline with scripts/mint-device-jwt.ts). The
+ * meter's site is inherited from its device.
+ */
+export async function adminProvisionMeter(ctx: AuthContext, input: unknown) {
+  const parsed = adminProvisionMeterInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+
+  const device = await db.query.devices.findFirst({ where: eq(devices.id, parsed.deviceId) });
+  if (!device || !device.siteId) {
+    throw new PreconditionError("Device not found or not assigned to a site");
+  }
+
+  const meterId = randomUUID();
+  await db.insert(meters).values({
+    id: meterId,
+    deviceId: parsed.deviceId,
+    siteId: device.siteId,
+    serialNumber: parsed.serialNumber,
+    model: parsed.model,
+    ctRatioPrimary: parsed.ctRatioPrimary ?? null,
+    ctRatioSecondary: parsed.ctRatioSecondary ?? null,
+    phaseConfig: parsed.phaseConfig ?? null,
+  });
+
+  return { meterId };
+}
+
+/** Operator-only: remove a device (cascades its meters + all their readings). */
+export async function adminDeleteDevice(ctx: AuthContext, input: unknown) {
+  const parsed = adminDeleteDeviceInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+  await db.delete(devices).where(eq(devices.id, parsed.deviceId));
+  return { deleted: parsed.deviceId };
+}
+
+/** Operator-only: remove a single meter (cascades its readings). */
+export async function adminDeleteMeter(ctx: AuthContext, input: unknown) {
+  const parsed = adminDeleteMeterInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+  await db.delete(meters).where(eq(meters.id, parsed.meterId));
+  return { deleted: parsed.meterId };
 }
 
 // Shared select shape for a reconciliation + its invoice/site/org context. Used by
@@ -451,13 +580,10 @@ export async function adminReviewReconciliation(ctx: AuthContext, input: unknown
 
   // Deliver the outcome to the customer (inbox + email + SMS nudge).
   const site = await db.query.sites.findFirst({ where: eq(sites.id, recon.siteId) });
-  const attachment =
-    parsed.attachmentBase64 && parsed.attachmentName
-      ? {
-          filename: parsed.attachmentName,
-          content: Buffer.from(parsed.attachmentBase64, "base64"),
-        }
-      : null;
+  const attachments = (parsed.attachments ?? []).map((a) => ({
+    filename: a.name,
+    content: Buffer.from(a.base64, "base64"),
+  }));
 
   let delivery: { alertId: string; recipientCount: number } | null = null;
   if (site) {
@@ -469,7 +595,7 @@ export async function adminReviewReconciliation(ctx: AuthContext, input: unknown
       subject: parsed.subject,
       body: parsed.body,
       verified: parsed.status === "reviewed",
-      attachment,
+      attachments,
       webUrl: process.env.WEB_URL || "http://localhost:3000",
     });
   }

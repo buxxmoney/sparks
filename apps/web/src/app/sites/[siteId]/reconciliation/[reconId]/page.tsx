@@ -12,7 +12,7 @@ import { Link } from "@astryxdesign/core/Link";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
-import { ArrowLeft, CheckCircle2, Download } from "lucide-react";
+import { ArrowLeft, Download } from "lucide-react";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 
@@ -43,7 +43,6 @@ export default function ReconciliationDetailPage() {
   const siteId = params.siteId as string;
   const reconId = params.reconId as string;
 
-  const [finalizeLoading, setFinalizeLoading] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -55,19 +54,6 @@ export default function ReconciliationDetailPage() {
   const { data: site } = useRPC(() => client.sites.get({ siteId }), [siteId]);
   // Viewers can see the outcome but not download the sealed PDF (editors+ only).
   const canAct = site ? site.myLevel !== "viewer" : false;
-
-  const handleFinalize = async () => {
-    setFinalizeLoading(true);
-    setError("");
-    try {
-      await client.reconciliation.finalize({ reconId });
-      await refetch();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to finalize reconciliation");
-    } finally {
-      setFinalizeLoading(false);
-    }
-  };
 
   const handleDownloadPDF = async () => {
     setPdfLoading(true);
@@ -125,15 +111,6 @@ export default function ReconciliationDetailPage() {
         </Stack>
         <Stack direction="horizontal" align="center" gap={3} wrap="wrap">
           <Badge variant={reviewBadge.variant} label={reviewBadge.label} />
-          {recon.status === "draft" ? (
-            <Button
-              label={finalizeLoading ? "Finalizing…" : "Finalize"}
-              variant="primary"
-              icon={<CheckCircle2 size={16} />}
-              isLoading={finalizeLoading}
-              onClick={handleFinalize}
-            />
-          ) : null}
           {canAct ? (
             <Button
               label={

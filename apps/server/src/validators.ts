@@ -441,8 +441,11 @@ export const adminReviewReconciliationInput = z.object({
   status: z.enum(["reviewed", "flagged"]),
   subject: z.string().min(1).max(200),
   body: z.string().min(1).max(8000),
-  attachmentBase64: z.string().optional(),
-  attachmentName: z.string().max(200).optional(),
+  // Zero or more PDF documents to attach to the outcome (each base64-encoded).
+  attachments: z
+    .array(z.object({ name: z.string().min(1).max(200), base64: z.string().min(1) }))
+    .max(10)
+    .optional(),
 });
 
 export const alertsAcknowledgeInput = z.object({
@@ -487,6 +490,34 @@ export const adminListOrgSitesInput = z.object({
   organizationId: z.string().min(1),
 });
 
+/* ─────────────── Operator hardware provisioning ─────────────── */
+export const adminListSiteHardwareInput = z.object({
+  siteId: z.string().uuid(),
+});
+
+export const adminProvisionDeviceInput = z.object({
+  siteId: z.string().uuid(),
+  serialNumber: z.string().min(1).max(120),
+  hardwareModel: z.string().min(1).max(60).default("rpi"),
+});
+
+export const adminProvisionMeterInput = z.object({
+  deviceId: z.string().uuid(),
+  serialNumber: z.string().min(1).max(120),
+  model: z.string().min(1).max(60).default("SDM630MCT"),
+  ctRatioPrimary: z.number().int().positive().optional(),
+  ctRatioSecondary: z.number().int().positive().optional(),
+  phaseConfig: z.string().max(20).optional(),
+});
+
+export const adminDeleteDeviceInput = z.object({
+  deviceId: z.string().uuid(),
+});
+
+export const adminDeleteMeterInput = z.object({
+  meterId: z.string().uuid(),
+});
+
 // Deleting an org is destructive + irreversible — require the caller to echo its exact
 // name as a fat-finger guard.
 export const adminDeleteOrganizationInput = z.object({
@@ -510,6 +541,9 @@ export const tariffSchedulesDeleteInput = z.object({
 
 export const alertsAttachmentUrlInput = z.object({
   alertId: z.string().uuid(),
+  // Which attachment to fetch (an alert can carry several). Optional for backward
+  // compatibility with older single-attachment alerts.
+  attachmentKey: z.string().optional(),
 });
 
 export const profileSetPhoneInput = z.object({

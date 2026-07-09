@@ -18,9 +18,13 @@ import {
 } from "@sparks/db";
 import { and, eq } from "drizzle-orm";
 import {
+  adminDeleteDevice,
   adminDeleteOrganization,
   adminListReviewQueue,
   adminListReviewedBills,
+  adminListSiteHardware,
+  adminProvisionDevice,
+  adminProvisionMeter,
   adminReviewReconciliation,
 } from "../admin";
 import { ForbiddenError, type AuthContext } from "../middleware";
@@ -351,6 +355,38 @@ describe("Operator assign-site-tariff", () => {
     expect(
       await db.query.reconciliations.findFirst({ where: eq(reconciliations.siteId, siteId) }),
     ).toBeFalsy();
+  });
+
+  it("provisions a device + meter and lists them (operator-gated)", async () => {
+    // Non-operators can't provision.
+    await expect(
+      adminProvisionDevice(ownerCtx, { siteId, serialNumber: "PI-1", hardwareModel: "rpi" }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    const { deviceId } = await adminProvisionDevice(operatorCtx, {
+      siteId,
+      serialNumber: "PI-PROV-1",
+      hardwareModel: "rpi",
+    });
+    expect(deviceId).toBeTruthy();
+
+    const { meterId } = await adminProvisionMeter(operatorCtx, {
+      deviceId,
+      serialNumber: "MTR-PROV-1",
+      model: "SDM630MCT",
+    });
+    expect(meterId).toBeTruthy();
+
+    const hw = await adminListSiteHardware(operatorCtx, { siteId });
+    const dev = hw.devices.find((d) => d.id === deviceId);
+    expect(dev).toBeTruthy();
+    expect(dev?.serialNumber).toBe("PI-PROV-1");
+    expect(dev?.meters.some((m) => m.id === meterId)).toBe(true);
+
+    // Deleting the device cascades its meter.
+    await adminDeleteDevice(operatorCtx, { deviceId });
+    const after = await adminListSiteHardware(operatorCtx, { siteId });
+    expect(after.devices.some((d) => d.id === deviceId)).toBe(false);
   });
 
   it("requires platform-operator access", async () => {
