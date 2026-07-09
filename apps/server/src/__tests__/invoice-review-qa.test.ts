@@ -373,9 +373,10 @@ describe("Invoice review & QA overhaul", () => {
     expect((inbox.alerts[0].payload as { reconId?: string }).reconId).toBe(reconId);
     expect(inbox.alerts[0].siteId).toBe(siteId);
 
-    // Acknowledge → unread clears.
+    // Marking read DELETES the message from the inbox (not just a read flag).
     await alertsAcknowledge(ownerCtx, { deliveryId: inbox.alerts[0].deliveryId });
     expect((await alertsUnreadCount(ownerCtx)).count).toBe(0);
+    expect((await alertsList(ownerCtx)).alerts.length).toBe(0);
   });
 
   it("saves and clears the profile phone number", async () => {

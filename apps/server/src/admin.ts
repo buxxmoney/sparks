@@ -16,7 +16,7 @@ import { auth } from "./auth";
 import { sendEmail } from "./email";
 import { extractPdfText } from "./invoices";
 import { llamaParseConfigured, parseScheduleToMarkdown } from "./llamaparse";
-import { requirePlatformOperator, type AuthContext } from "./middleware";
+import { PreconditionError, requirePlatformOperator, type AuthContext } from "./middleware";
 import { dispatchBillOutcome } from "./notifications";
 import { putObject } from "./storage";
 import {
@@ -50,8 +50,19 @@ export async function adminCreateCustomer(ctx: AuthContext, input: unknown) {
 
   const db = getDb();
 
+  // Reject a duplicate up front with a clear, client-visible message (PreconditionError
+  // surfaces its text; a plain Error would be sanitized to a generic 500).
+  const existing = await db
+    .select({ id: user.id })
+    .from(user)
+    .where(eq(user.email, parsed.customerEmail))
+    .limit(1);
+  if (existing.length > 0) {
+    throw new PreconditionError("That email has already been used — an account with it already exists.");
+  }
+
   // 1) Create the customer user with a throwaway password — they never learn it;
-  //    the onboarding email lets them set their own. Fails if the email exists.
+  //    the onboarding email lets them set their own.
   let userId: string;
   try {
     const res = await auth.api.signUpEmail({
@@ -63,9 +74,13 @@ export async function adminCreateCustomer(ctx: AuthContext, input: unknown) {
     });
     userId = res.user.id;
   } catch (err) {
-    throw new Error(
-      `Could not create an account for ${parsed.customerEmail} (it may already exist): ${(err as Error).message}`,
-    );
+    // Guards against a race that slips past the pre-check; a duplicate email is the
+    // expected cause, so surface a clean message rather than a raw 500.
+    const msg = (err as Error).message ?? "";
+    if (/exist|unique|duplicate/i.test(msg)) {
+      throw new PreconditionError("That email has already been used — an account with it already exists.");
+    }
+    throw new PreconditionError(`Could not create an account for ${parsed.customerEmail}: ${msg}`);
   }
 
   // 2) Create the org OWNED BY THE CUSTOMER. The plugin's createOrganization would

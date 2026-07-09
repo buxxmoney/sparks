@@ -1,6 +1,6 @@
 import { db } from "@sparks/db";
 import { betterAuth } from "better-auth";
-import { sendEmail, passwordSetEmail } from "./email";
+import { newSignupEmail, sendEmail, passwordSetEmail } from "./email";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { organization } from "better-auth/plugins";
 import { createAccessControl } from "better-auth/plugins/access";
@@ -88,6 +88,36 @@ export const auth = betterAuth({
         type: "string",
         required: false,
         input: true,
+      },
+    },
+  },
+  databaseHooks: {
+    user: {
+      create: {
+        // Fires after ANY user account is created (operator-provisioned customers
+        // and public signups). Heads-up to the Sparks team so we can see new signups.
+        // Best-effort: a failed notification must never block account creation.
+        after: async (createdUser) => {
+          const to = (process.env.SPARKS_REVIEW_EMAIL ?? "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          if (to.length === 0) return;
+          try {
+            const { subject, html } = newSignupEmail({
+              email: createdUser.email,
+              name: createdUser.name,
+              when: new Date(),
+            });
+            await sendEmail({ to, subject, html });
+          } catch (e) {
+            console.warn(
+              `[signup-notify] failed to email the Sparks inbox for ${createdUser.email}: ${
+                e instanceof Error ? e.message : e
+              }`,
+            );
+          }
+        },
       },
     },
   },

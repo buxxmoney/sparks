@@ -71,6 +71,24 @@ export function passwordSetEmail(link: string, orgName: string): { subject: stri
   };
 }
 
+/** Internal heads-up to the Sparks team that a new user account was created. */
+export function newSignupEmail(data: {
+  email: string;
+  name?: string | null;
+  when: Date;
+}): { subject: string; html: string } {
+  return {
+    subject: `New Sparks signup: ${data.email}`,
+    html: `<div style="font-family:system-ui,sans-serif;max-width:480px;color:#111827">
+      <h2 style="margin:0 0 8px">New user signed up</h2>
+      <p>A new account was just created on Sparks.</p>
+      <p style="margin:0"><strong>Email:</strong> ${escapeHtml(data.email)}</p>
+      ${data.name ? `<p style="margin:0"><strong>Name:</strong> ${escapeHtml(data.name)}</p>` : ""}
+      <p style="margin:0"><strong>When:</strong> ${escapeHtml(data.when.toLocaleString())}</p>
+    </div>`,
+  };
+}
+
 /** Site-scoped invitation email (org-owner invites a Site Manager). */
 export function siteInviteEmail(
   link: string,

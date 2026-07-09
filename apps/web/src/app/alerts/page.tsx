@@ -92,9 +92,11 @@ export default function AlertsPage() {
                   ? `/sites/${a.siteId}/reconciliation/${payload.reconId}`
                   : null
               : null;
-            const openAlert = async () => {
+            // Opening a message just navigates — it does NOT mark it read, because
+            // marking read deletes it (see alertsAcknowledge). The recipient dismisses
+            // explicitly via "Mark read" / "Mark all read".
+            const openAlert = () => {
               if (!targetHref) return;
-              if (unread) await client.alerts.acknowledge({ deliveryId: a.deliveryId }).catch(() => {});
               router.push(targetHref);
             };
             return (

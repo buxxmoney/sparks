@@ -2888,11 +2888,12 @@ export async function alertsUnreadCount(ctx: AuthContext) {
   return { count: rows.length };
 }
 
+// Marking a message read DELETES it from the recipient's inbox (product decision:
+// a read message is done with, so it's removed rather than kept as a read row).
 export async function alertsAcknowledge(ctx: AuthContext, input: unknown) {
   const parsed = alertsAcknowledgeInput.parse(input);
   await db
-    .update(alertDeliveries)
-    .set({ readAt: new Date() })
+    .delete(alertDeliveries)
     .where(
       and(
         eq(alertDeliveries.id, parsed.deliveryId),
@@ -2902,15 +2903,15 @@ export async function alertsAcknowledge(ctx: AuthContext, input: unknown) {
   return { ok: true };
 }
 
+// "Mark all read" clears the recipient's whole in-app inbox (see alertsAcknowledge —
+// read = deleted).
 export async function alertsMarkAllRead(ctx: AuthContext) {
   await db
-    .update(alertDeliveries)
-    .set({ readAt: new Date() })
+    .delete(alertDeliveries)
     .where(
       and(
         eq(alertDeliveries.recipientUserId, ctx.userId),
         eq(alertDeliveries.channel, "app"),
-        isNull(alertDeliveries.readAt),
       ),
     );
   return { ok: true };
