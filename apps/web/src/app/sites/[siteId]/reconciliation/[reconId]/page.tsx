@@ -104,6 +104,9 @@ export default function ReconciliationDetailPage() {
   }
 
   const hasDG = recon.gapCount > 0;
+  // No landlord tariff was on file when this was generated — the expected charges (and
+  // therefore any discrepancy) are still to be determined by Sparks during review.
+  const noTariff = recon.expectedLandlordCents == null;
   const discrepancy = recon.discrepancyVsLandlordCents ?? 0;
   const discColor = discrepancy > 0 ? "hsl(0 72% 51%)" : "hsl(142 71% 40%)";
 
@@ -225,10 +228,17 @@ export default function ReconciliationDetailPage() {
       <Card padding={5}>
         <Stack gap={4}>
           <Text weight="semibold">Tariff comparison</Text>
+          {noTariff ? (
+            <Banner
+              status="info"
+              title="Expected charges pending"
+              description="There's no landlord tariff on file for this site yet, so we can't compute the expected charges automatically. Sparks will determine them during review — the amount you were charged is shown below."
+            />
+          ) : null}
           <Grid columns={{ minWidth: 180 }} gap={4}>
             <Stat
               label="Expected (Landlord)"
-              value={`R ${((recon.expectedLandlordCents ?? 0) / 100).toFixed(2)}`}
+              value={noTariff ? "Pending" : `R ${((recon.expectedLandlordCents ?? 0) / 100).toFixed(2)}`}
             />
             <Stat
               label="Charged"
@@ -236,8 +246,8 @@ export default function ReconciliationDetailPage() {
             />
             <Stat
               label="Discrepancy"
-              value={`${discrepancy > 0 ? "+" : ""}R ${(discrepancy / 100).toFixed(2)}`}
-              color={discColor}
+              value={noTariff ? "Pending" : `${discrepancy > 0 ? "+" : ""}R ${(discrepancy / 100).toFixed(2)}`}
+              color={noTariff ? undefined : discColor}
             />
           </Grid>
           {(recon.expectedCeilingCents ?? 0) > 0 ? (
@@ -277,8 +287,10 @@ export default function ReconciliationDetailPage() {
                 </thead>
                 <tbody>
                   {recon.components.map((c) => {
+                    // Null expected/discrepancy = no landlord tariff on file yet.
                     const d = c.discrepancyVsLandlordCents;
-                    const color = d > 0 ? "hsl(0 72% 45%)" : d < 0 ? "hsl(142 71% 35%)" : "inherit";
+                    const color =
+                      d == null ? "inherit" : d > 0 ? "hsl(0 72% 45%)" : d < 0 ? "hsl(142 71% 35%)" : "inherit";
                     return (
                       <tr key={c.key} style={{ borderTop: "0.5px solid hsl(210 16% 90%)" }}>
                         <td style={{ padding: "8px 0" }}>{c.label}</td>
@@ -299,7 +311,9 @@ export default function ReconciliationDetailPage() {
                             color: "hsl(215 16% 50%)",
                           }}
                         >
-                          R {(c.expectedLandlordCents / 100).toFixed(2)}
+                          {c.expectedLandlordCents == null
+                            ? "—"
+                            : `R ${(c.expectedLandlordCents / 100).toFixed(2)}`}
                         </td>
                         <td
                           style={{
@@ -310,7 +324,7 @@ export default function ReconciliationDetailPage() {
                             color,
                           }}
                         >
-                          {d > 0 ? "+" : ""}R {(d / 100).toFixed(2)}
+                          {d == null ? "—" : `${d > 0 ? "+" : ""}R ${(d / 100).toFixed(2)}`}
                         </td>
                       </tr>
                     );

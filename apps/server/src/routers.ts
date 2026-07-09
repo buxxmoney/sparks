@@ -1521,6 +1521,9 @@ async function runReconciliationForPeriod(
   // Price landlord + legal-ceiling tariffs using the assignment(s) EFFECTIVE
   // during the period (splitting on effective-date changes) with per-interval
   // energy + the site timezone, so R4's TOU/seasonal pricing applies end-to-end.
+  // No landlord tariff on file is NOT fatal — we still produce a reconciliation from
+  // the measured usage and the billed charges, with the "expected" side left pending
+  // for Sparks to determine. This keeps every submitted bill reviewable and sendable.
   const landlordResult = await priceRoleOverPeriod(
     billingPeriod.siteId,
     "landlord",
@@ -1528,11 +1531,6 @@ async function runReconciliationForPeriod(
     intervals,
     site.timezone,
   );
-  if (!landlordResult) {
-    throw new PreconditionError(
-      "No landlord tariff assigned to this site. Assign a landlord tariff effective during the period first.",
-    );
-  }
   const ceilingResult = await priceRoleOverPeriod(
     billingPeriod.siteId,
     "legal_ceiling",
@@ -1550,7 +1548,7 @@ async function runReconciliationForPeriod(
       maxDemandKva,
       reactiveKvarh: totalReactiveKvarh,
     },
-    landlordResult.pricing,
+    landlordResult ? landlordResult.pricing : null,
     ceilingResult ? ceilingResult.pricing : null,
     {
       confirmedActiveCents: invoice.confirmedActiveCents,
@@ -1580,7 +1578,7 @@ async function runReconciliationForPeriod(
     billingPeriodEnd: billingPeriod.periodEnd,
     boundaryInclusivity: billingPeriod.boundaryInclusivity,
     demandIntervalMinutes: billingPeriod.demandIntervalMinutes,
-    landlordTariffProfileId: landlordResult.primaryProfileId,
+    landlordTariffProfileId: landlordResult?.primaryProfileId ?? null,
     legalCeilingTariffProfileId: ceilingResult?.primaryProfileId || null,
     measuredActiveKwh: reconData.measuredActiveKwh.toString(),
     measuredMaxDemandKva: reconData.measuredMaxDemandKva.toString(),

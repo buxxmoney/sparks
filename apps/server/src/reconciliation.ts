@@ -42,9 +42,10 @@ export interface ComponentComparisonRow {
   key: string; // active | demand | reactive | fixed
   label: string;
   chargedCents: number;
-  expectedLandlordCents: number;
+  // null when there is no landlord tariff on file yet (expected charge undetermined).
+  expectedLandlordCents: number | null;
   expectedCeilingCents: number;
-  discrepancyVsLandlordCents: number; // charged − expected(landlord); >0 = overcharged
+  discrepancyVsLandlordCents: number | null; // charged − expected(landlord); >0 = overcharged
   discrepancyVsCeilingCents: number;
 }
 
@@ -55,7 +56,7 @@ export interface ComponentComparisonRow {
  * PURE.
  */
 export function buildComponentComparison(
-  landlord: PricingBreakdown,
+  landlord: PricingBreakdown | null,
   ceiling: PricingBreakdown | null,
   invoice: {
     confirmedActiveCents: number | null;
@@ -69,28 +70,28 @@ export function buildComponentComparison(
       key: "active",
       label: "Active energy",
       charged: invoice.confirmedActiveCents ?? 0,
-      expL: landlord.activeEnergyCents,
+      expL: landlord ? landlord.activeEnergyCents : null,
       expC: ceiling?.activeEnergyCents ?? 0,
     },
     {
       key: "demand",
       label: "Demand",
       charged: invoice.confirmedDemandCents ?? 0,
-      expL: landlord.demandCents,
+      expL: landlord ? landlord.demandCents : null,
       expC: ceiling?.demandCents ?? 0,
     },
     {
       key: "reactive",
       label: "Reactive energy",
       charged: invoice.confirmedReactiveCents ?? 0,
-      expL: landlord.reactiveEnergyCents,
+      expL: landlord ? landlord.reactiveEnergyCents : null,
       expC: ceiling?.reactiveEnergyCents ?? 0,
     },
     {
       key: "fixed",
       label: "Fixed / service",
       charged: invoice.confirmedFixedCents ?? 0,
-      expL: landlord.fixedCents + landlord.ancillaryCents,
+      expL: landlord ? landlord.fixedCents + landlord.ancillaryCents : null,
       expC: (ceiling?.fixedCents ?? 0) + (ceiling?.ancillaryCents ?? 0),
     },
   ];
@@ -100,7 +101,7 @@ export function buildComponentComparison(
     chargedCents: r.charged,
     expectedLandlordCents: r.expL,
     expectedCeilingCents: r.expC,
-    discrepancyVsLandlordCents: r.charged - r.expL,
+    discrepancyVsLandlordCents: r.expL === null ? null : r.charged - r.expL,
     discrepancyVsCeilingCents: r.charged - r.expC,
   }));
 }
@@ -110,10 +111,10 @@ export interface ReconciliationData {
   measuredActiveKwh: number;
   measuredMaxDemandKva: number;
   measuredReactiveKvarh: number;
-  expectedLandlordCents: number;
+  expectedLandlordCents: number | null;
   expectedCeilingCents: number;
   chargedTotalCents: number;
-  discrepancyVsLandlordCents: number;
+  discrepancyVsLandlordCents: number | null;
   discrepancyVsCeilingCents: number;
   dataIntegrityStatus: "clean" | "gaps_present";
   gapCount: number;
@@ -121,7 +122,7 @@ export interface ReconciliationData {
   breakdown: {
     landlord: {
       usage: UsageData;
-      pricing: ReturnType<typeof priceUsage>;
+      pricing: ReturnType<typeof priceUsage> | null;
     };
     ceiling: {
       usage: UsageData;
@@ -146,7 +147,7 @@ export async function generateReconciliation(
     maxDemandKva: number;
     reactiveKvarh: number;
   },
-  landlordPricing: PricingBreakdown,
+  landlordPricing: PricingBreakdown | null,
   ceilingPricing: PricingBreakdown | null,
   invoiceData: {
     confirmedActiveCents: number | null;
@@ -169,7 +170,10 @@ export async function generateReconciliation(
   };
 
   const chargedTotal = invoiceData.confirmedTotalCents || 0;
-  const discrepancyVsLandlord = chargedTotal - landlordPricing.totalCents;
+  // No landlord tariff on file yet ⇒ expected charge (and thus the discrepancy) is
+  // undetermined. Store null rather than a misleading 0, so the recon shows "pending"
+  // and the operator determines it during review.
+  const discrepancyVsLandlord = landlordPricing ? chargedTotal - landlordPricing.totalCents : null;
   const discrepancyVsCeiling = ceilingPricing ? chargedTotal - ceilingPricing.totalCents : null;
 
   return {
@@ -177,7 +181,7 @@ export async function generateReconciliation(
     measuredActiveKwh: measuredData.activeKwh,
     measuredMaxDemandKva: measuredData.maxDemandKva,
     measuredReactiveKvarh: measuredData.reactiveKvarh,
-    expectedLandlordCents: landlordPricing.totalCents,
+    expectedLandlordCents: landlordPricing ? landlordPricing.totalCents : null,
     expectedCeilingCents: ceilingPricing?.totalCents || 0,
     chargedTotalCents: chargedTotal,
     discrepancyVsLandlordCents: discrepancyVsLandlord,
