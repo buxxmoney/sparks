@@ -19,6 +19,7 @@ import {
   Scale,
   Settings,
   ShieldCheck,
+  UserCircle,
 } from "lucide-react";
 
 import { client } from "@/lib/client";
@@ -86,6 +87,12 @@ function NavSections() {
           endContent={
             unreadCount > 0 ? <Badge variant="warning" label={String(unreadCount)} /> : undefined
           }
+        />
+        <SideNavItem
+          label="Account"
+          icon={<UserCircle size={ICON_SIZE} />}
+          href="/account"
+          isSelected={pathname === "/account"}
         />
       </SideNavSection>
 
