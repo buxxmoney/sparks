@@ -17,7 +17,11 @@ const b64url = (s: string) => Buffer.from(s).toString("base64url");
 
 function mintJwt(claims: Record<string, unknown>, key: string = privateKey): string {
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const payload = b64url(JSON.stringify(claims));
+  // Device tokens must carry an expiry (verifyDeviceJwt requires it); default a future exp
+  // unless the test overrides it.
+  const payload = b64url(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, ...claims }),
+  );
   const signer = createSign("RSA-SHA256");
   signer.update(`${header}.${payload}`);
   signer.end();

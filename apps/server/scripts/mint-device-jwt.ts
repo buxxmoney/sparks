@@ -43,10 +43,18 @@ const now = Math.floor(Date.now() / 1000);
 const days = arg("--days");
 const deviceId = arg("--device");
 
+// Device tokens MUST carry an expiry (the server rejects tokens without one). Default to a
+// long-lived 2 years so re-provisioning is rare; override with --days for a shorter window.
+const expiryDays = days ? Number(days) : 730;
+
 const header = { alg: "RS256", typ: "JWT" };
-const payload: Record<string, unknown> = { sub: meterId, meterId, iat: now };
+const payload: Record<string, unknown> = {
+  sub: meterId,
+  meterId,
+  iat: now,
+  exp: now + expiryDays * 86400,
+};
 if (deviceId) payload.deviceId = deviceId;
-if (days) payload.exp = now + Number(days) * 86400; // omit for a non-expiring device token
 
 const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
 const signer = createSign("RSA-SHA256");
