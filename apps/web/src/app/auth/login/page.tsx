@@ -4,7 +4,6 @@ import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
-import { Link } from "@astryxdesign/core/Link";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import Image from "next/image";
@@ -136,7 +135,7 @@ export default function LoginPage() {
 
         <div style={{ textAlign: "center", marginTop: 20 }}>
           <Text type="supporting">
-            Don&apos;t have an account? <Link href="/auth/signup">Sign up</Link>
+            Accounts are set up by Sparks. Use the link in your invitation email to get started.
           </Text>
         </div>
       </div>

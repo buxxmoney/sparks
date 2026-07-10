@@ -53,6 +53,7 @@ import {
   priceSegments,
 } from "./reconciliation";
 import { dispatchInvoiceParsed, dispatchReviewSubmitted } from "./notifications";
+import { sendSms } from "./sms";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
 import {
@@ -2960,15 +2961,30 @@ export async function alertsAttachmentUrl(ctx: AuthContext, input: unknown) {
 
 /* ─────────────── Profile ─────────────── */
 
-// Set the signed-in user's optional mobile number (used for the SMS nudge).
+// Set the signed-in user's optional mobile number (used for the SMS nudge). When a NEW
+// or CHANGED number is saved, send a one-time "welcome" text confirming they're set up —
+// whether they added it during onboarding or later in their account settings.
 export async function profileSetPhone(ctx: AuthContext, input: unknown) {
   const parsed = profileSetPhoneInput.parse(input);
   const phone = parsed.phone.trim();
-  await db
-    .update(user)
-    .set({ phone: phone.length > 0 ? phone : null })
-    .where(eq(user.id, ctx.userId));
-  return { ok: true, phone: phone.length > 0 ? phone : null };
+  const newPhone = phone.length > 0 ? phone : null;
+
+  const before = await db.query.user.findFirst({
+    where: eq(user.id, ctx.userId),
+    columns: { phone: true },
+  });
+  await db.update(user).set({ phone: newPhone }).where(eq(user.id, ctx.userId));
+
+  // Only on a genuinely new/changed number — not on re-saving the same one, and not when
+  // clearing it. Best-effort: never fail the save because a text couldn't be sent.
+  if (newPhone && newPhone !== (before?.phone ?? null)) {
+    void sendSms(
+      newPhone,
+      "Welcome to Sparks! You're all set to get text updates about your bill reviews at this number. Manage this anytime in your account settings.",
+    ).catch((err) => console.error("[profile] welcome sms failed:", err));
+  }
+
+  return { ok: true, phone: newPhone };
 }
 
 /* ─────────────── Readings / Dashboard (read-only) ─────────────── */

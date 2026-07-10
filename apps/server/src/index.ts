@@ -52,6 +52,15 @@ app.use(
 // Health check endpoint
 app.get("/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOString() }));
 
+// Public self-signup is DISABLED. Onboarding is operator-driven: admin.createCustomer
+// creates the account IN-PROCESS via auth.api.signUpEmail (which does NOT go through this
+// HTTP layer), so blocking the public HTTP sign-up route here closes self-signup to the
+// world while leaving operator provisioning — and sign-in, password reset, etc. — intact.
+// Registered BEFORE the catch-all so it wins for this exact path.
+app.post("/api/auth/sign-up/email", (c) =>
+  c.json({ error: "Public sign-up is disabled. Accounts are provisioned by Sparks." }, 403),
+);
+
 // better-auth routes (mounted at /api/auth/*)
 app.on(["GET", "POST"], "/api/auth/**", async (c) => {
   return auth.handler(c.req.raw);

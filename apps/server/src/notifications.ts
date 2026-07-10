@@ -33,6 +33,44 @@ async function resolveRecipients(organizationId: string, siteId: string) {
   );
 }
 
+/** The web app base URL, for links in SMS/email nudges. */
+function webUrl(): string {
+  return process.env.WEB_URL || "http://localhost:3000";
+}
+
+/**
+ * Send a short SMS nudge to every recipient who has a phone number, recording a
+ * per-recipient `alert_deliveries` row (channel='sms'). Best-effort per recipient —
+ * an SMS failure is logged + recorded, never thrown. Keep messages short and NEVER
+ * attach documents (SMS is just the "something happened, open the app" nudge).
+ */
+async function smsRecipients(
+  db: ReturnType<typeof getDb>,
+  alertId: string,
+  recipients: { id: string; phone: string | null }[],
+  body: string,
+): Promise<void> {
+  for (const r of recipients) {
+    if (!r.phone) continue;
+    try {
+      const ref = await sendSms(r.phone, body);
+      await db.insert(alertDeliveries).values({
+        alertId,
+        channel: "sms",
+        recipientUserId: r.id,
+        status: "sent",
+        sentAt: new Date(),
+        providerRef: ref ?? undefined,
+      });
+    } catch (err) {
+      console.error(`[notify] sms to ${r.phone} failed:`, err);
+      await db
+        .insert(alertDeliveries)
+        .values({ alertId, channel: "sms", recipientUserId: r.id, status: "failed" });
+    }
+  }
+}
+
 /**
  * Deliver a Sparks review outcome to the customer across every channel:
  *  - app: an alert + per-recipient delivery row (the in-app inbox item);
@@ -157,10 +195,10 @@ export async function dispatchBillOutcome(params: {
 }
 
 /**
- * In-app notification that background parsing of an uploaded invoice has finished
- * (or failed). Lets a customer who navigated away from the upload screen find out
- * their invoice is ready to review (or needs re-uploading). App-inbox only — no
- * email/SMS, to avoid noise on a routine step. Best-effort; never throws.
+ * Notification that background parsing of an uploaded invoice has finished (or
+ * failed). Lands in the in-app inbox AND texts the customer (if they've added a
+ * number) so they know their invoice is ready to review / needs re-uploading.
+ * Best-effort; never throws.
  */
 export async function dispatchInvoiceParsed(params: {
   invoiceId: string;
@@ -204,15 +242,24 @@ export async function dispatchInvoiceParsed(params: {
         sentAt: new Date(),
       });
     }
+
+    await smsRecipients(
+      db,
+      alert.id,
+      recipients,
+      params.ok
+        ? `Sparks: your invoice for ${params.siteName} is ready to review. Open the app: ${webUrl()}`
+        : `Sparks: we couldn't read the invoice you uploaded for ${params.siteName}. Please re-upload it in the app.`,
+    );
   } catch (err) {
     console.error(`[notify] invoice-parsed alert failed for ${params.invoiceId}:`, err);
   }
 }
 
 /**
- * In-app confirmation for the customer that their bill has been SENT to Sparks for
- * review — closing the loop (ready → sent → outcome) in their Alerts inbox.
- * App-inbox only; best-effort; never throws.
+ * Confirmation for the customer that their bill has been SENT to Sparks for review —
+ * closing the loop (ready → sent → outcome) in their Alerts inbox AND by text.
+ * Best-effort; never throws.
  */
 export async function dispatchReviewSubmitted(params: {
   invoiceId: string;
@@ -249,6 +296,13 @@ export async function dispatchReviewSubmitted(params: {
         sentAt: new Date(),
       });
     }
+
+    await smsRecipients(
+      db,
+      alert.id,
+      recipients,
+      `Sparks: your bill for ${params.siteName} is now with our team for review. We'll let you know the outcome.`,
+    );
   } catch (err) {
     console.error(`[notify] review-submitted alert failed for ${params.invoiceId}:`, err);
   }
