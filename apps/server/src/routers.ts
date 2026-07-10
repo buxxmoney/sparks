@@ -401,7 +401,8 @@ export async function sitesCreate(ctx: AuthContext, input: unknown) {
 
 export async function sitesUpdate(ctx: AuthContext, input: unknown) {
   const parsed = sitesUpdateInput.parse(input);
-  await requireSiteAccess(ctx, parsed.siteId);
+  // Editing site settings is a mutation — editor+ only (a viewer must not change anything).
+  await requireSiteEditor(ctx, parsed.siteId);
 
   const updateData: Partial<typeof sites.$inferInsert> = {};
   if (parsed.name !== undefined) updateData.name = parsed.name;
@@ -653,39 +654,72 @@ export async function siteInvitesAccept(ctx: AuthContext, input: unknown) {
 
 export async function devicesList(ctx: AuthContext, input: unknown) {
   const parsed = devicesListInput.parse(input);
+  const limit = parsed.limit || 50;
+  const offset = parsed.offset || 0;
 
-  let rows: (typeof devices.$inferSelect)[] = [];
+  // NEVER return api_key_hash: it IS the HMAC signing key, so leaking it lets anyone forge
+  // a device's /ingest signatures. Select only non-secret columns.
+  const cols = {
+    id: devices.id,
+    siteId: devices.siteId,
+    serialNumber: devices.serialNumber,
+    hardwareModel: devices.hardwareModel,
+    simIccid: devices.simIccid,
+    simMsisdn: devices.simMsisdn,
+    simProvider: devices.simProvider,
+    connectivityMode: devices.connectivityMode,
+    firmwareVersion: devices.firmwareVersion,
+    status: devices.status,
+    lastSeenAt: devices.lastSeenAt,
+    upsStatus: devices.upsStatus,
+    upsBatteryPct: devices.upsBatteryPct,
+    createdAt: devices.createdAt,
+    updatedAt: devices.updatedAt,
+  };
+
   if (parsed.siteId) {
     await requireSiteAccess(ctx, parsed.siteId);
-    rows = await db.query.devices.findMany({
-      where: eq(devices.siteId, parsed.siteId),
-      limit: parsed.limit || 50,
-      offset: parsed.offset || 0,
-    });
-  } else {
-    rows = await db.query.devices.findMany({
-      limit: parsed.limit || 50,
-      offset: parsed.offset || 0,
-    });
+    const rows = await db
+      .select(cols)
+      .from(devices)
+      .where(eq(devices.siteId, parsed.siteId))
+      .limit(limit)
+      .offset(offset);
+    return { devices: rows, total: rows.length };
   }
 
+  // No site filter ⇒ scope to the CALLER'S OWN ORG only (never every org's devices). This
+  // joins through the device's site, so unassigned (site_id NULL) devices — which belong to
+  // no org yet and are operator-managed — are correctly excluded.
+  const rows = await db
+    .select(cols)
+    .from(devices)
+    .innerJoin(sites, eq(sites.id, devices.siteId))
+    .where(eq(sites.organizationId, ctx.organizationId))
+    .limit(limit)
+    .offset(offset);
   return { devices: rows, total: rows.length };
 }
 
 export async function devicesGet(ctx: AuthContext, input: unknown) {
   const parsed = devicesGetInput.parse(input);
 
+  // Never expose api_key_hash (the HMAC signing key).
   const device = await db.query.devices.findFirst({
     where: eq(devices.id, parsed.deviceId),
+    columns: { apiKeyHash: false },
   });
 
   if (!device) {
     throw new Error("Device not found");
   }
 
-  // If device is associated with a site, check access
+  // Authorize on the device's site. A device with NO site (freshly provisioned) belongs to
+  // no org yet, so it's operator-only — otherwise any signed-in user could read it.
   if (device.siteId) {
     await requireSiteAccess(ctx, device.siteId);
+  } else {
+    await requirePlatformOperator(ctx.userId);
   }
 
   return device;
@@ -726,9 +760,13 @@ export async function devicesRotateKey(ctx: AuthContext, input: unknown) {
     throw new Error("Device not found");
   }
 
-  // If device is associated with a site, check access
+  // Authorize on the device's site; an unassigned device (no site) is operator-only —
+  // otherwise a cross-tenant caller could rotate its key and receive the new secret,
+  // hijacking ingestion once the device is deployed.
   if (device.siteId) {
     await requireSiteAccess(ctx, device.siteId);
+  } else {
+    await requirePlatformOperator(ctx.userId);
   }
 
   const deviceSecret = randomBytes(32).toString("hex");

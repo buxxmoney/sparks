@@ -37,6 +37,49 @@ import { client } from "@/lib/client";
 
 const PRIMARY = "hsl(221 83% 53%)";
 
+// A copyable one-line command (used by the device setup guide).
+function CmdLine({ cmd, copied, onCopy }: { cmd: string; copied: boolean; onCopy: () => void }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        background: "hsl(210 20% 97%)",
+        border: "1px solid hsl(210 16% 88%)",
+        borderRadius: 8,
+        padding: "6px 8px",
+      }}
+    >
+      <code
+        style={{
+          fontSize: 12,
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          whiteSpace: "pre",
+          overflowX: "auto",
+          flex: 1,
+        }}
+      >
+        {cmd}
+      </code>
+      <Button
+        label={copied ? "Copied!" : "Copy"}
+        variant="ghost"
+        size="sm"
+        icon={<Copy size={12} />}
+        onClick={onCopy}
+      />
+    </div>
+  );
+}
+
+// Inline monospace for env var / path names in prose.
+const Mono = ({ children }: { children: React.ReactNode }) => (
+  <code style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.85em" }}>
+    {children}
+  </code>
+);
+
 export default function AdminPage() {
   const { data: orgData, loading, error, refetch } = useRPC(
     () => client.admin.listOrganizations(),
@@ -134,6 +177,8 @@ export default function AdminPage() {
   const [hwBusy, setHwBusy] = useState(false);
   const [hwMsg, setHwMsg] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [copiedMeter, setCopiedMeter] = useState<string | null>(null);
+  const [showGuide, setShowGuide] = useState(true);
+  const [copiedSnippet, setCopiedSnippet] = useState<string | null>(null);
 
   const [reviewBusy, setReviewBusy] = useState(false);
   const [queueMsg, setQueueMsg] = useState<{ kind: "success" | "error"; text: string } | null>(
@@ -633,6 +678,16 @@ export default function AdminPage() {
         setTimeout(() => setCopiedMeter(null), 2000);
       },
       () => setHwMsg({ kind: "error", text: "Couldn't copy — command is in the meter row." }),
+    );
+  };
+
+  const copySnippet = (text: string, id: string) => {
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopiedSnippet(id);
+        setTimeout(() => setCopiedSnippet(null), 2000);
+      },
+      () => {},
     );
   };
 
@@ -1390,11 +1445,96 @@ export default function AdminPage() {
                         <Card padding={4}>
                           <Stack gap={3}>
                             <Text weight="semibold">Devices &amp; meters — {manageSite.name}</Text>
-                            <Banner
-                              status="info"
-                              title="How onboarding works"
-                              description="Add the device (Pi), then a meter on it. Copy the meter's mint command, run it OFFLINE with your private key to create the JWT, and flash that token onto the Pi. It then streams to /ingest/raw."
-                            />
+
+                            {/* Step-by-step device onboarding guide */}
+                            <div
+                              style={{
+                                border: "1px solid hsl(210 16% 88%)",
+                                borderRadius: 10,
+                                background: "hsl(210 20% 98%)",
+                                padding: 12,
+                              }}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setShowGuide((v) => !v)}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  background: "none",
+                                  border: 0,
+                                  padding: 0,
+                                  cursor: "pointer",
+                                  font: "inherit",
+                                  color: "inherit",
+                                  width: "100%",
+                                  textAlign: "left",
+                                }}
+                              >
+                                <span style={{ display: "inline-flex", color: PRIMARY }}>
+                                  {showGuide ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                </span>
+                                <Text weight="medium">Device setup guide</Text>
+                                <Text type="supporting">— how to get a token onto a Pi</Text>
+                              </button>
+
+                              {showGuide ? (
+                                <Stack gap={3} style={{ marginTop: 12 }}>
+                                  <Stack gap={2}>
+                                    <Text type="supporting">
+                                      <strong>1.</strong> Generate a signing keypair — <em>once</em>, on a
+                                      machine you control. Keep the private key OFFLINE (never on the server):
+                                    </Text>
+                                    <CmdLine
+                                      cmd="openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device-signing.private.pem"
+                                      copied={copiedSnippet === "k1"}
+                                      onCopy={() =>
+                                        copySnippet(
+                                          "openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device-signing.private.pem",
+                                          "k1",
+                                        )
+                                      }
+                                    />
+                                    <CmdLine
+                                      cmd="openssl rsa -in device-signing.private.pem -pubout -out device-signing.public.pem"
+                                      copied={copiedSnippet === "k2"}
+                                      onCopy={() =>
+                                        copySnippet(
+                                          "openssl rsa -in device-signing.private.pem -pubout -out device-signing.public.pem",
+                                          "k2",
+                                        )
+                                      }
+                                    />
+                                  </Stack>
+
+                                  <Text type="supporting">
+                                    <strong>2.</strong> Put the <em>public</em> key on the server: set{" "}
+                                    <Mono>DEVICE_INGEST_JWT_PUBLIC_KEY</Mono> to the full contents of{" "}
+                                    <Mono>device-signing.public.pem</Mono> (Railway → @sparks/server →
+                                    Variables), then redeploy.
+                                  </Text>
+
+                                  <Text type="supporting">
+                                    <strong>3.</strong> Add the device and a meter below, then grab the meter's{" "}
+                                    <Mono>meterId</Mono> from its row.
+                                  </Text>
+
+                                  <Text type="supporting">
+                                    <strong>4.</strong> Mint the token offline with the private key — use the
+                                    meter's <em>Copy mint cmd</em> button below, then run it from{" "}
+                                    <Mono>apps/server</Mono>. It prints the JWT.
+                                  </Text>
+
+                                  <Text type="supporting">
+                                    <strong>5.</strong> Flash the JWT onto the Pi — it sends it as{" "}
+                                    <Mono>Authorization: Bearer &lt;jwt&gt;</Mono> on every POST to{" "}
+                                    <Mono>/ingest/raw</Mono>.
+                                  </Text>
+                                </Stack>
+                              ) : null}
+                            </div>
+
                             {hwMsg ? <Banner status={hwMsg.kind} title={hwMsg.text} /> : null}
 
                             <Stack direction="horizontal" gap={2} align="end" wrap="wrap">

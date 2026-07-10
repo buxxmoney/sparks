@@ -102,15 +102,17 @@ describe("oRPC Routers", () => {
       role: "site_manager",
     });
 
-    // Create test device
+    // Create test device — ASSIGNED to the site, so the site owner can manage it
+    // (unassigned devices are operator-only; see audit F2a/F2b).
     const deviceResult = await db
       .insert(devices)
       .values({
+        siteId,
         serialNumber: `test-device-${Date.now()}`,
         hardwareModel: "rpi",
         connectivityMode: "lte",
         apiKeyHash: "testhash",
-        status: "provisioning",
+        status: "online",
       })
       .returning();
 
