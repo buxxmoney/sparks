@@ -52,17 +52,15 @@ app.use(
 // Health check endpoint
 app.get("/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOString() }));
 
-// Public self-signup is DISABLED. Onboarding is operator-driven: admin.createCustomer
-// creates the account IN-PROCESS via auth.api.signUpEmail (which does NOT go through this
-// HTTP layer), so blocking the public HTTP sign-up route here closes self-signup to the
-// world while leaving operator provisioning — and sign-in, password reset, etc. — intact.
-// Registered BEFORE the catch-all so it wins for this exact path.
-app.post("/api/auth/sign-up/email", (c) =>
-  c.json({ error: "Public sign-up is disabled. Accounts are provisioned by Sparks." }, 403),
-);
-
-// better-auth routes (mounted at /api/auth/*)
+// better-auth routes (mounted at /api/auth/*). Public self-signup is DISABLED: we block
+// the sign-up route from INSIDE this single catch-all (a separate app.post route breaks
+// Hono's static-vs-wildcard matching and 404s the other auth routes, incl. sign-in).
+// Operator provisioning is unaffected — admin.createCustomer calls auth.api.signUpEmail
+// IN-PROCESS, which never reaches this HTTP handler.
 app.on(["GET", "POST"], "/api/auth/**", async (c) => {
+  if (c.req.method === "POST" && new URL(c.req.url).pathname === "/api/auth/sign-up/email") {
+    return c.json({ error: "Public sign-up is disabled. Accounts are provisioned by Sparks." }, 403);
+  }
   return auth.handler(c.req.raw);
 });
 

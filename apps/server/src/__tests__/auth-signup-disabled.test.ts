@@ -19,14 +19,17 @@ describe("Public sign-up disabled", () => {
     expect(body.error ?? "").toMatch(/disabled/i);
   });
 
-  it("does NOT intercept sign-in (that route still goes to better-auth)", async () => {
+  it("does NOT break sign-in (it still reaches better-auth → 401 for bad creds)", async () => {
     const res = await app.request("/api/auth/sign-in/email", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ email: "nobody@example.com", password: "wrongpass" }),
     });
-    // Whatever better-auth returns for bad creds, it must NOT be our 403 sign-up guard.
+    // Must be handled by better-auth (401 unauthorized), NOT our 403 guard and NOT a 404
+    // (a 404 means the guard broke the catch-all's routing — regression guard).
+    expect(res.status).not.toBe(404);
     expect(res.status).not.toBe(403);
+    expect(res.status).toBe(401);
   });
 
   it("does NOT block in-process creation (auth.api.signUpEmail) — provisioning still works", async () => {
