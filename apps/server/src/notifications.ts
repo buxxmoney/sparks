@@ -49,17 +49,19 @@ export async function dispatchBillOutcome(params: {
   subject: string;
   body: string;
   verified: boolean;
-  attachment: { filename: string; content: Buffer } | null;
+  attachments: { filename: string; content: Buffer }[];
   webUrl: string;
-}): Promise<{ alertId: string; recipientCount: number; attachmentKey: string | null }> {
+}): Promise<{ alertId: string; recipientCount: number; attachmentCount: number }> {
   const db = getDb();
   const recipients = await resolveRecipients(params.organizationId, params.siteId);
 
-  // Persist the optional attachment once; the inbox offers it via a signed URL.
-  let attachmentKey: string | null = null;
-  if (params.attachment) {
-    attachmentKey = `review-outcomes/${params.reconId}/${params.attachment.filename}`;
-    await putObject(attachmentKey, params.attachment.content, "application/pdf");
+  // Persist each attachment once; the inbox offers them via signed URLs. Index-prefix the
+  // key so two files with the same name don't collide.
+  const storedAttachments: { key: string; name: string }[] = [];
+  for (const [i, att] of params.attachments.entries()) {
+    const key = `review-outcomes/${params.reconId}/${i}-${att.filename}`;
+    await putObject(key, att.content, "application/pdf");
+    storedAttachments.push({ key, name: att.filename });
   }
 
   const [alert] = await db
@@ -74,8 +76,7 @@ export async function dispatchBillOutcome(params: {
       payload: {
         reconId: params.reconId,
         verified: params.verified,
-        attachmentKey,
-        attachmentName: params.attachment?.filename ?? null,
+        attachments: storedAttachments,
       },
       status: "open",
     })
@@ -107,7 +108,7 @@ export async function dispatchBillOutcome(params: {
           to: r.email,
           subject: email.subject,
           html: email.html,
-          attachments: params.attachment ? [params.attachment] : undefined,
+          attachments: params.attachments.length > 0 ? params.attachments : undefined,
         });
         await db.insert(alertDeliveries).values({
           alertId: alert.id,
@@ -148,7 +149,11 @@ export async function dispatchBillOutcome(params: {
     }
   }
 
-  return { alertId: alert.id, recipientCount: recipients.length, attachmentKey };
+  return {
+    alertId: alert.id,
+    recipientCount: recipients.length,
+    attachmentCount: storedAttachments.length,
+  };
 }
 
 /**
