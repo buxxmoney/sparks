@@ -6,6 +6,7 @@ import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
+import { Link } from "@astryxdesign/core/Link";
 import Image from "next/image";
 import sparksLogo from "@/assets/sparks-logo.png";
 import { client } from "@/lib/client";
@@ -62,7 +63,7 @@ export default function LoginPage() {
       // navigation so the app shell re-fetches the now-authenticated session
       // (a client push would keep the stale signed-out session and bounce back).
       const next = new URLSearchParams(window.location.search).get("next");
-      window.location.href = next && next.startsWith("/") ? next : "/auth/org-selector";
+      window.location.href = next?.startsWith("/") ? next : "/auth/org-selector";
     } catch (err) {
       setError("An error occurred. Please try again.");
     } finally {
@@ -128,6 +129,9 @@ export default function LoginPage() {
                   variant="primary"
                   isLoading={loading}
                 />
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <Link href="/auth/forgot-password">Forgot your password?</Link>
               </div>
             </div>
           </form>

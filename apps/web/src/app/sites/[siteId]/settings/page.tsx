@@ -1,6 +1,5 @@
 "use client";
 
-import { PhoneInput } from "@/components/PhoneInput";
 import { TeamAccess } from "@/components/team-access";
 import { client } from "@/lib/client";
 import { useRPC } from "@/lib/useRPC";
@@ -15,7 +14,7 @@ import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { ArrowLeft, Building2, CalendarRange, Check, Gauge, Phone } from "lucide-react";
+import { ArrowLeft, Building2, CalendarRange, Check, Gauge } from "lucide-react";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -82,27 +81,6 @@ export default function SiteSettingsPage() {
     } catch (err) {
       setDetailsErr(err instanceof Error ? err.message : "Failed to save");
       setDetailsMsg("idle");
-    }
-  };
-
-  // ── Contact number (for SMS notifications) ────────────────────
-  const { data: me, refetch: refetchMe } = useRPC(() => client.session.me(), []);
-  const [phone, setPhone] = useState("");
-  const [phoneMsg, setPhoneMsg] = useState<"idle" | "saving" | "saved">("idle");
-
-  useEffect(() => {
-    if (me) setPhone(me.phone ?? "");
-  }, [me]);
-
-  const savePhone = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPhoneMsg("saving");
-    try {
-      await client.profile.setPhone({ phone });
-      await refetchMe();
-      setPhoneMsg("saved");
-    } catch {
-      setPhoneMsg("idle");
     }
   };
 
@@ -241,29 +219,6 @@ export default function SiteSettingsPage() {
                 isLoading={detailsMsg === "saving"}
               />
               {detailsMsg === "saved" ? <Saved /> : null}
-            </Stack>
-          </Stack>
-        </form>
-      </Card>
-
-      {/* Contact number */}
-      <Card padding={5}>
-        <form onSubmit={savePhone}>
-          <Stack gap={3}>
-            <SectionTitle icon={<Phone size={16} />}>Notifications</SectionTitle>
-            <Text type="supporting">
-              Add a mobile number to get an SMS when Sparks finishes reviewing your bill. Optional —
-              outcomes always land in your Alerts inbox and email.
-            </Text>
-            <PhoneInput label="Mobile number" value={phone} onChange={setPhone} />
-            <Stack direction="horizontal" align="center" gap={3}>
-              <Button
-                label={phoneMsg === "saving" ? "Saving…" : "Save number"}
-                type="submit"
-                variant="primary"
-                isLoading={phoneMsg === "saving"}
-              />
-              {phoneMsg === "saved" ? <Saved /> : null}
             </Stack>
           </Stack>
         </form>
