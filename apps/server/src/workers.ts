@@ -55,6 +55,37 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
 
   const intervals = computeIntervals(startTime, endTime, intervalMinutes);
 
+  // Interval energy from CUMULATIVE registers: the register value at the interval END
+  // boundary minus the value at its START boundary, each = the last reading at or before
+  // that boundary. This attributes consumption that straddles a boundary to the right
+  // interval, handles single-sample intervals (old first/last-WITHIN logic yielded 0), and
+  // Σ interval deltas telescopes to (last register − first register), conserving energy.
+  type EnergyField = "activeEnergyKwh" | "reactiveEnergyKvarh" | "apparentEnergyKvah";
+  const earliestRegister = (field: EnergyField): number | null => {
+    for (const r of meterReadings) {
+      if (r[field] != null) return Number.parseFloat(r[field] as string);
+    }
+    return null;
+  };
+  const registerAtOrBefore = (field: EnergyField, t: Date): number | null => {
+    let val: number | null = null;
+    for (const r of meterReadings) {
+      if (new Date(r.time).getTime() > t.getTime()) break;
+      if (r[field] != null) val = Number.parseFloat(r[field] as string);
+    }
+    // Before the first reading ⇒ baseline at the earliest register (no energy yet consumed).
+    return val ?? earliestRegister(field);
+  };
+  const intervalEnergy = (field: EnergyField, start: Date, end: Date): string => {
+    const a = registerAtOrBefore(field, start);
+    const b = registerAtOrBefore(field, end);
+    if (a === null || b === null) return "0";
+    const delta = b - a;
+    // A negative delta is a cumulative-register rollover / meter reset — never emit negative
+    // energy; clamp to 0 (detectDataGaps flags the discontinuity separately).
+    return (delta < 0 ? 0 : delta).toFixed(3);
+  };
+
   for (const interval of intervals) {
     const intervalReadings = meterReadings.filter(
       (r) => new Date(r.time) >= interval.start && new Date(r.time) < interval.end,
@@ -67,30 +98,9 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
     const sampleCount = intervalReadings.length;
     const expectedSamples = Math.ceil((intervalMinutes * 60) / 60);
 
-    let activeEnergyDelta = "0";
-    let reactiveEnergyDelta = "0";
-    let apparentEnergyDelta = "0";
-
-    if (intervalReadings.length > 1) {
-      const first = intervalReadings[0];
-      const last = intervalReadings[intervalReadings.length - 1];
-
-      if (first?.activeEnergyKwh && last?.activeEnergyKwh) {
-        const firstVal = Number.parseFloat(first.activeEnergyKwh);
-        const lastVal = Number.parseFloat(last.activeEnergyKwh);
-        activeEnergyDelta = (lastVal - firstVal).toFixed(3);
-      }
-      if (first?.reactiveEnergyKvarh && last?.reactiveEnergyKvarh) {
-        const firstVal = Number.parseFloat(first.reactiveEnergyKvarh);
-        const lastVal = Number.parseFloat(last.reactiveEnergyKvarh);
-        reactiveEnergyDelta = (lastVal - firstVal).toFixed(3);
-      }
-      if (first?.apparentEnergyKvah && last?.apparentEnergyKvah) {
-        const firstVal = Number.parseFloat(first.apparentEnergyKvah);
-        const lastVal = Number.parseFloat(last.apparentEnergyKvah);
-        apparentEnergyDelta = (lastVal - firstVal).toFixed(3);
-      }
-    }
+    const activeEnergyDelta = intervalEnergy("activeEnergyKwh", interval.start, interval.end);
+    const reactiveEnergyDelta = intervalEnergy("reactiveEnergyKvarh", interval.start, interval.end);
+    const apparentEnergyDelta = intervalEnergy("apparentEnergyKvah", interval.start, interval.end);
 
     const intervalHours = intervalMinutes / 60;
     const avgDemandKw = (Number.parseFloat(activeEnergyDelta) / intervalHours).toFixed(3);

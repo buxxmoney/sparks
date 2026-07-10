@@ -191,7 +191,10 @@ export function verifyDeviceJwt(token: string, publicKeyPem: string): DeviceJwtC
   }
 
   const now = Math.floor(Date.now() / 1000);
-  if (typeof claims.exp === "number" && now >= claims.exp) return null;
+  // Device tokens MUST carry an expiry — a non-expiring token can never be aged out if it
+  // leaks. (No prod tokens exist yet, so requiring this can't lock out live devices; the
+  // minter always sets exp.)
+  if (typeof claims.exp !== "number" || now >= claims.exp) return null;
   if (typeof claims.nbf === "number" && now < claims.nbf) return null;
   return claims;
 }

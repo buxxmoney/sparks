@@ -16,26 +16,52 @@ export function emptyBreakdown(): PricingBreakdown {
 
 /**
  * Price a period that may be split across several effective-dated tariff
- * segments (e.g. a billing period crossing a tariff change). Each segment prices
- * its own slice of usage against the profile effective for that slice; the
- * results are summed. A single-segment period (the common case) is identical to
- * a plain `priceUsage`. PURE.
+ * segments (e.g. a billing period crossing a tariff change). PURE.
+ *
+ * Per-CONSUMPTION charges (active + reactive energy) accumulate across segments — each
+ * slice's usage is priced under its own tariff and summed. Period-LEVEL charges are
+ * applied EXACTLY ONCE for the whole period, never per segment (which would double-count
+ * a monthly service fee or demand charge on a period that crosses a tariff change):
+ *  - fixed / ancillary (r_per_month): from the tariff in effect at period END (last segment).
+ *  - demand (peak): the largest segment demand charge (the period peak priced under its rate).
+ * A single-segment period (the common case) is unchanged — identical to a plain `priceUsage`.
  */
 export function priceSegments(
   segments: Array<{ usage: UsageData; profile: TariffProfile }>,
 ): PricingBreakdown {
-  const acc = emptyBreakdown();
-  for (const seg of segments) {
-    const p = priceUsage(seg.usage, seg.profile);
-    acc.activeEnergyCents += p.activeEnergyCents;
-    acc.demandCents += p.demandCents;
-    acc.reactiveEnergyCents += p.reactiveEnergyCents;
-    acc.fixedCents += p.fixedCents;
-    acc.ancillaryCents += p.ancillaryCents;
-    acc.totalCents += p.totalCents;
-    acc.details.push(...p.details);
+  if (segments.length === 0) return emptyBreakdown();
+
+  const priced = segments.map((seg) => priceUsage(seg.usage, seg.profile));
+
+  // Per-consumption charges sum across segments.
+  const activeEnergyCents = priced.reduce((s, p) => s + p.activeEnergyCents, 0);
+  const reactiveEnergyCents = priced.reduce((s, p) => s + p.reactiveEnergyCents, 0);
+
+  // Period-level charges once: fixed/ancillary from the period-end tariff, demand = peak.
+  const last = priced[priced.length - 1];
+  const fixedCents = last.fixedCents;
+  const ancillaryCents = last.ancillaryCents;
+  const peakDemand = priced.reduce((m, p) => (p.demandCents > m.demandCents ? p : m), priced[0]);
+  const demandCents = peakDemand.demandCents;
+
+  // Details mirror the cents: every segment's active/reactive lines, plus ONE set of the
+  // period-level lines (from the segments they were taken from).
+  const details: PricingBreakdown["details"] = [];
+  for (const p of priced) {
+    details.push(...p.details.filter((d) => d.chargeType === "active_energy" || d.chargeType === "reactive_energy"));
   }
-  return acc;
+  details.push(...last.details.filter((d) => d.chargeType === "fixed" || d.chargeType === "ancillary"));
+  details.push(...peakDemand.details.filter((d) => d.chargeType === "demand"));
+
+  return {
+    activeEnergyCents,
+    demandCents,
+    reactiveEnergyCents,
+    fixedCents,
+    ancillaryCents,
+    totalCents: activeEnergyCents + demandCents + reactiveEnergyCents + fixedCents + ancillaryCents,
+    details,
+  };
 }
 
 export interface ComponentComparisonRow {

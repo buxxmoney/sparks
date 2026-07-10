@@ -421,7 +421,7 @@ export async function sitesUpdate(ctx: AuthContext, input: unknown) {
 
 export async function sitesSetDefaultDemandInterval(ctx: AuthContext, input: unknown) {
   const parsed = sitesSetDefaultDemandIntervalInput.parse(input);
-  await requireSiteAccess(ctx, parsed.siteId);
+  await requireSiteEditor(ctx, parsed.siteId);
 
   await db
     .update(sites)
@@ -652,21 +652,14 @@ export async function siteInvitesAccept(ctx: AuthContext, input: unknown) {
 
 /* ─────────────── Devices Router ─────────────── */
 
-export async function devicesList(ctx: AuthContext, input: unknown) {
-  const parsed = devicesListInput.parse(input);
-  const limit = parsed.limit || 50;
-  const offset = parsed.offset || 0;
-
-  // NEVER return api_key_hash: it IS the HMAC signing key, so leaking it lets anyone forge
-  // a device's /ingest signatures. Select only non-secret columns.
-  const cols = {
+// Safe projection for device READS — excludes api_key_hash (the HMAC signing key) and the
+// SIM identifiers (PII). Used by devicesList/devicesGet so secrets never leave the server.
+function deviceSafeColumns() {
+  return {
     id: devices.id,
     siteId: devices.siteId,
     serialNumber: devices.serialNumber,
     hardwareModel: devices.hardwareModel,
-    simIccid: devices.simIccid,
-    simMsisdn: devices.simMsisdn,
-    simProvider: devices.simProvider,
     connectivityMode: devices.connectivityMode,
     firmwareVersion: devices.firmwareVersion,
     status: devices.status,
@@ -676,6 +669,16 @@ export async function devicesList(ctx: AuthContext, input: unknown) {
     createdAt: devices.createdAt,
     updatedAt: devices.updatedAt,
   };
+}
+
+export async function devicesList(ctx: AuthContext, input: unknown) {
+  const parsed = devicesListInput.parse(input);
+  const limit = parsed.limit || 50;
+  const offset = parsed.offset || 0;
+
+  // NEVER return api_key_hash: it IS the HMAC signing key, so leaking it lets anyone forge
+  // a device's /ingest signatures. Also drop SIM identifiers (PII). Select safe columns only.
+  const cols = deviceSafeColumns();
 
   if (parsed.siteId) {
     await requireSiteAccess(ctx, parsed.siteId);
@@ -704,10 +707,10 @@ export async function devicesList(ctx: AuthContext, input: unknown) {
 export async function devicesGet(ctx: AuthContext, input: unknown) {
   const parsed = devicesGetInput.parse(input);
 
-  // Never expose api_key_hash (the HMAC signing key).
+  // Never expose api_key_hash (the HMAC signing key) or SIM identifiers (PII).
   const device = await db.query.devices.findFirst({
     where: eq(devices.id, parsed.deviceId),
-    columns: { apiKeyHash: false },
+    columns: { apiKeyHash: false, simIccid: false, simMsisdn: false, simProvider: false },
   });
 
   if (!device) {
@@ -715,12 +718,11 @@ export async function devicesGet(ctx: AuthContext, input: unknown) {
   }
 
   // Authorize on the device's site. A device with NO site (freshly provisioned) belongs to
-  // no org yet, so it's operator-only — otherwise any signed-in user could read it.
-  if (device.siteId) {
-    await requireSiteAccess(ctx, device.siteId);
-  } else {
-    await requirePlatformOperator(ctx.userId);
+  // no org yet, so it's off-limits here — operators manage unassigned hardware via admin.*.
+  if (!device.siteId) {
+    throw new ForbiddenError("No access to unassigned device");
   }
+  await requireSiteAccess(ctx, device.siteId);
 
   return device;
 }
@@ -760,14 +762,12 @@ export async function devicesRotateKey(ctx: AuthContext, input: unknown) {
     throw new Error("Device not found");
   }
 
-  // Authorize on the device's site; an unassigned device (no site) is operator-only —
-  // otherwise a cross-tenant caller could rotate its key and receive the new secret,
-  // hijacking ingestion once the device is deployed.
-  if (device.siteId) {
-    await requireSiteAccess(ctx, device.siteId);
-  } else {
-    await requirePlatformOperator(ctx.userId);
+  // Rotating a device key hands back a new signing secret — site-admin only, and never on
+  // an unassigned device (a cross-tenant caller could otherwise hijack its ingestion).
+  if (!device.siteId) {
+    throw new ForbiddenError("No access to unassigned device");
   }
+  await requireSiteAdmin(ctx, device.siteId);
 
   const deviceSecret = randomBytes(32).toString("hex");
   const deviceSecretHash = createHash("sha256").update(deviceSecret).digest("hex");
@@ -791,9 +791,10 @@ export async function devicesGetHealth(ctx: AuthContext, input: unknown) {
     throw new Error("Device not found");
   }
 
-  if (device.siteId) {
-    await requireSiteAccess(ctx, device.siteId);
+  if (!device.siteId) {
+    throw new ForbiddenError("No access to unassigned device");
   }
+  await requireSiteAccess(ctx, device.siteId);
 
   return {
     deviceId: device.id,
@@ -815,12 +816,14 @@ export async function devicesUpdateSite(ctx: AuthContext, input: unknown) {
     throw new Error("Device not found");
   }
 
-  if (device.siteId) {
-    await requireSiteAccess(ctx, device.siteId);
+  // Moving a device is a site-admin action on BOTH the current site and the destination.
+  // An unassigned device is operator-managed (admin.*), not movable via this endpoint.
+  if (!device.siteId) {
+    throw new ForbiddenError("No access to unassigned device");
   }
-
+  await requireSiteAdmin(ctx, device.siteId);
   if (parsed.siteId) {
-    await requireSiteAccess(ctx, parsed.siteId);
+    await requireSiteAdmin(ctx, parsed.siteId);
   }
 
   await db.update(devices).set({ siteId: parsed.siteId }).where(eq(devices.id, parsed.deviceId));
@@ -857,7 +860,7 @@ export async function metersCreate(ctx: AuthContext, input: unknown) {
     throw new Error("Device not found");
   }
 
-  await requireSiteAccess(ctx, parsed.siteId);
+  await requireSiteEditor(ctx, parsed.siteId);
 
   const meterId = randomUUID();
   await db.insert(meters).values({
@@ -887,7 +890,7 @@ export async function metersCommission(ctx: AuthContext, input: unknown) {
     throw new Error("Meter not found");
   }
 
-  await requireSiteAccess(ctx, meter.siteId);
+  await requireSiteEditor(ctx, meter.siteId);
 
   const now = new Date();
   await db
@@ -921,7 +924,7 @@ export async function billingPoliciesGet(ctx: AuthContext, input: unknown) {
 
 export async function billingPoliciesSet(ctx: AuthContext, input: unknown) {
   const parsed = billingPoliciesSetInput.parse(input);
-  await requireSiteAccess(ctx, parsed.siteId);
+  await requireSiteEditor(ctx, parsed.siteId);
 
   const site = await db.query.sites.findFirst({
     where: eq(sites.id, parsed.siteId),
@@ -1036,7 +1039,7 @@ export async function billingPeriodsMaterialize(ctx: AuthContext, input: unknown
 
 export async function billingPeriodsUpsert(ctx: AuthContext, input: unknown) {
   const parsed = billingPeriodsUpsertInput.parse(input);
-  await requireSiteAccess(ctx, parsed.siteId);
+  await requireSiteEditor(ctx, parsed.siteId);
 
   const existing = await db.query.billingPeriods.findFirst({
     where: and(
@@ -1096,7 +1099,7 @@ export async function billingPeriodsClose(ctx: AuthContext, input: unknown) {
     throw new Error("Period not found");
   }
 
-  await requireSiteAccess(ctx, period.siteId);
+  await requireSiteEditor(ctx, period.siteId);
 
   await db
     .update(billingPeriods)
@@ -1286,7 +1289,7 @@ export async function tariffsProfilesListRates(_ctx: AuthContext, input: unknown
 
 export async function tariffsAssignSet(ctx: AuthContext, input: unknown) {
   const parsed = tariffsAssignSetInput.parse(input);
-  await requireSiteAccess(ctx, parsed.siteId);
+  await requireSiteEditor(ctx, parsed.siteId);
 
   const profile = await db.query.tariffProfiles.findFirst({
     where: eq(tariffProfiles.id, parsed.tariffProfileId),
@@ -1294,6 +1297,12 @@ export async function tariffsAssignSet(ctx: AuthContext, input: unknown) {
 
   if (!profile) {
     throw new Error("Tariff profile not found");
+  }
+
+  // The profile must be a shared library tariff OR belong to the caller's own org — never
+  // another org's custom profile.
+  if (profile.source !== "library" && profile.organizationId !== ctx.organizationId) {
+    throw new ForbiddenError("Tariff profile not in your organization");
   }
 
   if (parsed.role === "legal_ceiling" && !profile.validatedByAttorney) {

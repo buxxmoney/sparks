@@ -16,7 +16,7 @@ import {
 } from "@sparks/db";
 import { eq } from "drizzle-orm";
 import type { AuthContext } from "../middleware";
-import { buildComponentComparison } from "../reconciliation";
+import { buildComponentComparison, priceSegments } from "../reconciliation";
 import {
   reconciliationFinalize,
   reconciliationGenerate,
@@ -24,7 +24,7 @@ import {
   reconciliationList,
   reconciliationListVersions,
 } from "../routers";
-import type { PricingBreakdown } from "../tariffs";
+import type { PricingBreakdown, TariffRate } from "../tariffs";
 
 const db = getDb();
 
@@ -755,9 +755,11 @@ describe("Reconciliation Engine", () => {
         where: eq(reconciliations.id, result.reconId),
       });
 
-      // Jan slice: 200 kWh * 2.50 = R500 (50000c) + max demand 50 * R100 = R5000 (500000c)
-      // Feb slice: 200 kWh * 3.00 = R600 (60000c) + max demand 60 * R120 = R7200 (720000c)
-      expect(recon?.expectedLandlordCents).toBe(50000 + 500000 + 60000 + 720000);
+      // Active energy is priced PER SLICE and summed: Jan 200 kWh × R2.50 = 50000c,
+      // Feb 200 kWh × R3.00 = 60000c. Demand is a monthly PEAK charge, counted ONCE on the
+      // period peak (60 kVA in Feb × R120 = 720000c) — NOT summed per slice, which would
+      // double-charge demand (the old bug added Jan's 500000c too).
+      expect(recon?.expectedLandlordCents).toBe(50000 + 60000 + 720000);
       // The stored FK is the profile effective at the period start (January's tariff).
       expect(recon?.landlordTariffProfileId).toBe(landlordTariffId);
     });
@@ -860,5 +862,55 @@ describe("Reconciliation Engine", () => {
       expect(Number(reconHalfOpen?.measuredActiveKwh)).toBe(100); // edge interval excluded
       expect(Number(reconInclusive?.measuredActiveKwh)).toBe(200); // edge interval included
     });
+  });
+});
+
+describe("priceSegments — period-level charges counted once across a tariff change", () => {
+  const rate = (
+    chargeType: TariffRate["chargeType"],
+    unit: TariffRate["unit"],
+    rateValue: number,
+  ): TariffRate => ({ chargeType, unit, rateValue, season: "all", touPeriod: "all" });
+
+  it("charges fixed + demand ONCE (not per segment) but sums per-kWh energy", () => {
+    const seg1 = {
+      usage: { activeKwh: 100, maxDemandKva: 50, reactiveKvarh: 0 },
+      profile: {
+        rates: [
+          rate("active_energy", "c_per_kwh", 2),
+          rate("fixed", "r_per_month", 100),
+          rate("demand", "r_per_kva", 10),
+        ],
+      },
+    };
+    const seg2 = {
+      usage: { activeKwh: 100, maxDemandKva: 60, reactiveKvarh: 0 },
+      profile: {
+        rates: [
+          rate("active_energy", "c_per_kwh", 3),
+          rate("fixed", "r_per_month", 100),
+          rate("demand", "r_per_kva", 10),
+        ],
+      },
+    };
+    const r = priceSegments([seg1, seg2]);
+    // Per-kWh energy sums across slices: 100×2 + 100×3 = R500 = 50000c.
+    expect(r.activeEnergyCents).toBe(50000);
+    // Fixed service charge counted ONCE (R100 = 10000c), not doubled to 20000c.
+    expect(r.fixedCents).toBe(10000);
+    // Demand once = the peak segment: 60 kVA × R10 = 60000c (not 50000 + 60000).
+    expect(r.demandCents).toBe(60000);
+    expect(r.totalCents).toBe(50000 + 60000 + 10000);
+  });
+
+  it("a single segment is unchanged (identical to a plain priceUsage)", () => {
+    const r = priceSegments([
+      {
+        usage: { activeKwh: 100, maxDemandKva: 50, reactiveKvarh: 0 },
+        profile: { rates: [rate("active_energy", "c_per_kwh", 2), rate("fixed", "r_per_month", 100)] },
+      },
+    ]);
+    expect(r.activeEnergyCents).toBe(20000);
+    expect(r.fixedCents).toBe(10000);
   });
 });

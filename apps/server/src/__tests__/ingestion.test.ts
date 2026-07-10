@@ -183,9 +183,14 @@ describe("Device Ingestion API (mounted route)", () => {
 
     expect(intervals.length).toBe(2);
     expect(new Date(intervals[0]!.intervalStart).toISOString()).toBe("2026-07-15T23:30:00.000Z");
-    expect(intervals[0]!.activeEnergyKwh).toBe("2.000");
+    expect(intervals[0]!.activeEnergyKwh).toBe("2.000"); // 200 → register at 00:00 (last ≤ 00:00 = 202)
     expect(new Date(intervals[1]!.intervalStart).toISOString()).toBe("2026-07-16T00:00:00.000Z");
-    expect(intervals[1]!.activeEnergyKwh).toBe("3.000");
+    // 202 → 206: the 1 kWh consumed across the 23:55→00:05 boundary is attributed here (the old
+    // first/last-within-interval logic dropped it, giving 3.000 and losing energy).
+    expect(intervals[1]!.activeEnergyKwh).toBe("4.000");
+    // Register-at-boundary conserves energy: Σ deltas = 2 + 4 = 6 = last(206) − first(200).
+    const total = intervals.reduce((s, iv) => s + Number.parseFloat(iv.activeEnergyKwh ?? "0"), 0);
+    expect(total).toBeCloseTo(6, 3);
   });
 
   // Golden-file (R1): a dropped mid-interval minute must not bias interval energy —
@@ -222,6 +227,34 @@ describe("Device Ingestion API (mounted route)", () => {
     // Only 5 of 30 expected samples present → flagged incomplete for downstream gap handling.
     expect(iv.sampleCount).toBe(5);
     expect(iv.isComplete).toBe(false);
+  });
+
+  // R1 (rollover): a cumulative register that DECREASES across a boundary (meter reset /
+  // register wrap) must yield 0 interval energy, never a negative delta.
+  it("clamps a rollover/reset (decreasing register) to 0, not negative energy", async () => {
+    const body = {
+      timestamp: "2026-07-15T00:00:00Z",
+      readings: [
+        { meterId: testMeterId, time: "2026-07-15T00:00:00Z", seq: 1, activeEnergyKwh: "100.000" },
+        { meterId: testMeterId, time: "2026-07-15T00:20:00Z", seq: 2, activeEnergyKwh: "105.000" },
+        // Register resets to 50 — the next interval's delta (52 − 105) is negative.
+        { meterId: testMeterId, time: "2026-07-15T00:35:00Z", seq: 3, activeEnergyKwh: "50.000" },
+        { meterId: testMeterId, time: "2026-07-15T00:50:00Z", seq: 4, activeEnergyKwh: "52.000" },
+      ],
+    };
+    const res = await postSigned("/ingest/readings", testDeviceId, testDeviceKey, body);
+    expect(res.status).toBe(200);
+
+    const intervals = await db
+      .select()
+      .from(demandIntervals)
+      .where(eq(demandIntervals.meterId, testMeterId))
+      .orderBy(asc(demandIntervals.intervalStart));
+
+    expect(intervals.length).toBe(2);
+    expect(intervals[0]!.activeEnergyKwh).toBe("5.000"); // 100 → 105
+    expect(intervals[1]!.activeEnergyKwh).toBe("0.000"); // 105 → 52 would be −53; clamped to 0
+    expect(Number.parseFloat(intervals[1]!.avgDemandKw ?? "0")).toBeGreaterThanOrEqual(0);
   });
 
   describe("POST /device/commission", () => {

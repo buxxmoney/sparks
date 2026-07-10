@@ -348,7 +348,7 @@ export const invoicesUploadAndParseInput = z.object({
   filename: z.string().max(255).optional(),
   // The PDF bytes, base64-encoded (the web file input reads the file client-side).
   // The billing period is read FROM the invoice by the parser, not chosen here.
-  contentBase64: z.string().min(1),
+  contentBase64: z.string().min(1).max(20_000_000), // ~15 MB decoded — reject oversize before Buffer.from
 });
 
 // Correct the invoice's billing period (dates read from the invoice, editable in
@@ -443,7 +443,7 @@ export const adminReviewReconciliationInput = z.object({
   body: z.string().min(1).max(8000),
   // Zero or more PDF documents to attach to the outcome (each base64-encoded).
   attachments: z
-    .array(z.object({ name: z.string().min(1).max(200), base64: z.string().min(1) }))
+    .array(z.object({ name: z.string().min(1).max(200), base64: z.string().min(1).max(20_000_000) }))
     .max(10)
     .optional(),
 });
@@ -532,7 +532,7 @@ export const tariffSchedulesCreateInput = z.object({
   effectiveFrom: z.coerce.date(),
   effectiveTo: z.coerce.date().optional(),
   filename: z.string().max(300),
-  contentBase64: z.string().min(1),
+  contentBase64: z.string().min(1).max(20_000_000), // ~15 MB decoded — reject oversize before Buffer.from
 });
 
 export const tariffSchedulesDeleteInput = z.object({

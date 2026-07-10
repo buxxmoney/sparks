@@ -1,9 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
-import { devices, getDb, member, organization, siteAccess, sites, user } from "@sparks/db";
+import {
+  devices,
+  getDb,
+  member,
+  organization,
+  siteAccess,
+  sites,
+  tariffProfiles,
+  user,
+} from "@sparks/db";
 import type { AuthContext } from "../middleware";
 import { signDeviceBody } from "../ingestion";
-import { devicesGet, devicesList, devicesRotateKey, sitesUpdate } from "../routers";
+import { devicesGet, devicesList, devicesRotateKey, sitesUpdate, tariffsAssignSet } from "../routers";
 
 // Adversarial cross-tenant / privilege tests written for the security audit. Each
 // documents a CURRENTLY-FAILING guard: the assertion encodes the SECURE behaviour,
@@ -64,6 +73,7 @@ describe("AUDIT — tenant isolation & privilege", () => {
   });
 
   afterEach(async () => {
+    await db.delete(tariffProfiles).where(true as never);
     await db.delete(devices).where(true as never);
     await db.delete(siteAccess).where(true as never);
     await db.delete(sites).where(true as never);
@@ -115,5 +125,30 @@ describe("AUDIT — tenant isolation & privilege", () => {
     ).rejects.toThrow();
     const after = await db.query.sites.findFirst({ where: (s, { eq }) => eq(s.id, siteA) });
     expect(after?.name).toBe("Site A");
+  });
+
+  it("F4: tariffs.assign.set must reject a tariff profile from another org", async () => {
+    // A CUSTOM tariff profile owned by Org B.
+    const [orgBProfile] = await db
+      .insert(tariffProfiles)
+      .values({
+        organizationId: orgB,
+        name: "Org B tariff",
+        type: "landlord_stated",
+        source: "custom",
+        currency: "ZAR",
+        effectiveFrom: new Date(2020, 0, 1),
+      })
+      .returning();
+    // ownerA is an Org A owner (so passes the editor check on Site A) but must NOT be able
+    // to assign Org B's private profile to their site.
+    await expect(
+      tariffsAssignSet(ctx(ownerA, orgA), {
+        siteId: siteA,
+        tariffProfileId: orgBProfile.id,
+        role: "landlord",
+        effectiveFrom: new Date(2020, 0, 1),
+      }),
+    ).rejects.toThrow();
   });
 });
