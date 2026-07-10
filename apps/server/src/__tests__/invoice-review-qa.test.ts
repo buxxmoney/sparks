@@ -86,7 +86,7 @@ describe("Invoice review & QA overhaul", () => {
 
     await db.insert(siteAccess).values({ siteId, userId: ownerUserId, role: "owner" });
 
-    const [device] = await db
+    await db
       .insert(devices)
       .values({
         siteId,
@@ -98,7 +98,7 @@ describe("Invoice review & QA overhaul", () => {
       .returning();
     const [meter] = await db
       .insert(meters)
-      .values({ deviceId: device.id, siteId, serialNumber: `qa-m-${Date.now()}`, model: "SDM630MCT" })
+      .values({ siteId, serialNumber: `qa-m-${Date.now()}`, model: "SDM630MCT" })
       .returning();
 
     const now = new Date();

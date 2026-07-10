@@ -121,19 +121,10 @@ async function seed() {
     console.log("⚡ Creating meter...");
     await db.insert(meters).values({
       id: meterId,
-      deviceId,
       siteId,
       serialNumber: "SDM630-001",
       model: "SDM630MCT",
-      midCertifiedVariant: true,
-      midCertificateRef: "MID-ZA-2024-001",
-      ctRatioPrimary: 100,
-      ctRatioSecondary: 5,
-      phaseConfig: "3P4W",
-      installedByName: "John Electrician",
-      installerRegistration: "WM12345",
       installedAt: new Date("2026-06-01T00:00:00Z"),
-      commissionedAt: new Date("2026-06-05T10:30:00Z"),
     });
 
     // 7. Create legal ceiling tariff

@@ -6,7 +6,8 @@ export interface ReportData {
   reconciliation: Reconciliation;
   site: Site;
   meter: Meter;
-  device: Device;
+  /** Legacy gateway hardware — meters now write directly to the database, so this is optional. */
+  device?: Device | null;
   landlordTariffName: string;
   ceilingTariffName: string | null;
   generatedAt?: Date; // Optional for testing; defaults to now()
@@ -251,31 +252,15 @@ export function renderReportHtml(data: ReportData): string {
         </div>
         <div class="provenance-item">
           <label>Device Serial Number</label>
-          <div class="value">${device.serialNumber}</div>
+          <div class="value">${device?.serialNumber || "—"}</div>
         </div>
         <div class="provenance-item">
           <label>Meter Model</label>
           <div class="value">${meter.model || "—"}</div>
         </div>
         <div class="provenance-item">
-          <label>MID Certificate</label>
-          <div class="value">${meter.midCertificateRef || (meter.midCertifiedVariant ? "MID Certified" : "Not MID Certified")}</div>
-        </div>
-        <div class="provenance-item">
-          <label>CT Ratio</label>
-          <div class="value">${meter.ctRatioPrimary || "—"}:${meter.ctRatioSecondary || "5"}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Phase Configuration</label>
-          <div class="value">${meter.phaseConfig || "—"}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Installer Name & Licence</label>
-          <div class="value">${meter.installedByName || "—"}${meter.installerRegistration ? ` (${meter.installerRegistration})` : ""}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Commissioned Date</label>
-          <div class="value">${meter.commissionedAt ? new Date(meter.commissionedAt).toLocaleDateString("en-ZA") : "—"}</div>
+          <label>Installed Date</label>
+          <div class="value">${meter.installedAt ? new Date(meter.installedAt).toLocaleDateString("en-ZA") : "—"}</div>
         </div>
       </div>
     </div>

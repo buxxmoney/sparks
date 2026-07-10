@@ -358,37 +358,24 @@ export const devices = pgTable(
   }),
 );
 
-export const meters = pgTable(
-  "meters",
-  {
-    id: uuid("id").defaultRandom().primaryKey(),
-    deviceId: uuid("device_id")
-      .notNull()
-      .references(() => devices.id, {
-        onDelete: "cascade",
-      }),
-    siteId: uuid("site_id")
-      .notNull()
-      .references(() => sites.id, {
-        onDelete: "cascade",
-      }),
-    serialNumber: text("serial_number").notNull(),
-    model: text("model").notNull().default("SDM630MCT"),
-    midCertifiedVariant: boolean("mid_certified_variant").notNull().default(true),
-    midCertificateRef: text("mid_certificate_ref"),
-    ctRatioPrimary: integer("ct_ratio_primary"),
-    ctRatioSecondary: integer("ct_ratio_secondary").default(5),
-    phaseConfig: text("phase_config").default("3P4W"),
-    installedByName: text("installed_by_name"),
-    installerRegistration: text("installer_registration"),
-    installedAt: timestamp("installed_at", { withTimezone: true }),
-    commissionedAt: timestamp("commissioned_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => ({
-    deviceIdx: index("meters_device_idx").on(t.deviceId),
-  }),
-);
+/**
+ * Simplified direct-to-Neon model: a meter belongs to a site (no device link) and
+ * authenticates its own database writes with the site's per-site Postgres role
+ * (`meter_site_<uuid>` — see apps/server/src/ingest-roles.ts). Matches the live
+ * Neon table exactly.
+ */
+export const meters = pgTable("meters", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  siteId: uuid("site_id")
+    .notNull()
+    .references(() => sites.id, {
+      onDelete: "cascade",
+    }),
+  serialNumber: text("serial_number").notNull(),
+  model: text("model").notNull().default("SDM630MCT"),
+  installedAt: timestamp("installed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 /* ─────────────── Time-series: readings (PARTITIONED) ─────────────── */
 export const readings = pgTable(

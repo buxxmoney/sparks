@@ -122,7 +122,6 @@ describe("oRPC Routers", () => {
     const meterResult = await db
       .insert(meters)
       .values({
-        deviceId,
         siteId,
         serialNumber: `test-meter-${Date.now()}`,
         model: "SDM630MCT",
@@ -439,7 +438,6 @@ describe("oRPC Routers", () => {
 
     it("should create meter", async () => {
       const result = await metersCreate(ownerCtx, {
-        deviceId,
         siteId,
         serialNumber: `meter-${Date.now()}`,
         model: "SDM630MCT",
@@ -450,11 +448,9 @@ describe("oRPC Routers", () => {
     it("should commission meter", async () => {
       const result = await metersCommission(ownerCtx, {
         meterId,
-        installedByName: "Test Installer",
-        installerRegistration: "LIC-001",
       });
       expect(result.meterId).toBe(meterId);
-      expect(result.commissionedAt).toBeDefined();
+      expect(result.installedAt).toBeDefined();
     });
 
     it("should deny commission without site access", async () => {

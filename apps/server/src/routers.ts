@@ -852,31 +852,20 @@ export async function metersGet(ctx: AuthContext, input: unknown) {
 export async function metersCreate(ctx: AuthContext, input: unknown) {
   const parsed = metersCreateInput.parse(input);
 
-  const device = await db.query.devices.findFirst({
-    where: eq(devices.id, parsed.deviceId),
-  });
-
-  if (!device) {
-    throw new Error("Device not found");
-  }
-
   await requireSiteEditor(ctx, parsed.siteId);
 
-  const meterId = randomUUID();
-  await db.insert(meters).values({
-    id: meterId,
-    deviceId: parsed.deviceId,
-    siteId: parsed.siteId,
-    serialNumber: parsed.serialNumber,
-    model: parsed.model,
-    midCertifiedVariant: parsed.midCertifiedVariant,
-    midCertificateRef: parsed.midCertificateRef,
-    ctRatioPrimary: parsed.ctRatioPrimary,
-    ctRatioSecondary: parsed.ctRatioSecondary,
-    phaseConfig: parsed.phaseConfig,
-  });
+  // The database generates the id — it's the uuid that goes into the meter's
+  // on-device config, so return exactly what Postgres produced.
+  const [meter] = await db
+    .insert(meters)
+    .values({
+      siteId: parsed.siteId,
+      serialNumber: parsed.serialNumber,
+      model: parsed.model,
+    })
+    .returning({ meterId: meters.id });
 
-  return { meterId };
+  return meter;
 }
 
 export async function metersCommission(ctx: AuthContext, input: unknown) {
@@ -893,17 +882,9 @@ export async function metersCommission(ctx: AuthContext, input: unknown) {
   await requireSiteEditor(ctx, meter.siteId);
 
   const now = new Date();
-  await db
-    .update(meters)
-    .set({
-      installedByName: parsed.installedByName,
-      installerRegistration: parsed.installerRegistration,
-      installedAt: now,
-      commissionedAt: now,
-    })
-    .where(eq(meters.id, parsed.meterId));
+  await db.update(meters).set({ installedAt: now }).where(eq(meters.id, parsed.meterId));
 
-  return { meterId: parsed.meterId, commissionedAt: now };
+  return { meterId: parsed.meterId, installedAt: now };
 }
 
 /* ─────────────── Billing Router ─────────────── */

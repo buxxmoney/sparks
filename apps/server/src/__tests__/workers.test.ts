@@ -45,7 +45,6 @@ async function setupTestData() {
 
   await db.insert(meters).values({
     id: testMeterId,
-    deviceId: testDeviceId,
     siteId: testSiteId,
     serialNumber: `METER-${Math.random()}`,
     model: "SDM630MCT",

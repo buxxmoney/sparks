@@ -18,6 +18,12 @@ export const appRouter = {
     listSiteHardware: proc(V.adminListSiteHardwareInput, A.adminListSiteHardware),
     provisionDevice: proc(V.adminProvisionDeviceInput, A.adminProvisionDevice),
     provisionMeter: proc(V.adminProvisionMeterInput, A.adminProvisionMeter),
+    // Per-site Postgres ingest role: meters authenticate directly against Neon.
+    ensureSiteIngestRole: proc(V.adminEnsureSiteIngestRoleInput, A.adminEnsureSiteIngestRole),
+    rotateSiteIngestPassword: proc(
+      V.adminRotateSiteIngestPasswordInput,
+      A.adminRotateSiteIngestPassword,
+    ),
     deleteDevice: proc(V.adminDeleteDeviceInput, A.adminDeleteDevice),
     deleteMeter: proc(V.adminDeleteMeterInput, A.adminDeleteMeter),
     listReviewQueue: procNoInput(A.adminListReviewQueue),
