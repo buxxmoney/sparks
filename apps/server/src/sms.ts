@@ -1,11 +1,10 @@
 /**
- * SMS sender for the "your bill review is ready" nudge. Provider-aware, driven by
- * env:
- *   SMS_PROVIDER   clickatell | twilio   (which integration to use)
- *   SMS_API_KEY    Clickatell One-API integration key (clickatell)
+ * SMS sender for the "your bill review is ready" nudge. Uses Clickatell's One API,
+ * driven by env:
+ *   SMS_PROVIDER   clickatell    (the only supported provider)
+ *   SMS_API_KEY    Clickatell One-API integration key (Authorization header, no "Bearer")
  *   SMS_FROM       optional sender id / number
  *   SMS_API_URL    optional endpoint override
- *   Twilio only:   SMS_ACCOUNT_SID, SMS_AUTH_TOKEN (+ SMS_FROM required)
  *
  * With no/partial config — or under NODE_ENV=test — it logs instead of sending, so
  * the whole notification flow stays testable offline (same contract as sendEmail).
@@ -21,21 +20,17 @@ export async function sendSms(to: string, body: string): Promise<string | null> 
     console.warn(`[sms] SMS_PROVIDER not set — logging instead of sending. to=${to}`);
     return null;
   }
+  if (provider !== "clickatell") {
+    console.warn(`[sms] unsupported SMS_PROVIDER='${provider}' (only 'clickatell') — logging. to=${to}`);
+    return null;
+  }
 
   try {
-    switch (provider) {
-      case "clickatell":
-        return await sendViaClickatell(to, body);
-      case "twilio":
-        return await sendViaTwilio(to, body);
-      default:
-        console.warn(`[sms] unsupported SMS_PROVIDER='${provider}' — logging instead. to=${to}`);
-        return null;
-    }
+    return await sendViaClickatell(to, body);
   } catch (err) {
     // Surface to the caller (the dispatcher records a failed delivery) but keep the
     // message readable.
-    throw new Error(`[sms:${provider}] ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`[sms:clickatell] ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -56,8 +51,11 @@ async function sendViaClickatell(to: string, body: string): Promise<string | nul
     return null;
   }
   const url = process.env.SMS_API_URL || "https://platform.clickatell.com/messages";
-  const message: Record<string, string> = { channel: "sms", to: intlDigits(to), content: body };
-  if (process.env.SMS_FROM) message.from = process.env.SMS_FROM;
+  // Clickatell's /messages endpoint wants a TOP-LEVEL `to` array + `content` — NOT a
+  // `messages:[{channel,to,content}]` wrapper (that shape is silently rejected as
+  // "Empty message content"). `from` is the optional sender id.
+  const payload: Record<string, unknown> = { to: [intlDigits(to)], content: body };
+  if (process.env.SMS_FROM) payload.from = process.env.SMS_FROM;
 
   const res = await fetch(url, {
     method: "POST",
@@ -66,17 +64,22 @@ async function sendViaClickatell(to: string, body: string): Promise<string | nul
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({ messages: [message] }),
+    body: JSON.stringify(payload),
   });
   const text = await res.text();
   if (!res.ok) {
     throw new Error(`send failed (${res.status}): ${text}`);
   }
-  // One API returns { messages: [{ apiMessageId, accepted, ... }] }.
+  // Success shape: { messages: [{ apiMessageId, accepted, to }], error: null }. A
+  // request-level failure carries a top-level `error` with an empty `messages`.
   try {
     const json = JSON.parse(text) as {
+      error?: unknown;
       messages?: Array<{ apiMessageId?: string; messageId?: string; accepted?: boolean; error?: unknown }>;
     };
+    if (json.error) {
+      throw new Error(`request rejected: ${JSON.stringify(json.error)}`);
+    }
     const m = json.messages?.[0];
     if (m && m.accepted === false) {
       throw new Error(`message rejected: ${JSON.stringify(m.error ?? m)}`);
@@ -87,30 +90,4 @@ async function sendViaClickatell(to: string, body: string): Promise<string | nul
     if (e instanceof SyntaxError) return "sent";
     throw e;
   }
-}
-
-/** Twilio Messages API (Basic auth SID:token). SMS_FROM is required. */
-async function sendViaTwilio(to: string, body: string): Promise<string | null> {
-  const sid = process.env.SMS_ACCOUNT_SID;
-  const token = process.env.SMS_AUTH_TOKEN;
-  const from = process.env.SMS_FROM;
-  if (!sid || !token || !from) {
-    console.warn(`[sms:twilio] SMS_ACCOUNT_SID/SMS_AUTH_TOKEN/SMS_FROM not all set — logging. to=${to}`);
-    return null;
-  }
-  const url =
-    process.env.SMS_API_URL || `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({ To: to, From: from, Body: body }).toString(),
-  });
-  if (!res.ok) {
-    throw new Error(`send failed (${res.status}): ${await res.text()}`);
-  }
-  const json = (await res.json().catch(() => ({}))) as { sid?: string };
-  return json.sid ?? "sent";
 }
