@@ -14,7 +14,6 @@ import {
   member,
   meters,
   organization,
-  readings,
   reconciliations,
   siteAccess,
   siteInvitations,
@@ -24,7 +23,13 @@ import {
   tariffRates,
   user,
 } from "@sparks/db";
-import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import {
+  type RawReadingRow,
+  bucketIntervals,
+  peakDemandKva,
+  windowEnergy,
+} from "./live-readings";
 import { auth } from "./auth";
 import { type BillingPeriodPolicy, materializePeriods } from "./billing";
 import { billReviewRequestEmail, sendEmail, siteInviteEmail } from "./email";
@@ -3038,38 +3043,101 @@ export async function profileSetPhone(ctx: AuthContext, input: unknown) {
 
 // Near-real-time load: the most recent instantaneous reading across all of the
 // site's meters. Read-only aggregation over the existing `readings` table.
+// ─────────────── Dashboard reads: sourced from the raw `readings` table ───────────────
+// The Pi writes its formatted meter dump straight into `readings` (measured_at + cumulative
+// energy registers + instantaneous power/VA). That table is NOT the app's older derived
+// shape, so these endpoints query it via raw SQL and hand the rows to the pure aggregators
+// in live-readings.ts. Response shapes are unchanged, so the dashboard UI is untouched.
+
+function toNum(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isNaN(n) ? null : n;
+}
+
+async function siteMeterIds(siteId: string): Promise<string[]> {
+  const rows = await db.select({ id: meters.id }).from(meters).where(eq(meters.siteId, siteId));
+  return rows.map((m) => m.id);
+}
+
+// Fetch raw samples for a site's meters within an optional window, oldest→newest. `to` is
+// inclusive by default; pass endExclusive for half-open period buckets [from, to).
+async function fetchRawReadings(
+  meterIds: string[],
+  opts: { from?: Date; to?: Date; endExclusive?: boolean } = {},
+): Promise<RawReadingRow[]> {
+  if (meterIds.length === 0) return [];
+  const idList = sql.join(
+    meterIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  const conds = [sql`meter_id IN (${idList})`];
+  if (opts.from) conds.push(sql`measured_at >= ${opts.from}`);
+  if (opts.to) conds.push(opts.endExclusive ? sql`measured_at < ${opts.to}` : sql`measured_at <= ${opts.to}`);
+  const where = sql.join(conds, sql` AND `);
+  const res = await db.execute(sql`
+    SELECT meter_id, measured_at, energy_import_kwh, energy_import_kvarh, power_total, va_total
+    FROM readings
+    WHERE ${where}
+    ORDER BY measured_at ASC
+  `);
+  return (res.rows as Record<string, unknown>[]).map((r) => ({
+    meterId: String(r.meter_id),
+    measuredAt: new Date(r.measured_at as string | number | Date),
+    energyImportKwh: toNum(r.energy_import_kwh),
+    energyImportKvarh: toNum(r.energy_import_kvarh),
+    powerTotalW: toNum(r.power_total),
+    vaTotal: toNum(r.va_total),
+  }));
+}
+
+async function siteDemandInterval(siteId: string): Promise<number> {
+  const site = await db.query.sites.findFirst({
+    where: eq(sites.id, siteId),
+    columns: { demandIntervalMinutes: true },
+  });
+  return site?.demandIntervalMinutes ?? 30;
+}
+
 export async function readingsLatest(ctx: AuthContext, input: unknown) {
   const parsed = readingsLatestInput.parse(input);
   await requireSiteAccess(ctx, parsed.siteId);
 
-  const meterRows = await db
-    .select({ id: meters.id })
-    .from(meters)
-    .where(eq(meters.siteId, parsed.siteId));
+  const meterIds = await siteMeterIds(parsed.siteId);
+  if (meterIds.length === 0) return { reading: null };
 
-  const meterIds = meterRows.map((m) => m.id);
-  if (meterIds.length === 0) {
-    return { reading: null };
-  }
+  const idList = sql.join(
+    meterIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  const res = await db.execute(sql`
+    SELECT meter_id, measured_at, power_total, va_total, pf_total
+    FROM readings
+    WHERE meter_id IN (${idList})
+    ORDER BY measured_at DESC
+    LIMIT 1
+  `);
+  const row = (res.rows as Record<string, unknown>[])[0];
+  if (!row) return { reading: null };
 
-  const rows = await db
-    .select({
-      meterId: readings.meterId,
-      time: readings.time,
-      totalPowerKw: readings.totalPowerKw,
-      totalApparentKva: readings.totalApparentKva,
-      powerFactor: readings.powerFactor,
-    })
-    .from(readings)
-    .where(inArray(readings.meterId, meterIds))
-    .orderBy(desc(readings.time))
-    .limit(1);
-
-  return { reading: rows[0] ?? null };
+  const kw = toNum(row.power_total);
+  const kva = toNum(row.va_total);
+  const pf = toNum(row.pf_total);
+  return {
+    reading: {
+      meterId: String(row.meter_id),
+      time: new Date(row.measured_at as string | number | Date).toISOString(),
+      totalPowerKw: kw !== null ? (kw / 1000).toFixed(3) : null,
+      totalApparentKva: kva !== null ? (kva / 1000).toFixed(3) : null,
+      powerFactor: pf !== null ? pf.toFixed(4) : null,
+    },
+  };
 }
 
-// Month-to-date active / demand / reactive for a site, aggregated from the
-// existing `demandIntervals` table. `peakDemandKva` is the max interval demand.
+// Month-to-date active / reactive energy + peak demand for a site, computed from the raw
+// `readings` samples this calendar month. Energy = cumulative-register delta; peak demand =
+// the highest interval-average apparent power. (Fetches the month's samples and aggregates
+// in-process — fine at current volumes; push to SQL aggregation if a meter's row count grows.)
 export async function readingsMonthToDate(ctx: AuthContext, input: unknown) {
   const parsed = readingsMonthToDateInput.parse(input);
   await requireSiteAccess(ctx, parsed.siteId);
@@ -3077,29 +3145,27 @@ export async function readingsMonthToDate(ctx: AuthContext, input: unknown) {
   const now = parsed.asOf ?? new Date();
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
-  const rows = await db
-    .select({
-      activeEnergyKwh: sql<string>`coalesce(sum(${demandIntervals.activeEnergyKwh}), 0)`,
-      reactiveEnergyKvarh: sql<string>`coalesce(sum(${demandIntervals.reactiveEnergyKvarh}), 0)`,
-      peakDemandKva: sql<string>`coalesce(max(${demandIntervals.avgDemandKva}), 0)`,
-      intervalCount: sql<number>`count(*)::int`,
-    })
-    .from(demandIntervals)
-    .where(
-      and(
-        eq(demandIntervals.siteId, parsed.siteId),
-        gte(demandIntervals.intervalStart, periodStart),
-      ),
-    );
+  const meterIds = await siteMeterIds(parsed.siteId);
+  if (meterIds.length === 0) {
+    return {
+      periodStart: periodStart.toISOString(),
+      activeEnergyKwh: "0.000",
+      reactiveEnergyKvarh: "0.000",
+      peakDemandKva: "0.000",
+      intervalCount: 0,
+    };
+  }
 
-  const agg = rows[0];
+  const intervalMinutes = await siteDemandInterval(parsed.siteId);
+  const rows = await fetchRawReadings(meterIds, { from: periodStart, to: now });
+  const energy = windowEnergy(rows);
 
   return {
     periodStart: periodStart.toISOString(),
-    activeEnergyKwh: agg?.activeEnergyKwh ?? "0",
-    reactiveEnergyKvarh: agg?.reactiveEnergyKvarh ?? "0",
-    peakDemandKva: agg?.peakDemandKva ?? "0",
-    intervalCount: agg?.intervalCount ?? 0,
+    activeEnergyKwh: energy.activeEnergyKwh,
+    reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
+    peakDemandKva: peakDemandKva(rows, intervalMinutes),
+    intervalCount: rows.length,
   };
 }
 
@@ -3113,28 +3179,23 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
   await requireSiteAccess(ctx, parsed.siteId);
   const limit = parsed.limit ?? 12;
 
+  const meterIds = await siteMeterIds(parsed.siteId);
+
   const periods = await db.query.billingPeriods.findMany({
     where: eq(billingPeriods.siteId, parsed.siteId),
     orderBy: [asc(billingPeriods.periodStart)],
   });
 
   if (periods.length > 0) {
-    // Bucket by real billing periods (half-open [start, end)).
+    // Bucket by real billing periods (half-open [start, end)); energy = register delta.
     const buckets = await Promise.all(
       periods.map(async (p) => {
-        const [row] = await db
-          .select({
-            activeEnergyKwh: sql<string>`coalesce(sum(${demandIntervals.activeEnergyKwh}), 0)`,
-            reactiveEnergyKvarh: sql<string>`coalesce(sum(${demandIntervals.reactiveEnergyKvarh}), 0)`,
-          })
-          .from(demandIntervals)
-          .where(
-            and(
-              eq(demandIntervals.siteId, parsed.siteId),
-              gte(demandIntervals.intervalStart, p.periodStart),
-              lt(demandIntervals.intervalStart, p.periodEnd),
-            ),
-          );
+        const rows = await fetchRawReadings(meterIds, {
+          from: new Date(p.periodStart),
+          to: new Date(p.periodEnd),
+          endExclusive: true,
+        });
+        const energy = windowEnergy(rows);
         return {
           label:
             p.label ??
@@ -3144,37 +3205,41 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
             }),
           periodStart: new Date(p.periodStart).toISOString(),
           periodEnd: new Date(p.periodEnd).toISOString(),
-          activeEnergyKwh: row?.activeEnergyKwh ?? "0",
-          reactiveEnergyKvarh: row?.reactiveEnergyKvarh ?? "0",
+          activeEnergyKwh: energy.activeEnergyKwh,
+          reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
         };
       }),
     );
     return { basis: "billing_period" as const, periods: buckets.slice(-limit) };
   }
 
-  // Fallback: group by calendar month (UTC) straight from the interval table.
-  const monthRows = await db
-    .select({
-      monthStart: sql<string>`date_trunc('month', ${demandIntervals.intervalStart})`,
-      activeEnergyKwh: sql<string>`coalesce(sum(${demandIntervals.activeEnergyKwh}), 0)`,
-      reactiveEnergyKvarh: sql<string>`coalesce(sum(${demandIntervals.reactiveEnergyKvarh}), 0)`,
-    })
-    .from(demandIntervals)
-    .where(eq(demandIntervals.siteId, parsed.siteId))
-    .groupBy(sql`date_trunc('month', ${demandIntervals.intervalStart})`)
-    .orderBy(asc(sql`date_trunc('month', ${demandIntervals.intervalStart})`));
+  // Fallback: group the site's raw samples by calendar month (UTC) and delta each month.
+  const allRows = await fetchRawReadings(meterIds);
+  const byMonth = new Map<string, RawReadingRow[]>();
+  for (const r of allRows) {
+    const key = `${r.measuredAt.getUTCFullYear()}-${r.measuredAt.getUTCMonth()}`;
+    const arr = byMonth.get(key);
+    if (arr) arr.push(r);
+    else byMonth.set(key, [r]);
+  }
 
-  const months = monthRows.map((r) => {
-    const start = new Date(r.monthStart);
-    const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1));
-    return {
-      label: start.toLocaleDateString("en-ZA", { month: "short", year: "2-digit" }),
-      periodStart: start.toISOString(),
-      periodEnd: end.toISOString(),
-      activeEnergyKwh: r.activeEnergyKwh,
-      reactiveEnergyKvarh: r.reactiveEnergyKvarh,
-    };
-  });
+  const months = [...byMonth.entries()]
+    .map(([key, rows]) => {
+      const [y, m] = key.split("-").map(Number);
+      const start = new Date(Date.UTC(y, m, 1));
+      const end = new Date(Date.UTC(y, m + 1, 1));
+      const energy = windowEnergy(rows);
+      return {
+        label: start.toLocaleDateString("en-ZA", { month: "short", year: "2-digit" }),
+        periodStart: start.toISOString(),
+        periodEnd: end.toISOString(),
+        activeEnergyKwh: energy.activeEnergyKwh,
+        reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
+        _sort: start.getTime(),
+      };
+    })
+    .sort((a, b) => a._sort - b._sort)
+    .map(({ _sort, ...rest }) => rest);
 
   return { basis: "calendar_month" as const, periods: months.slice(-limit) };
 }
@@ -3189,38 +3254,17 @@ export async function demandListIntervals(ctx: AuthContext, input: unknown) {
   const to = parsed.to ?? new Date();
   const from = parsed.from ?? new Date(to.getTime() - 24 * 60 * 60 * 1000);
 
-  const rows = await db
-    .select({
-      intervalStart: demandIntervals.intervalStart,
-      intervalMinutes: demandIntervals.intervalMinutes,
-      activeEnergyKwh: sql<string>`coalesce(sum(${demandIntervals.activeEnergyKwh}), 0)`,
-      reactiveEnergyKvarh: sql<string>`coalesce(sum(${demandIntervals.reactiveEnergyKvarh}), 0)`,
-      avgDemandKw: sql<string>`coalesce(sum(${demandIntervals.avgDemandKw}), 0)`,
-      avgDemandKva: sql<string>`coalesce(sum(${demandIntervals.avgDemandKva}), 0)`,
-      isComplete: sql<boolean>`bool_and(${demandIntervals.isComplete})`,
-    })
-    .from(demandIntervals)
-    .where(
-      and(
-        eq(demandIntervals.siteId, parsed.siteId),
-        gte(demandIntervals.intervalStart, from),
-        lte(demandIntervals.intervalStart, to),
-      ),
-    )
-    .groupBy(demandIntervals.intervalStart, demandIntervals.intervalMinutes)
-    .orderBy(asc(demandIntervals.intervalStart));
+  const meterIds = await siteMeterIds(parsed.siteId);
+  if (meterIds.length === 0) {
+    return { from: from.toISOString(), to: to.toISOString(), intervals: [] };
+  }
+
+  const intervalMinutes = await siteDemandInterval(parsed.siteId);
+  const rows = await fetchRawReadings(meterIds, { from, to });
 
   return {
     from: from.toISOString(),
     to: to.toISOString(),
-    intervals: rows.map((r) => ({
-      intervalStart: new Date(r.intervalStart).toISOString(),
-      intervalMinutes: r.intervalMinutes,
-      activeEnergyKwh: r.activeEnergyKwh,
-      reactiveEnergyKvarh: r.reactiveEnergyKvarh,
-      avgDemandKw: r.avgDemandKw,
-      avgDemandKva: r.avgDemandKva,
-      isComplete: r.isComplete,
-    })),
+    intervals: bucketIntervals(rows, intervalMinutes),
   };
 }
