@@ -170,21 +170,13 @@ export const metersGetInput = z.object({
 });
 
 export const metersCreateInput = z.object({
-  deviceId: z.string().uuid(),
   siteId: z.string().uuid(),
   serialNumber: z.string().min(1).max(255),
   model: z.string().default("SDM630MCT"),
-  midCertifiedVariant: z.boolean().default(true),
-  midCertificateRef: z.string().max(255).optional(),
-  ctRatioPrimary: z.number().int().positive().optional(),
-  ctRatioSecondary: z.number().int().positive().default(5),
-  phaseConfig: z.string().default("3P4W"),
 });
 
 export const metersCommissionInput = z.object({
   meterId: z.string().uuid(),
-  installedByName: z.string().max(255).optional(),
-  installerRegistration: z.string().max(255).optional(),
 });
 
 /* ─────────────── Billing ─────────────── */
@@ -502,12 +494,18 @@ export const adminProvisionDeviceInput = z.object({
 });
 
 export const adminProvisionMeterInput = z.object({
-  deviceId: z.string().uuid(),
+  siteId: z.string().uuid(),
   serialNumber: z.string().min(1).max(120),
   model: z.string().min(1).max(60).default("SDM630MCT"),
-  ctRatioPrimary: z.number().int().positive().optional(),
-  ctRatioSecondary: z.number().int().positive().optional(),
-  phaseConfig: z.string().max(20).optional(),
+});
+
+// Per-site Postgres ingest role (meters authenticate directly against Neon).
+export const adminEnsureSiteIngestRoleInput = z.object({
+  siteId: z.string().uuid(),
+});
+
+export const adminRotateSiteIngestPasswordInput = z.object({
+  siteId: z.string().uuid(),
 });
 
 export const adminDeleteDeviceInput = z.object({

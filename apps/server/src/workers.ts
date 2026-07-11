@@ -448,16 +448,11 @@ export async function generateReportPdf(
     );
   }
 
-  // Get device data
+  // Meters write directly to the database now — a gateway device is legacy hardware
+  // that a site may or may not still have, so it's best-effort provenance only.
   const device = await db.query.devices.findFirst({
-    where: eq(devices.id, meter.deviceId),
+    where: eq(devices.siteId, recon.siteId),
   });
-
-  if (!device) {
-    throw new PreconditionError(
-      "The meter on this site isn't linked to a device yet, so a sealed dispute PDF can't be generated.",
-    );
-  }
 
   // Get tariff names and validate legal_ceiling attorney status
   let landlordTariffName = "Unknown";

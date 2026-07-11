@@ -73,7 +73,6 @@ describe("Reconciliation Engine", () => {
   const orgId = "test-org-recon";
   const siteOwnerUserId = "test-site-owner-recon";
   let siteId: string;
-  let deviceId: string;
   let meterId: string;
   let billingPeriodId: string;
   let landlordTariffId: string;
@@ -107,28 +106,21 @@ describe("Reconciliation Engine", () => {
     });
 
     // Create device
-    const deviceResult = await db
-      .insert(devices)
-      .values({
-        siteId,
-        serialNumber: `recon-device-${Date.now()}`,
-        hardwareModel: "rpi",
-        apiKeyHash: "test-hash",
-        status: "online",
-      })
-      .returning();
-
-    deviceId = deviceResult[0].id;
+    await db.insert(devices).values({
+      siteId,
+      serialNumber: `recon-device-${Date.now()}`,
+      hardwareModel: "rpi",
+      apiKeyHash: "test-hash",
+      status: "online",
+    });
 
     // Create meter
     const meterResult = await db
       .insert(meters)
       .values({
-        deviceId,
         siteId,
         serialNumber: `recon-meter-${Date.now()}`,
         model: "SDM630MCT",
-        midCertifiedVariant: true,
       })
       .returning();
 

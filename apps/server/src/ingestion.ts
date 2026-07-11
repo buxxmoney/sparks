@@ -305,6 +305,15 @@ export function createIngestionRouter() {
     let highestSeq = 0;
     const affectedMeters = new Set<string>();
 
+    // Meters no longer link to a device — scope by site instead: a device may only
+    // submit readings for meters on its own site.
+    const deviceRow = (
+      await db.select().from(devices).where(eq(devices.id, deviceId)).limit(1)
+    )[0];
+    if (!deviceRow?.siteId) {
+      return c.json({ error: "Device is not assigned to a site" }, 403);
+    }
+
     for (const reading of parsed.readings) {
       const meterList = await db
         .select()
@@ -313,7 +322,7 @@ export function createIngestionRouter() {
         .limit(1);
 
       const meter = meterList[0];
-      if (!meter || meter.deviceId !== deviceId) {
+      if (!meter || meter.siteId !== deviceRow.siteId) {
         return c.json({ error: `Meter ${reading.meterId} not found or not on device` }, 404);
       }
 

@@ -16,6 +16,7 @@ import {
 } from "@sparks/db";
 import { auth } from "./auth";
 import { sendEmail } from "./email";
+import { ensureSiteIngestRole, rotateSiteIngestPassword, siteIngestRoleName } from "./ingest-roles";
 import { extractPdfText } from "./invoices";
 import { llamaParseConfigured, parseScheduleToMarkdown } from "./llamaparse";
 import { PreconditionError, requirePlatformOperator, type AuthContext } from "./middleware";
@@ -26,12 +27,14 @@ import {
   adminDeleteDeviceInput,
   adminDeleteMeterInput,
   adminDeleteOrganizationInput,
+  adminEnsureSiteIngestRoleInput,
   adminListOrgSitesInput,
   adminListReviewedBillsInput,
   adminListSiteHardwareInput,
   adminProvisionDeviceInput,
   adminProvisionMeterInput,
   adminReviewReconciliationInput,
+  adminRotateSiteIngestPasswordInput,
   tariffSchedulesCreateInput,
   tariffSchedulesDeleteInput,
 } from "./validators";
@@ -247,19 +250,19 @@ export async function adminListSiteHardware(ctx: AuthContext, input: unknown) {
   const meterRows = await db
     .select({
       id: meters.id,
-      deviceId: meters.deviceId,
       serialNumber: meters.serialNumber,
       model: meters.model,
+      installedAt: meters.installedAt,
       createdAt: meters.createdAt,
     })
     .from(meters)
-    .where(eq(meters.siteId, parsed.siteId));
+    .where(eq(meters.siteId, parsed.siteId))
+    .orderBy(desc(meters.createdAt));
 
   return {
-    devices: deviceRows.map((d) => ({
-      ...d,
-      meters: meterRows.filter((m) => m.deviceId === d.id),
-    })),
+    devices: deviceRows,
+    meters: meterRows,
+    ingestRoleName: siteIngestRoleName(parsed.siteId),
   };
 }
 
@@ -294,33 +297,67 @@ export async function adminProvisionDevice(ctx: AuthContext, input: unknown) {
 }
 
 /**
- * Operator-only: add a meter under a device. Returns the meterId — the value that goes in
- * the device JWT's `meterId` claim (mint offline with scripts/mint-device-jwt.ts). The
- * meter's site is inherited from its device.
+ * Operator-only: add a meter directly under a site. Returns the database-generated
+ * meterId — the uuid that goes into the meter reader's config file alongside the
+ * site's ingest-role credentials (see adminEnsureSiteIngestRole).
  */
 export async function adminProvisionMeter(ctx: AuthContext, input: unknown) {
   const parsed = adminProvisionMeterInput.parse(input);
   await requirePlatformOperator(ctx.userId);
   const db = getDb();
 
-  const device = await db.query.devices.findFirst({ where: eq(devices.id, parsed.deviceId) });
-  if (!device || !device.siteId) {
-    throw new PreconditionError("Device not found or not assigned to a site");
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
+  if (!site) {
+    throw new PreconditionError("Site not found");
   }
 
-  const meterId = randomUUID();
-  await db.insert(meters).values({
-    id: meterId,
-    deviceId: parsed.deviceId,
-    siteId: device.siteId,
-    serialNumber: parsed.serialNumber,
-    model: parsed.model,
-    ctRatioPrimary: parsed.ctRatioPrimary ?? null,
-    ctRatioSecondary: parsed.ctRatioSecondary ?? null,
-    phaseConfig: parsed.phaseConfig ?? null,
-  });
+  const [meter] = await db
+    .insert(meters)
+    .values({
+      siteId: parsed.siteId,
+      serialNumber: parsed.serialNumber,
+      model: parsed.model,
+    })
+    .returning({ meterId: meters.id });
 
-  return { meterId };
+  return meter;
+}
+
+/**
+ * Operator-only: make sure the site's Postgres ingest role exists (creating it with a
+ * freshly generated password if not) and that its grants + RLS scoping are applied.
+ * `password` is non-null only when the role was created by this call — it is shown
+ * once in the UI, written onto the meter reader, and never stored by us.
+ */
+export async function adminEnsureSiteIngestRole(ctx: AuthContext, input: unknown) {
+  const parsed = adminEnsureSiteIngestRoleInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
+  if (!site) {
+    throw new PreconditionError("Site not found");
+  }
+
+  return ensureSiteIngestRole(db, parsed.siteId);
+}
+
+/**
+ * Operator-only: rotate the site ingest role's password (lost credential, stolen or
+ * decommissioned meter). Every meter reader on the site must be updated with the new
+ * password — the old one stops working immediately.
+ */
+export async function adminRotateSiteIngestPassword(ctx: AuthContext, input: unknown) {
+  const parsed = adminRotateSiteIngestPasswordInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  const db = getDb();
+
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, parsed.siteId) });
+  if (!site) {
+    throw new PreconditionError("Site not found");
+  }
+
+  return rotateSiteIngestPassword(db, parsed.siteId);
 }
 
 /** Operator-only: remove a device (cascades its meters + all their readings). */

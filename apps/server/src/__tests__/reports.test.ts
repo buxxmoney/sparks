@@ -28,7 +28,6 @@ describe("Report PDF Generation", () => {
   const orgId = "test-org-reports";
   const userId = "test-user-reports";
   let siteId: string;
-  let deviceId: string;
   let meterId: string;
   let billingPeriodId: string;
   let landlordTariffId: string;
@@ -61,36 +60,22 @@ describe("Report PDF Generation", () => {
     });
 
     // Create device
-    const deviceResult = await db
-      .insert(devices)
-      .values({
-        siteId,
-        serialNumber: `report-device-${Date.now()}`,
-        hardwareModel: "rpi",
-        apiKeyHash: "test-hash",
-        status: "online",
-      })
-      .returning();
-
-    deviceId = deviceResult[0].id;
+    await db.insert(devices).values({
+      siteId,
+      serialNumber: `report-device-${Date.now()}`,
+      hardwareModel: "rpi",
+      apiKeyHash: "test-hash",
+      status: "online",
+    });
 
     // Create meter
     const meterResult = await db
       .insert(meters)
       .values({
-        deviceId,
         siteId,
         serialNumber: `report-meter-${Date.now()}`,
         model: "SDM630MCT",
-        midCertifiedVariant: true,
-        midCertificateRef: "MID/SDM630-2023-001",
-        ctRatioPrimary: 100,
-        ctRatioSecondary: 5,
-        phaseConfig: "3P4W",
-        installedByName: "John Smith",
-        installerRegistration: "ELE-12345",
         installedAt: new Date("2025-01-01"),
-        commissionedAt: new Date("2025-01-15"),
       })
       .returning();
 

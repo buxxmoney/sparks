@@ -82,7 +82,6 @@ beforeEach(async () => {
   });
   await db.insert(meters).values({
     id: meterId,
-    deviceId,
     siteId,
     serialNumber: `MTR-${randomUUID()}`,
     model: "SDM630MCT",

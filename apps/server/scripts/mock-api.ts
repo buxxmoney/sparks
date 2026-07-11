@@ -179,6 +179,118 @@ const router = {
   demand: {
     listIntervals: os.handler(async () => ({ intervals: makeIntervals() })),
   },
+  admin: {
+    listOrganizations: os.handler(async () => ({
+      organizations: [
+        {
+          id: ORG_ID,
+          name: "Acme Property Group",
+          createdAt: new Date(2026, 0, 12).toISOString(),
+          ownerEmail: "owner@acme.example",
+          siteCount: sites.length,
+        },
+      ],
+    })),
+    listOrgSites: os.handler(async () => ({
+      sites: sites.map((s) => ({ ...s, createdAt: new Date(2026, 1, 3).toISOString() })),
+    })),
+    listReviewQueue: os.handler(async () => ({ queue: [] })),
+    listReviewedBills: os.handler(async () => ({ bills: [], total: 0 })),
+    tariffSchedulesList: os.handler(async () => ({ schedules: [] })),
+    // ── Meter registration flow (stateful so the whole flow can be exercised) ──
+    listSiteHardware: os.handler(async ({ input }) => {
+      const { siteId } = input as { siteId: string };
+      return {
+        devices: mockState.legacyDevices,
+        meters: mockState.meters,
+        ingestRoleName: `meter_site_${(siteId ?? "site_1").replace(/-/g, "")}`,
+      };
+    }),
+    ensureSiteIngestRole: os.handler(async ({ input }) => {
+      const { siteId } = input as { siteId: string };
+      const created = !mockState.roleCreated;
+      mockState.roleCreated = true;
+      return {
+        roleName: `meter_site_${(siteId ?? "site_1").replace(/-/g, "")}`,
+        password: created ? "mOck-p4ssw0rd_shown-once_ABC123xy" : null,
+        created,
+        host: "ep-mock-pooler.eu-central-1.aws.neon.tech",
+        database: "sparks",
+      };
+    }),
+    rotateSiteIngestPassword: os.handler(async ({ input }) => {
+      const { siteId } = input as { siteId: string };
+      return {
+        roleName: `meter_site_${(siteId ?? "site_1").replace(/-/g, "")}`,
+        password: "r0tated-p4ssw0rd_shown-once_ZYx987",
+        host: "ep-mock-pooler.eu-central-1.aws.neon.tech",
+        database: "sparks",
+      };
+    }),
+    provisionMeter: os.handler(async ({ input }) => {
+      const { serialNumber, model } = input as { serialNumber: string; model?: string };
+      const meter = {
+        id: crypto.randomUUID(),
+        serialNumber: serialNumber ?? "SDM630-MOCK",
+        model: model ?? "SDM630MCT",
+        installedAt: null,
+        createdAt: new Date().toISOString(),
+      };
+      mockState.meters.unshift(meter);
+      return { meterId: meter.id };
+    }),
+    deleteMeter: os.handler(async ({ input }) => {
+      const { meterId } = input as { meterId: string };
+      mockState.meters = mockState.meters.filter((m) => m.id !== meterId);
+      return { deleted: meterId };
+    }),
+    deleteDevice: os.handler(async ({ input }) => {
+      const { deviceId } = input as { deviceId: string };
+      mockState.legacyDevices = mockState.legacyDevices.filter((d) => d.id !== deviceId);
+      return { deleted: deviceId };
+    }),
+  },
+};
+
+// Mutable state behind the admin meter-registration mock.
+const mockState: {
+  roleCreated: boolean;
+  meters: Array<{
+    id: string;
+    serialNumber: string;
+    model: string;
+    installedAt: string | null;
+    createdAt: string;
+  }>;
+  legacyDevices: Array<{
+    id: string;
+    serialNumber: string;
+    hardwareModel: string;
+    status: string;
+    lastSeenAt: string | null;
+    createdAt: string;
+  }>;
+} = {
+  roleCreated: false,
+  meters: [
+    {
+      id: "0b6f8f9e-52a1-4a08-9a51-6a2e0a3f7c11",
+      serialNumber: "SDM630-0042",
+      model: "SDM630MCT",
+      installedAt: new Date(2026, 5, 2).toISOString(),
+      createdAt: new Date(2026, 5, 1).toISOString(),
+    },
+  ],
+  legacyDevices: [
+    {
+      id: "dev_legacy_1",
+      serialNumber: "SPK-3302-0061",
+      hardwareModel: "rpi",
+      status: "online",
+      lastSeenAt: new Date(Date.now() - 90_000).toISOString(),
+      createdAt: new Date(2026, 2, 15).toISOString(),
+    },
+  ],
 };
 
 const rpcHandler = new RPCHandler(router);

@@ -80,6 +80,21 @@ const Mono = ({ children }: { children: React.ReactNode }) => (
   </code>
 );
 
+// The add-meter flow: ensure the site's Postgres ingest role first (its password is
+// shown exactly once, when created), then register the meter and hand the operator
+// the config block for the reader.
+type AddMeterFlow = {
+  step: "credentials" | "details" | "done";
+  roleName: string;
+  /** Only set when the role was created (or freshly known) in this flow — never re-fetchable. */
+  password: string | null;
+  host: string | null;
+  database: string | null;
+  passwordRecorded: boolean;
+  meterId?: string;
+  serialNumber?: string;
+};
+
 export default function AdminPage() {
   const { data: orgData, loading, error, refetch } = useRPC(
     () => client.admin.listOrganizations(),
@@ -159,7 +174,7 @@ export default function AdminPage() {
   );
   const orgSites = orgSitesData?.sites ?? [];
 
-  // Hardware provisioning for a chosen site (device → meter → mint the JWT offline).
+  // Meter registration for a chosen site (site DB role → meter → config onto the reader).
   const [manageSite, setManageSite] = useState<{ id: string; name: string } | null>(null);
   const {
     data: hardwareData,
@@ -170,10 +185,12 @@ export default function AdminPage() {
     [manageSite?.id],
   );
   const hardwareDevices = hardwareData?.devices ?? [];
-  const [devSerial, setDevSerial] = useState("");
-  const [devModel, setDevModel] = useState("rpi");
-  const [addMeterFor, setAddMeterFor] = useState<string | null>(null);
+  const hardwareMeters = hardwareData?.meters ?? [];
+  const [addFlow, setAddFlow] = useState<AddMeterFlow | null>(null);
   const [meterSerial, setMeterSerial] = useState("");
+  const [meterModel, setMeterModel] = useState("SDM630MCT");
+  // Result of a password rotation — shown once, dismissed by the operator.
+  const [rotated, setRotated] = useState<{ roleName: string; password: string } | null>(null);
   const [hwBusy, setHwBusy] = useState(false);
   const [hwMsg, setHwMsg] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [copiedMeter, setCopiedMeter] = useState<string | null>(null);
@@ -587,37 +604,43 @@ export default function AdminPage() {
 
   const openHardware = (id: string, name: string) => {
     setManageSite((cur) => (cur?.id === id ? null : { id, name }));
-    setDevSerial("");
-    setDevModel("rpi");
-    setAddMeterFor(null);
+    setAddFlow(null);
+    setRotated(null);
     setMeterSerial("");
+    setMeterModel("SDM630MCT");
     setHwMsg(null);
   };
 
-  const provisionDevice = async () => {
-    if (!manageSite || !devSerial.trim()) {
-      setHwMsg({ kind: "error", text: "Enter a device serial number." });
-      return;
-    }
+  // Step 1 of adding a meter: make sure the site's DB role exists. If this call
+  // creates it, the password comes back exactly once and must be recorded before
+  // the meter form is shown.
+  const startAddMeter = async () => {
+    if (!manageSite) return;
     setHwBusy(true);
     setHwMsg(null);
+    setRotated(null);
+    setMeterSerial("");
+    setMeterModel("SDM630MCT");
     try {
-      await client.admin.provisionDevice({
-        siteId: manageSite.id,
-        serialNumber: devSerial.trim(),
-        hardwareModel: devModel.trim() || "rpi",
+      const res = await client.admin.ensureSiteIngestRole({ siteId: manageSite.id });
+      setAddFlow({
+        step: res.created && res.password ? "credentials" : "details",
+        roleName: res.roleName,
+        password: res.password,
+        host: res.host,
+        database: res.database,
+        passwordRecorded: !res.created,
       });
-      setHwMsg({ kind: "success", text: `Device "${devSerial.trim()}" added. Now add a meter to it.` });
-      setDevSerial("");
-      refetchHardware();
     } catch (err) {
-      setHwMsg({ kind: "error", text: err instanceof Error ? err.message : "Failed to add device." });
+      setHwMsg({ kind: "error", text: err instanceof Error ? err.message : "Failed to prepare the site's database role." });
     } finally {
       setHwBusy(false);
     }
   };
 
-  const provisionMeter = async (deviceId: string) => {
+  // Step 2: register the meter and get the database-generated uuid for the reader config.
+  const saveMeter = async () => {
+    if (!manageSite || !addFlow) return;
     if (!meterSerial.trim()) {
       setHwMsg({ kind: "error", text: "Enter a meter serial number." });
       return;
@@ -626,18 +649,35 @@ export default function AdminPage() {
     setHwMsg(null);
     try {
       const res = await client.admin.provisionMeter({
-        deviceId,
+        siteId: manageSite.id,
         serialNumber: meterSerial.trim(),
+        model: meterModel.trim() || "SDM630MCT",
       });
-      setHwMsg({
-        kind: "success",
-        text: `Meter added (meterId ${res.meterId}). Mint its JWT offline and flash it onto the Pi.`,
-      });
-      setAddMeterFor(null);
-      setMeterSerial("");
+      setAddFlow({ ...addFlow, step: "done", meterId: res.meterId, serialNumber: meterSerial.trim() });
       refetchHardware();
     } catch (err) {
       setHwMsg({ kind: "error", text: err instanceof Error ? err.message : "Failed to add meter." });
+    } finally {
+      setHwBusy(false);
+    }
+  };
+
+  const rotatePassword = async () => {
+    if (!manageSite) return;
+    if (
+      !window.confirm(
+        "Rotate this site's database password? The old password stops working immediately — every meter reader on the site must be updated with the new one.",
+      )
+    )
+      return;
+    setHwBusy(true);
+    setHwMsg(null);
+    setAddFlow(null);
+    try {
+      const res = await client.admin.rotateSiteIngestPassword({ siteId: manageSite.id });
+      setRotated({ roleName: res.roleName, password: res.password });
+    } catch (err) {
+      setHwMsg({ kind: "error", text: err instanceof Error ? err.message : "Failed to rotate the password." });
     } finally {
       setHwBusy(false);
     }
@@ -670,16 +710,29 @@ export default function AdminPage() {
     }
   };
 
-  const copyMintCommand = (meterId: string) => {
-    const cmd = `bun scripts/mint-device-jwt.ts ${meterId} --key device-signing.private.pem`;
-    navigator.clipboard?.writeText(cmd).then(
+  const copyMeterId = (meterId: string) => {
+    navigator.clipboard?.writeText(meterId).then(
       () => {
         setCopiedMeter(meterId);
         setTimeout(() => setCopiedMeter(null), 2000);
       },
-      () => setHwMsg({ kind: "error", text: "Couldn't copy — command is in the meter row." }),
+      () => setHwMsg({ kind: "error", text: "Couldn't copy — the uuid is in the meter row." }),
     );
   };
+
+  // The [database] block the operator pastes into the reader's config.toml —
+  // keys match sparks_gateway's DatabaseConfig exactly.
+  const meterConfigSnippet = (f: AddMeterFlow) =>
+    [
+      "[database]",
+      `host = "${f.host ?? "<neon host>"}"`,
+      "port = 5432",
+      `dbname = "${f.database ?? "<database>"}"`,
+      `user = "${f.roleName}"`,
+      `password = "${f.password ?? "<site password — recorded when the role was created>"}"`,
+      `sslmode = "verify-full"`,
+      `meter_id = "${f.meterId ?? "<meter uuid>"}"`,
+    ].join("\n");
 
   const copySnippet = (text: string, id: string) => {
     navigator.clipboard?.writeText(text).then(
@@ -1444,7 +1497,7 @@ export default function AdminPage() {
                       {manageSite ? (
                         <Card padding={4}>
                           <Stack gap={3}>
-                            <Text weight="semibold">Devices &amp; meters — {manageSite.name}</Text>
+                            <Text weight="semibold">Meters — {manageSite.name}</Text>
 
                             {/* Step-by-step device onboarding guide */}
                             <div
@@ -1475,61 +1528,35 @@ export default function AdminPage() {
                                 <span style={{ display: "inline-flex", color: PRIMARY }}>
                                   {showGuide ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                                 </span>
-                                <Text weight="medium">Device setup guide</Text>
-                                <Text type="supporting">— how to get a token onto a Pi</Text>
+                                <Text weight="medium">Meter setup guide</Text>
+                                <Text type="supporting">— how a reader submits straight to the database</Text>
                               </button>
 
                               {showGuide ? (
                                 <Stack gap={3} style={{ marginTop: 12 }}>
-                                  <Stack gap={2}>
-                                    <Text type="supporting">
-                                      <strong>1.</strong> Generate a signing keypair — <em>once</em>, on a
-                                      machine you control. Keep the private key OFFLINE (never on the server):
-                                    </Text>
-                                    <CmdLine
-                                      cmd="openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device-signing.private.pem"
-                                      copied={copiedSnippet === "k1"}
-                                      onCopy={() =>
-                                        copySnippet(
-                                          "openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out device-signing.private.pem",
-                                          "k1",
-                                        )
-                                      }
-                                    />
-                                    <CmdLine
-                                      cmd="openssl rsa -in device-signing.private.pem -pubout -out device-signing.public.pem"
-                                      copied={copiedSnippet === "k2"}
-                                      onCopy={() =>
-                                        copySnippet(
-                                          "openssl rsa -in device-signing.private.pem -pubout -out device-signing.public.pem",
-                                          "k2",
-                                        )
-                                      }
-                                    />
-                                  </Stack>
-
                                   <Text type="supporting">
-                                    <strong>2.</strong> Put the <em>public</em> key on the server: set{" "}
-                                    <Mono>DEVICE_INGEST_JWT_PUBLIC_KEY</Mono> to the full contents of{" "}
-                                    <Mono>device-signing.public.pem</Mono> (Railway → @sparks/server →
-                                    Variables), then redeploy.
+                                    <strong>1.</strong> Meters write their readings directly to the database —
+                                    each site has its own Postgres role (<Mono>meter_site_…</Mono>) whose
+                                    password lives on the site's meter readers. It can only INSERT raw
+                                    readings for this site's meters, nothing else.
                                   </Text>
 
                                   <Text type="supporting">
-                                    <strong>3.</strong> Add the device and a meter below, then grab the meter's{" "}
-                                    <Mono>meterId</Mono> from its row.
+                                    <strong>2.</strong> Click <em>Add meter</em> below. The first meter on a
+                                    site also creates the role — its password is shown <em>once</em>. Record
+                                    it in the credentials register before continuing; we never store it.
                                   </Text>
 
                                   <Text type="supporting">
-                                    <strong>4.</strong> Mint the token offline with the private key — use the
-                                    meter's <em>Copy mint cmd</em> button below, then run it from{" "}
-                                    <Mono>apps/server</Mono>. It prints the JWT.
+                                    <strong>3.</strong> Save the meter's details to get its database-generated{" "}
+                                    <Mono>meter_id</Mono>, then paste the printed <Mono>[database]</Mono> block
+                                    into the reader's <Mono>config.toml</Mono>.
                                   </Text>
 
                                   <Text type="supporting">
-                                    <strong>5.</strong> Flash the JWT onto the Pi — it sends it as{" "}
-                                    <Mono>Authorization: Bearer &lt;jwt&gt;</Mono> on every POST to{" "}
-                                    <Mono>/ingest/raw</Mono>.
+                                    <strong>4.</strong> Lost or compromised password? <em>Rotate DB
+                                    password</em> — the old one stops working immediately and every reader on
+                                    the site must be updated.
                                   </Text>
                                 </Stack>
                               ) : null}
@@ -1537,86 +1564,155 @@ export default function AdminPage() {
 
                             {hwMsg ? <Banner status={hwMsg.kind} title={hwMsg.text} /> : null}
 
-                            <Stack direction="horizontal" gap={2} align="end" wrap="wrap">
-                              <TextInput label="New device serial" value={devSerial} onChange={setDevSerial} isDisabled={hwBusy} width={200} />
-                              <TextInput label="Model" value={devModel} onChange={setDevModel} isDisabled={hwBusy} width={120} />
-                              <Button label={hwBusy ? "Adding…" : "Add device"} variant="primary" size="sm" icon={<Plus size={14} />} isLoading={hwBusy} onClick={provisionDevice} />
-                            </Stack>
+                            {/* Show-once panel after a password rotation. */}
+                            {rotated ? (
+                              <Stack gap={2} style={{ border: `1px solid ${PRIMARY}`, borderRadius: 10, padding: 12 }}>
+                                <Text weight="medium">New database password — shown once</Text>
+                                <Text type="supporting">
+                                  Record it now and update every meter reader on this site. It can't be
+                                  retrieved again, only rotated.
+                                </Text>
+                                <CmdLine
+                                  cmd={`user = "${rotated.roleName}"\npassword = "${rotated.password}"`}
+                                  copied={copiedSnippet === "rotated"}
+                                  onCopy={() => copySnippet(`user = "${rotated.roleName}"\npassword = "${rotated.password}"`, "rotated")}
+                                />
+                                <div>
+                                  <Button label="I've recorded it" variant="secondary" size="sm" onClick={() => setRotated(null)} />
+                                </div>
+                              </Stack>
+                            ) : null}
+
+                            {/* Add-meter flow: role credentials (once) → meter details → reader config. */}
+                            {addFlow === null ? (
+                              <Stack direction="horizontal" gap={2}>
+                                <Button label={hwBusy ? "Preparing…" : "Add meter"} variant="primary" size="sm" icon={<Plus size={14} />} isLoading={hwBusy} onClick={startAddMeter} />
+                                <Button label="Rotate DB password" variant="ghost" size="sm" isDisabled={hwBusy} onClick={rotatePassword} />
+                              </Stack>
+                            ) : addFlow.step === "credentials" ? (
+                              <Stack gap={2} style={{ border: `1px solid ${PRIMARY}`, borderRadius: 10, padding: 12 }}>
+                                <Text weight="medium">Site database credentials — shown once</Text>
+                                <Text type="supporting">
+                                  This site's Postgres role was just created. The password below is displayed
+                                  only this once — record it in the credentials register before continuing.
+                                  Every meter on this site authenticates with it.
+                                </Text>
+                                <CmdLine
+                                  cmd={`user = "${addFlow.roleName}"\npassword = "${addFlow.password ?? ""}"`}
+                                  copied={copiedSnippet === "newrole"}
+                                  onCopy={() => copySnippet(`user = "${addFlow.roleName}"\npassword = "${addFlow.password ?? ""}"`, "newrole")}
+                                />
+                                <Stack direction="horizontal" gap={2}>
+                                  <Button label="I've recorded the password" variant="primary" size="sm" onClick={() => setAddFlow({ ...addFlow, step: "details", passwordRecorded: true })} />
+                                  <Button label="Cancel" variant="ghost" size="sm" onClick={() => setAddFlow(null)} />
+                                </Stack>
+                              </Stack>
+                            ) : addFlow.step === "details" ? (
+                              <Stack gap={2} style={{ border: "1px solid hsl(210 16% 88%)", borderRadius: 10, padding: 12 }}>
+                                <Text weight="medium">New meter</Text>
+                                <Text type="supporting">
+                                  Site role <Mono>{addFlow.roleName}</Mono> is ready. Save the meter's details
+                                  to get the uuid for its reader config.
+                                </Text>
+                                <Stack direction="horizontal" gap={2} align="end" wrap="wrap">
+                                  <TextInput label="Meter serial" value={meterSerial} onChange={setMeterSerial} isDisabled={hwBusy} width={200} />
+                                  <TextInput label="Model" value={meterModel} onChange={setMeterModel} isDisabled={hwBusy} width={140} />
+                                  <Button label={hwBusy ? "Saving…" : "Save meter"} variant="primary" size="sm" isLoading={hwBusy} onClick={saveMeter} />
+                                  <Button label="Cancel" variant="ghost" size="sm" isDisabled={hwBusy} onClick={() => setAddFlow(null)} />
+                                </Stack>
+                              </Stack>
+                            ) : (
+                              <Stack gap={2} style={{ border: `1px solid ${PRIMARY}`, borderRadius: 10, padding: 12 }}>
+                                <Text weight="medium">Meter "{addFlow.serialNumber}" registered</Text>
+                                <Text type="supporting">
+                                  Write this block into the reader's config file
+                                  {addFlow.password
+                                    ? ""
+                                    : " (the password is the one recorded when this site's role was created)"}
+                                  :
+                                </Text>
+                                <CmdLine
+                                  cmd={meterConfigSnippet(addFlow)}
+                                  copied={copiedSnippet === "meterconfig"}
+                                  onCopy={() => copySnippet(meterConfigSnippet(addFlow), "meterconfig")}
+                                />
+                                <Stack direction="horizontal" gap={2}>
+                                  <Button label="Done" variant="secondary" size="sm" onClick={() => setAddFlow(null)} />
+                                  <Button label="Add another meter" variant="ghost" size="sm" isDisabled={hwBusy} onClick={startAddMeter} />
+                                </Stack>
+                              </Stack>
+                            )}
 
                             {hardwareLoading ? (
                               <Skeleton height={40} />
-                            ) : hardwareDevices.length === 0 ? (
-                              <Text type="supporting">No devices yet. Add one above.</Text>
+                            ) : hardwareMeters.length === 0 ? (
+                              <Text type="supporting">No meters on this site yet.</Text>
                             ) : (
-                              <Stack gap={3}>
-                                {hardwareDevices.map((d) => (
-                                  <Card key={d.id} padding={4}>
-                                    <Stack gap={2}>
-                                      <Stack direction="horizontal" justify="between" align="center" wrap="wrap" gap={2}>
-                                        <Stack direction="horizontal" gap={2} align="center">
-                                          <span style={{ display: "inline-flex", color: PRIMARY }}><Cpu size={14} /></span>
-                                          <Text weight="medium">{d.serialNumber}</Text>
-                                          <Badge label={d.status} />
-                                          <Text type="supporting">{d.hardwareModel}</Text>
-                                        </Stack>
-                                        <Stack direction="horizontal" gap={2}>
-                                          <Button label="Add meter" variant="secondary" size="sm" icon={<Plus size={14} />} isDisabled={hwBusy} onClick={() => { setAddMeterFor(d.id); setMeterSerial(""); setHwMsg(null); }} />
-                                          <Button label="Remove" variant="ghost" size="sm" icon={<Trash2 size={14} />} isDisabled={hwBusy} onClick={() => removeDevice(d.id, d.serialNumber)} />
-                                        </Stack>
-                                      </Stack>
-
-                                      {addMeterFor === d.id ? (
-                                        <Stack direction="horizontal" gap={2} align="end" wrap="wrap">
-                                          <TextInput label="Meter serial" value={meterSerial} onChange={setMeterSerial} isDisabled={hwBusy} width={200} />
-                                          <Button label={hwBusy ? "Saving…" : "Save meter"} variant="primary" size="sm" isLoading={hwBusy} onClick={() => provisionMeter(d.id)} />
-                                          <Button label="Cancel" variant="ghost" size="sm" isDisabled={hwBusy} onClick={() => setAddMeterFor(null)} />
-                                        </Stack>
-                                      ) : null}
-
-                                      {d.meters.length === 0 ? (
-                                        <Text type="supporting">No meters on this device yet.</Text>
-                                      ) : (
-                                        <Table
-                                          data={d.meters}
-                                          columns={[
-                                            { key: "serial", header: "Meter", renderCell: (m) => <Text>{m.serialNumber}</Text> },
-                                            {
-                                              key: "id",
-                                              header: "meterId (JWT claim)",
-                                              renderCell: (m) => (
-                                                <code style={{ fontSize: 11, color: "hsl(215 16% 40%)" }}>{m.id}</code>
-                                              ),
-                                            },
-                                            {
-                                              key: "mint",
-                                              header: "",
-                                              renderCell: (m) => (
-                                                <Button
-                                                  label={copiedMeter === m.id ? "Copied!" : "Copy mint cmd"}
-                                                  variant="secondary"
-                                                  size="sm"
-                                                  icon={<Copy size={14} />}
-                                                  onClick={() => copyMintCommand(m.id)}
-                                                />
-                                              ),
-                                            },
-                                            {
-                                              key: "del",
-                                              header: "",
-                                              renderCell: (m) => (
-                                                <Button label="Delete" variant="ghost" size="sm" icon={<Trash2 size={14} />} isDisabled={hwBusy} onClick={() => removeMeter(m.id, m.serialNumber)} />
-                                              ),
-                                            },
-                                          ]}
-                                          density="compact"
-                                          dividers="rows"
-                                        />
-                                      )}
-                                    </Stack>
-                                  </Card>
-                                ))}
-                              </Stack>
+                              <Table
+                                data={hardwareMeters}
+                                columns={[
+                                  { key: "serial", header: "Meter", renderCell: (m) => <Text>{m.serialNumber}</Text> },
+                                  { key: "model", header: "Model", renderCell: (m) => <Text type="supporting">{m.model}</Text> },
+                                  {
+                                    key: "id",
+                                    header: "meter_id (reader config)",
+                                    renderCell: (m) => (
+                                      <code style={{ fontSize: 11, color: "hsl(215 16% 40%)" }}>{m.id}</code>
+                                    ),
+                                  },
+                                  {
+                                    key: "copy",
+                                    header: "",
+                                    renderCell: (m) => (
+                                      <Button
+                                        label={copiedMeter === m.id ? "Copied!" : "Copy uuid"}
+                                        variant="secondary"
+                                        size="sm"
+                                        icon={<Copy size={14} />}
+                                        onClick={() => copyMeterId(m.id)}
+                                      />
+                                    ),
+                                  },
+                                  {
+                                    key: "del",
+                                    header: "",
+                                    renderCell: (m) => (
+                                      <Button label="Delete" variant="ghost" size="sm" icon={<Trash2 size={14} />} isDisabled={hwBusy} onClick={() => removeMeter(m.id, m.serialNumber)} />
+                                    ),
+                                  },
+                                ]}
+                                density="compact"
+                                dividers="rows"
+                              />
                             )}
+
+                            <Text type="supporting">
+                              Site DB role: <Mono>{hardwareData?.ingestRoleName ?? "…"}</Mono>
+                            </Text>
+
+                            {/* Legacy gateway devices (old JWT ingest path) — listed for cleanup only. */}
+                            {hardwareDevices.length > 0 ? (
+                              <Stack gap={2}>
+                                <Text weight="medium">Legacy gateway devices</Text>
+                                <Table
+                                  data={hardwareDevices}
+                                  columns={[
+                                    { key: "serial", header: "Device", renderCell: (d) => <Text>{d.serialNumber}</Text> },
+                                    { key: "status", header: "Status", renderCell: (d) => <Badge label={d.status} /> },
+                                    { key: "model", header: "Model", renderCell: (d) => <Text type="supporting">{d.hardwareModel}</Text> },
+                                    {
+                                      key: "del",
+                                      header: "",
+                                      renderCell: (d) => (
+                                        <Button label="Remove" variant="ghost" size="sm" icon={<Trash2 size={14} />} isDisabled={hwBusy} onClick={() => removeDevice(d.id, d.serialNumber)} />
+                                      ),
+                                    },
+                                  ]}
+                                  density="compact"
+                                  dividers="rows"
+                                />
+                              </Stack>
+                            ) : null}
                           </Stack>
                         </Card>
                       ) : null}

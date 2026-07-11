@@ -70,7 +70,6 @@ async function setupTestData() {
 
   await db.insert(meters).values({
     id: testMeterId,
-    deviceId: testDeviceId,
     siteId: testSiteId,
     serialNumber: `METER-${randomUUID()}`,
     model: "SDM630MCT",
@@ -278,7 +277,6 @@ describe("Device Ingestion API (mounted route)", () => {
 
       await db.insert(meters).values({
         id: provMeterId,
-        deviceId: provDeviceId,
         siteId: testSiteId,
         serialNumber: `PROV-METER-${randomUUID()}`,
         model: "SDM630MCT",

@@ -64,23 +64,17 @@ describe("Invoice End-to-End Workflow", () => {
     });
 
     // Create device & meter for demand data
-    const deviceResult = await db
-      .insert(devices)
-      .values({
-        siteId,
-        serialNumber: `e2e-device-${Date.now()}`,
-        hardwareModel: "rpi",
-        apiKeyHash: "test-hash",
-        status: "online",
-      })
-      .returning();
-
-    const deviceId = deviceResult[0].id;
+    await db.insert(devices).values({
+      siteId,
+      serialNumber: `e2e-device-${Date.now()}`,
+      hardwareModel: "rpi",
+      apiKeyHash: "test-hash",
+      status: "online",
+    });
 
     const meterResult = await db
       .insert(meters)
       .values({
-        deviceId,
         siteId,
         serialNumber: `e2e-meter-${Date.now()}`,
         model: "SDM630MCT",

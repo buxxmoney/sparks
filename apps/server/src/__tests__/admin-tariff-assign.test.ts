@@ -19,6 +19,7 @@ import {
 import { and, eq } from "drizzle-orm";
 import {
   adminDeleteDevice,
+  adminDeleteMeter,
   adminDeleteOrganization,
   adminListReviewQueue,
   adminListReviewedBills,
@@ -72,19 +73,16 @@ describe("Operator assign-site-tariff", () => {
     siteId = site.id;
     await db.insert(siteAccess).values({ siteId, userId: ownerUserId, role: "owner" });
 
-    const [device] = await db
-      .insert(devices)
-      .values({
-        siteId,
-        serialNumber: `assign-dev-${Date.now()}`,
-        hardwareModel: "rpi",
-        apiKeyHash: "h",
-        status: "online",
-      })
-      .returning();
+    await db.insert(devices).values({
+      siteId,
+      serialNumber: `assign-dev-${Date.now()}`,
+      hardwareModel: "rpi",
+      apiKeyHash: "h",
+      status: "online",
+    });
     const [meter] = await db
       .insert(meters)
-      .values({ deviceId: device.id, siteId, serialNumber: `assign-m-${Date.now()}`, model: "SDM630MCT" })
+      .values({ siteId, serialNumber: `assign-m-${Date.now()}`, model: "SDM630MCT" })
       .returning();
 
     const now = new Date();
@@ -371,7 +369,7 @@ describe("Operator assign-site-tariff", () => {
     expect(deviceId).toBeTruthy();
 
     const { meterId } = await adminProvisionMeter(operatorCtx, {
-      deviceId,
+      siteId,
       serialNumber: "MTR-PROV-1",
       model: "SDM630MCT",
     });
@@ -381,12 +379,16 @@ describe("Operator assign-site-tariff", () => {
     const dev = hw.devices.find((d) => d.id === deviceId);
     expect(dev).toBeTruthy();
     expect(dev?.serialNumber).toBe("PI-PROV-1");
-    expect(dev?.meters.some((m) => m.id === meterId)).toBe(true);
+    expect(hw.meters.some((m) => m.id === meterId)).toBe(true);
 
-    // Deleting the device cascades its meter.
     await adminDeleteDevice(operatorCtx, { deviceId });
     const after = await adminListSiteHardware(operatorCtx, { siteId });
     expect(after.devices.some((d) => d.id === deviceId)).toBe(false);
+
+    // Meters no longer hang off devices — clean up directly.
+    await adminDeleteMeter(operatorCtx, { meterId });
+    const afterMeter = await adminListSiteHardware(operatorCtx, { siteId });
+    expect(afterMeter.meters.some((m) => m.id === meterId)).toBe(false);
   });
 
   it("requires platform-operator access", async () => {
