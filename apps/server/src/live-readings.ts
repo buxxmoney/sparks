@@ -114,6 +114,64 @@ export function windowEnergy(rows: RawReadingRow[]): {
   return { activeEnergyKwh: active.toFixed(3), reactiveEnergyKvarh: reactive.toFixed(3) };
 }
 
+/** One energy bucket for the "energy across periods" chart. Numeric fields are strings. */
+export interface EnergyBucket {
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  activeEnergyKwh: string;
+  reactiveEnergyKvarh: string;
+}
+
+function monthStartUtc(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+
+// Monday-start week containing d, at 00:00 UTC.
+function weekStartUtc(d: Date): Date {
+  const dow = d.getUTCDay(); // 0=Sun … 6=Sat
+  const sinceMonday = (dow + 6) % 7;
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - sinceMonday));
+}
+
+/**
+ * Bucket raw samples by calendar week (Monday-start) or month, oldest→newest, each bucket's
+ * energy = the per-meter register delta within it (via windowEnergy). Grouping is in UTC —
+ * matching the prior calendar-month behaviour. PURE.
+ */
+export function bucketEnergyByCalendar(rows: RawReadingRow[], unit: "week" | "month"): EnergyBucket[] {
+  const groups = new Map<number, RawReadingRow[]>(); // key = bucket-start epoch ms
+  for (const r of rows) {
+    const start = unit === "month" ? monthStartUtc(r.measuredAt) : weekStartUtc(r.measuredAt);
+    const key = start.getTime();
+    const arr = groups.get(key);
+    if (arr) arr.push(r);
+    else groups.set(key, [r]);
+  }
+
+  return [...groups.entries()]
+    .sort((a, z) => a[0] - z[0])
+    .map(([key, group]) => {
+      const start = new Date(key);
+      const end =
+        unit === "month"
+          ? new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1))
+          : new Date(key + 7 * 24 * 60 * 60 * 1000);
+      const energy = windowEnergy(group);
+      const label =
+        unit === "month"
+          ? start.toLocaleDateString("en-ZA", { month: "short", year: "2-digit", timeZone: "UTC" })
+          : start.toLocaleDateString("en-ZA", { day: "numeric", month: "short", timeZone: "UTC" });
+      return {
+        label,
+        periodStart: start.toISOString(),
+        periodEnd: end.toISOString(),
+        activeEnergyKwh: energy.activeEnergyKwh,
+        reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
+      };
+    });
+}
+
 /**
  * Peak demand (kVA) over a window: the highest clock-aligned interval average of apparent
  * power across the site. Demand charges bill the peak *interval average*, never the
@@ -162,8 +220,7 @@ export function bucketIntervals(rows: RawReadingRow[], intervalMinutes: number):
   }
 
   const out: IntervalRow[] = [];
-  for (const bucketStart of [...buckets.keys()].sort((a, z) => a - z)) {
-    const perMeter = buckets.get(bucketStart)!;
+  for (const [bucketStart, perMeter] of [...buckets.entries()].sort((a, z) => a[0] - z[0])) {
     let active = 0;
     let reactive = 0;
     let kw = 0;

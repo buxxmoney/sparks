@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BarChart3 } from "lucide-react";
 import {
   Area,
@@ -17,9 +17,11 @@ import { Stack } from "@astryxdesign/core/Stack";
 import { Selector } from "@astryxdesign/core/Selector";
 import { Text } from "@astryxdesign/core/Text";
 import { InfoLabel, METRIC_HINTS } from "@/components/metric";
+import { useRPC } from "@/lib/useRPC";
+import { client } from "@/lib/client";
 
 // One interval row as returned by demand.listIntervals (numeric fields are strings).
-export type IntervalRow = {
+type IntervalRow = {
   intervalStart: string;
   activeEnergyKwh: string | null;
   reactiveEnergyKvarh: string | null;
@@ -28,7 +30,7 @@ export type IntervalRow = {
 };
 
 // One bucket as returned by readings.energyByPeriod.
-export type EnergyPeriodRow = {
+type EnergyPeriodRow = {
   label: string;
   periodStart: string;
   periodEnd: string;
@@ -36,18 +38,13 @@ export type EnergyPeriodRow = {
   reactiveEnergyKvarh: string | null;
 };
 
-export type EnergyByPeriod = {
-  basis: "billing_period" | "calendar_month";
-  periods: EnergyPeriodRow[];
-};
-
 // Two families of metric:
-//  • "power" (kW/kVA) is an instantaneous rate → trailing-24h time series.
-//  • "energy" (kWh/kVArh) accumulates → one bar per billing period, compared
-//    across all periods.
+//  • "power" (kW/kVA) is an instantaneous rate → per-interval series for ONE chosen day.
+//  • "energy" (kWh/kVArh) accumulates → one bar per period (week / month / billing period).
 type PowerKey = "apparent" | "active";
 type EnergyKey = "energy" | "reactive";
 type MetricKey = PowerKey | EnergyKey;
+type Granularity = "week" | "month" | "billing_period";
 
 // Series hues follow the entity, not the chart: active power/energy is always
 // blue, apparent always aqua, reactive always violet — the same quantity keeps
@@ -80,11 +77,11 @@ const ENERGY: Record<
 
 const isEnergy = (k: MetricKey): k is EnergyKey => k === "energy" || k === "reactive";
 
-// Grouped selector: energy names stacked together, power graphs stacked together.
+// Grouped metric selector: energy names stacked together, power graphs together.
 const SELECTOR_OPTIONS = [
   {
     type: "section" as const,
-    title: "Energy — across billing periods",
+    title: "Energy — by period",
     options: [
       { value: "energy", label: ENERGY.energy.label },
       { value: "reactive", label: ENERGY.reactive.label },
@@ -92,13 +89,76 @@ const SELECTOR_OPTIONS = [
   },
   {
     type: "section" as const,
-    title: "Power — last 24 hours",
+    title: "Power — by day",
     options: [
       { value: "apparent", label: POWER.apparent.label },
       { value: "active", label: POWER.active.label },
     ],
   },
 ];
+
+const GRANULARITY_OPTIONS = [
+  { value: "week", label: "Weekly" },
+  { value: "month", label: "Monthly" },
+  { value: "billing_period", label: "Billing period" },
+];
+
+const DATE_INPUT_STYLE: React.CSSProperties = {
+  border: `1px solid ${GRID}`,
+  borderRadius: 8,
+  padding: "7px 10px",
+  fontSize: 13,
+  color: "#1c1917",
+  background: "#fff",
+  fontFamily: "inherit",
+  lineHeight: 1.2,
+  colorScheme: "light",
+};
+
+// ── Timezone helpers: resolve a calendar day in the SITE's zone to a UTC [from, to). ──
+// The picker deals in the site's local day; the API wants UTC instants, so we translate
+// using the zone's offset at that moment (correct across DST, though SA has none).
+function tzParts(tz: string, at: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz || "UTC",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(at);
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? "0");
+  let hour = get("hour");
+  if (hour === 24) hour = 0; // some engines render midnight as 24
+  return { y: get("year"), mo: get("month"), d: get("day"), h: hour, mi: get("minute"), s: get("second") };
+}
+
+function todayInTz(tz: string): string {
+  const { y, mo, d } = tzParts(tz, new Date());
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+function zonedDayRange(dayStr: string, tz: string): { from: Date; to: Date } {
+  const guess = new Date(`${dayStr}T00:00:00Z`);
+  const p = tzParts(tz, guess);
+  const localAsUtc = Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi, p.s);
+  const offset = localAsUtc - guess.getTime(); // ms the zone is ahead of UTC
+  const from = new Date(guess.getTime() - offset); // shift so local wall-clock = 00:00 of dayStr
+  const to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
+  return { from, to };
+}
+
+function fmtDayLabel(dayStr: string): string {
+  const [y, m, d] = dayStr.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-ZA", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
 
 function fmtTime(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -165,17 +225,42 @@ function EmptyChart({ message }: { message: string }) {
 }
 
 export function ConsumptionChart({
-  intervals,
-  energyByPeriod,
+  siteId,
+  demandIntervalMinutes,
+  timezone,
 }: {
-  intervals: IntervalRow[];
-  energyByPeriod: EnergyByPeriod | null;
+  siteId: string;
+  demandIntervalMinutes: number;
+  timezone: string;
 }) {
   const [metricKey, setMetricKey] = useState<MetricKey>("energy");
+  const [day, setDay] = useState<string>(() => todayInTz(timezone));
+  const [granularity, setGranularity] = useState<Granularity>("month");
 
-  // Single header row: static section title + the metric selector. The selector
-  // is the sole statement of which metric is shown — no duplicate label above it.
-  const header = (hint: string) => (
+  // Auto-refresh the live power series (only material when viewing today).
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const today = todayInTz(timezone);
+  const { from, to } = useMemo(() => zonedDayRange(day, timezone), [day, timezone]);
+
+  // Power series for the chosen day; energy buckets for the chosen granularity.
+  const { data: demand } = useRPC(
+    () => client.demand.listIntervals({ siteId, from, to }),
+    [siteId, from.getTime(), to.getTime(), tick],
+  );
+  const { data: energyByPeriod } = useRPC(
+    () => client.readings.energyByPeriod({ siteId, granularity }),
+    [siteId, granularity],
+  );
+  const intervals: IntervalRow[] = demand?.intervals ?? [];
+
+  // Single header row: static title + metric selector + the metric-specific control
+  // (period selector for energy, day picker for power).
+  const header = (hint: string, control: React.ReactNode) => (
     <Stack direction="horizontal" justify="between" align="center" wrap="wrap" gap={3}>
       <Stack direction="horizontal" gap={2} align="center">
         <span style={{ display: "inline-flex", color: AXIS_INK }}>
@@ -183,19 +268,22 @@ export function ConsumptionChart({
         </span>
         <InfoLabel label="History" hint={hint} strong />
       </Stack>
-      <div style={{ width: "min(260px, 100%)" }}>
-        <Selector
-          label="Chart metric"
-          isLabelHidden
-          options={SELECTOR_OPTIONS}
-          value={metricKey}
-          onChange={(v) => setMetricKey(v as MetricKey)}
-        />
-      </div>
+      <Stack direction="horizontal" gap={2} align="center" wrap="wrap">
+        <div style={{ width: "min(240px, 100%)" }}>
+          <Selector
+            label="Chart metric"
+            isLabelHidden
+            options={SELECTOR_OPTIONS}
+            value={metricKey}
+            onChange={(v) => setMetricKey(v as MetricKey)}
+          />
+        </div>
+        {control}
+      </Stack>
     </Stack>
   );
 
-  // ── Energy view: one bar per billing period, compared across all periods. ──
+  // ── Energy view: one bar per period (week / month / billing period). ──
   if (isEnergy(metricKey)) {
     const metric = ENERGY[metricKey];
     const periods = energyByPeriod?.periods ?? [];
@@ -203,17 +291,34 @@ export function ConsumptionChart({
       label: p.label,
       value: Number.parseFloat((p[metric.field] as string) ?? "0"),
     }));
-    const calendarBasis = energyByPeriod?.basis === "calendar_month";
+    const basis = energyByPeriod?.basis;
+    const caption =
+      basis === "week"
+        ? "Weekly energy totals."
+        : basis === "month"
+          ? "Monthly energy totals."
+          : basis === "calendar_month"
+            ? "Shown per calendar month until a billing period is set for this site — set it on an uploaded invoice or in site settings."
+            : "One bar per billing period for this site.";
+
+    const periodControl = (
+      <div style={{ width: "min(170px, 100%)" }}>
+        <Selector
+          label="Period"
+          isLabelHidden
+          options={GRANULARITY_OPTIONS}
+          value={granularity}
+          onChange={(v) => setGranularity(v as Granularity)}
+        />
+      </div>
+    );
 
     return (
       <Stack gap={4}>
-        {header(metric.hint)}
+        {header(metric.hint, periodControl)}
 
-        {/* Always tell the user what the buckets represent (§ user requirement). */}
         <Text type="supporting" size="sm">
-          {calendarBasis
-            ? "Shown per calendar month until a billing period is set for this site — set it on an uploaded invoice or in site settings."
-            : "One bar per billing period for this site."}
+          {caption}
         </Text>
 
         {data.length === 0 ? (
@@ -235,23 +340,35 @@ export function ConsumptionChart({
     );
   }
 
-  // ── Power view: trailing-24h time series. ──
+  // ── Power view: per-interval demand series for the chosen day. ──
   const metric = POWER[metricKey];
   const data = intervals.map((iv) => ({
     label: fmtTime(iv.intervalStart),
     value: Number.parseFloat((iv[metric.field] as string) ?? "0"),
   }));
 
+  const dayControl = (
+    <input
+      type="date"
+      value={day}
+      max={today}
+      onChange={(e) => setDay(e.target.value || today)}
+      style={DATE_INPUT_STYLE}
+      aria-label="Day to show"
+    />
+  );
+
   return (
     <Stack gap={4}>
-      {header(metric.hint)}
+      {header(metric.hint, dayControl)}
 
       <Text type="supporting" size="sm">
-        Average demand per metering interval over the last 24 hours.
+        Average demand per {demandIntervalMinutes}-minute interval on {fmtDayLabel(day)}
+        {day === today ? " (today)" : ""}.
       </Text>
 
       {data.length === 0 ? (
-        <EmptyChart message="No interval data in this window yet." />
+        <EmptyChart message="No interval data for this day." />
       ) : (
         <div style={{ height: 256, width: "100%" }}>
           <ResponsiveContainer width="100%" height="100%">

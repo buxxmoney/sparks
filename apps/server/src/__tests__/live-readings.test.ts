@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   type RawReadingRow,
   average,
+  bucketEnergyByCalendar,
   bucketIntervals,
   peakDemandKva,
   registerDelta,
@@ -77,6 +78,43 @@ describe("windowEnergy", () => {
 
   it("is zero for an empty window", () => {
     expect(windowEnergy([])).toEqual({ activeEnergyKwh: "0.000", reactiveEnergyKvarh: "0.000" });
+  });
+});
+
+describe("bucketEnergyByCalendar", () => {
+  it("buckets by calendar month, oldest→newest, energy = register delta per month", () => {
+    const rows = [
+      // June: 100 → 130 (30 kWh)
+      sample("m", "2026-06-05T00:00:00Z", { energyImportKwh: 100 }),
+      sample("m", "2026-06-25T00:00:00Z", { energyImportKwh: 130 }),
+      // July: 130 → 175 (45 kWh)
+      sample("m", "2026-07-03T00:00:00Z", { energyImportKwh: 130 }),
+      sample("m", "2026-07-28T00:00:00Z", { energyImportKwh: 175 }),
+    ];
+    const out = bucketEnergyByCalendar(rows, "month");
+    expect(out).toHaveLength(2);
+    expect(out[0]?.periodStart).toBe("2026-06-01T00:00:00.000Z");
+    expect(out[1]?.periodStart).toBe("2026-07-01T00:00:00.000Z");
+    expect(out.map((b) => b.activeEnergyKwh)).toEqual(["30.000", "45.000"]);
+  });
+
+  it("buckets by Monday-start week", () => {
+    // 2026-07-13 is a Monday; 2026-07-15 (Wed) is the same week; 2026-07-20 is the next Monday.
+    const rows = [
+      sample("m", "2026-07-13T06:00:00Z", { energyImportKwh: 10 }),
+      sample("m", "2026-07-15T06:00:00Z", { energyImportKwh: 14 }), // same week → 4 kWh
+      sample("m", "2026-07-20T06:00:00Z", { energyImportKwh: 14 }),
+      sample("m", "2026-07-22T06:00:00Z", { energyImportKwh: 21 }), // next week → 7 kWh
+    ];
+    const out = bucketEnergyByCalendar(rows, "week");
+    expect(out).toHaveLength(2);
+    expect(out[0]?.periodStart).toBe("2026-07-13T00:00:00.000Z");
+    expect(out[1]?.periodStart).toBe("2026-07-20T00:00:00.000Z");
+    expect(out.map((b) => b.activeEnergyKwh)).toEqual(["4.000", "7.000"]);
+  });
+
+  it("is empty for no samples", () => {
+    expect(bucketEnergyByCalendar([], "month")).toEqual([]);
   });
 });
 
