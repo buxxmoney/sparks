@@ -123,6 +123,10 @@ export interface EnergyBucket {
   reactiveEnergyKvarh: string;
 }
 
+function dayStartUtc(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
 function monthStartUtc(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
 }
@@ -135,15 +139,20 @@ function weekStartUtc(d: Date): Date {
 }
 
 /**
- * Bucket raw samples by calendar week (Monday-start) or month, oldest→newest, each bucket's
- * energy = the per-meter register delta within it (via windowEnergy). Grouping is in UTC —
- * matching the prior calendar-month behaviour. PURE.
+ * Bucket raw samples by calendar day, week (Monday-start), or month, oldest→newest — each
+ * bucket's energy = the per-meter register delta within it (via windowEnergy). Grouping is
+ * in UTC, matching the prior calendar-month behaviour. PURE.
  */
-export function bucketEnergyByCalendar(rows: RawReadingRow[], unit: "week" | "month"): EnergyBucket[] {
+export function bucketEnergyByCalendar(
+  rows: RawReadingRow[],
+  unit: "day" | "week" | "month",
+): EnergyBucket[] {
+  const bucketStart = (d: Date): Date =>
+    unit === "month" ? monthStartUtc(d) : unit === "week" ? weekStartUtc(d) : dayStartUtc(d);
+
   const groups = new Map<number, RawReadingRow[]>(); // key = bucket-start epoch ms
   for (const r of rows) {
-    const start = unit === "month" ? monthStartUtc(r.measuredAt) : weekStartUtc(r.measuredAt);
-    const key = start.getTime();
+    const key = bucketStart(r.measuredAt).getTime();
     const arr = groups.get(key);
     if (arr) arr.push(r);
     else groups.set(key, [r]);
@@ -156,7 +165,7 @@ export function bucketEnergyByCalendar(rows: RawReadingRow[], unit: "week" | "mo
       const end =
         unit === "month"
           ? new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1))
-          : new Date(key + 7 * 24 * 60 * 60 * 1000);
+          : new Date(key + (unit === "week" ? 7 : 1) * 24 * 60 * 60 * 1000);
       const energy = windowEnergy(group);
       const label =
         unit === "month"

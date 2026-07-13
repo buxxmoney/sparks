@@ -44,7 +44,7 @@ type EnergyPeriodRow = {
 type PowerKey = "apparent" | "active";
 type EnergyKey = "energy" | "reactive";
 type MetricKey = PowerKey | EnergyKey;
-type Granularity = "week" | "month" | "billing_period";
+type Granularity = "day" | "week" | "month" | "billing_period";
 
 // Series hues follow the entity, not the chart: active power/energy is always
 // blue, apparent always aqua, reactive always violet — the same quantity keeps
@@ -98,6 +98,7 @@ const SELECTOR_OPTIONS = [
 ];
 
 const GRANULARITY_OPTIONS = [
+  { value: "day", label: "Daily" },
   { value: "week", label: "Weekly" },
   { value: "month", label: "Monthly" },
   { value: "billing_period", label: "Billing period" },
@@ -293,13 +294,15 @@ export function ConsumptionChart({
     }));
     const basis = energyByPeriod?.basis;
     const caption =
-      basis === "week"
-        ? "Weekly energy totals."
-        : basis === "month"
-          ? "Monthly energy totals."
-          : basis === "calendar_month"
-            ? "Shown per calendar month until a billing period is set for this site — set it on an uploaded invoice or in site settings."
-            : "One bar per billing period for this site.";
+      basis === "day"
+        ? "Daily energy totals."
+        : basis === "week"
+          ? "Weekly energy totals."
+          : basis === "month"
+            ? "Monthly energy totals."
+            : basis === "calendar_month"
+              ? "Shown per calendar month until a billing period is set for this site — set it on an uploaded invoice or in site settings."
+              : "One bar per billing period for this site.";
 
     const periodControl = (
       <div style={{ width: "min(170px, 100%)" }}>

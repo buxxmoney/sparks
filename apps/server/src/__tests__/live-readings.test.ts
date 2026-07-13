@@ -98,6 +98,23 @@ describe("bucketEnergyByCalendar", () => {
     expect(out.map((b) => b.activeEnergyKwh)).toEqual(["30.000", "45.000"]);
   });
 
+  it("buckets by calendar day", () => {
+    const rows = [
+      // 12 Jul: 100 → 108 (8 kWh)
+      sample("m", "2026-07-12T02:00:00Z", { energyImportKwh: 100 }),
+      sample("m", "2026-07-12T20:00:00Z", { energyImportKwh: 108 }),
+      // 13 Jul: 108 → 114 (6 kWh)
+      sample("m", "2026-07-13T05:00:00Z", { energyImportKwh: 108 }),
+      sample("m", "2026-07-13T22:00:00Z", { energyImportKwh: 114 }),
+    ];
+    const out = bucketEnergyByCalendar(rows, "day");
+    expect(out).toHaveLength(2);
+    expect(out[0]?.periodStart).toBe("2026-07-12T00:00:00.000Z");
+    expect(out[0]?.periodEnd).toBe("2026-07-13T00:00:00.000Z");
+    expect(out[1]?.periodStart).toBe("2026-07-13T00:00:00.000Z");
+    expect(out.map((b) => b.activeEnergyKwh)).toEqual(["8.000", "6.000"]);
+  });
+
   it("buckets by Monday-start week", () => {
     // 2026-07-13 is a Monday; 2026-07-15 (Wed) is the same week; 2026-07-20 is the next Monday.
     const rows = [
