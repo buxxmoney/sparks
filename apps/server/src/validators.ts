@@ -573,10 +573,10 @@ export const readingsEnergyByPeriodInput = z.object({
   siteId: z.string().uuid(),
   // How many trailing buckets to return at most (newest kept). Defaults to 12.
   limit: z.number().int().positive().max(36).optional(),
-  // Bucketing granularity. "week"/"month" bucket the raw samples by calendar week/month;
-  // "billing_period" (default) uses the site's real billing periods, falling back to
-  // calendar months when the site has none.
-  granularity: z.enum(["week", "month", "billing_period"]).optional(),
+  // Bucketing granularity. "day"/"week"/"month" bucket the raw samples by calendar
+  // day/week/month; "billing_period" (default) uses the site's real billing periods,
+  // falling back to calendar months when the site has none.
+  granularity: z.enum(["day", "week", "month", "billing_period"]).optional(),
 });
 
 // Time-series demand intervals for charting a site's load over a window (docs/02 §4.1

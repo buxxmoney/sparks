@@ -3228,14 +3228,14 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
 
   const meterIds = await siteMeterIds(parsed.siteId);
 
-  // Explicit calendar granularity: bucket the raw samples by week/month over a bounded
+  // Explicit calendar granularity: bucket the raw samples by day/week/month over a bounded
   // trailing window (so we don't scan the whole history), then keep the last `limit`.
-  if (granularity === "week" || granularity === "month") {
+  if (granularity === "day" || granularity === "week" || granularity === "month") {
     const now = new Date();
     const from =
-      granularity === "week"
-        ? new Date(now.getTime() - limit * 7 * 24 * 60 * 60 * 1000)
-        : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1));
+      granularity === "month"
+        ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1))
+        : new Date(now.getTime() - limit * (granularity === "week" ? 7 : 1) * 24 * 60 * 60 * 1000);
     const rows = await fetchRawReadings(meterIds, { from });
     const buckets = bucketEnergyByCalendar(rows, granularity);
     return { basis: granularity, periods: buckets.slice(-limit) };
