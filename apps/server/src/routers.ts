@@ -28,6 +28,7 @@ import {
   type RawReadingRow,
   bucketEnergyByCalendar,
   bucketIntervals,
+  deriveMeterIntervals,
   peakDemandKva,
   windowEnergy,
 } from "./live-readings";
@@ -1609,6 +1610,64 @@ async function priceRoleOverPeriod(
   };
 }
 
+// Materialize a period's demand_intervals from the RAW `readings` table the Pi writes to,
+// so reconciliation's measured side reflects real metering. Per meter, derive boundary-correct
+// clock-aligned intervals (energy conserved across boundaries, same method as
+// aggregateDemandIntervals) and upsert them — idempotent, and a no-op when the site has no raw
+// samples in the window (e.g. tests that seed demand_intervals directly). This is the bridge
+// that lets billing read raw readings without changing the proven pricing code below.
+async function materializeDemandIntervalsFromRaw(
+  billingPeriod: { siteId: string; periodStart: Date; periodEnd: Date; demandIntervalMinutes: number },
+): Promise<void> {
+  const meterRows = await db
+    .select({ id: meters.id })
+    .from(meters)
+    .where(eq(meters.siteId, billingPeriod.siteId));
+
+  for (const m of meterRows) {
+    const rawRows = await fetchRawReadings([m.id], {
+      from: billingPeriod.periodStart,
+      to: billingPeriod.periodEnd,
+    });
+    if (rawRows.length === 0) continue;
+
+    const derived = deriveMeterIntervals(rawRows, billingPeriod.demandIntervalMinutes);
+    if (derived.length === 0) continue;
+
+    await db
+      .insert(demandIntervals)
+      .values(
+        derived.map((iv) => ({
+          meterId: m.id,
+          siteId: billingPeriod.siteId,
+          intervalStart: iv.intervalStart,
+          intervalMinutes: iv.intervalMinutes,
+          activeEnergyKwh: iv.activeEnergyKwh,
+          reactiveEnergyKvarh: iv.reactiveEnergyKvarh,
+          avgDemandKw: iv.avgDemandKw,
+          avgDemandKva: iv.avgDemandKva,
+          avgPowerFactor: null,
+          sampleCount: iv.sampleCount,
+          expectedSamples: iv.expectedSamples,
+          isComplete: iv.isComplete,
+          source: "live" as const,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [demandIntervals.meterId, demandIntervals.intervalStart, demandIntervals.intervalMinutes],
+        set: {
+          activeEnergyKwh: sql`excluded.active_energy_kwh`,
+          reactiveEnergyKvarh: sql`excluded.reactive_energy_kvarh`,
+          avgDemandKw: sql`excluded.avg_demand_kw`,
+          avgDemandKva: sql`excluded.avg_demand_kva`,
+          sampleCount: sql`excluded.sample_count`,
+          expectedSamples: sql`excluded.expected_samples`,
+          isComplete: sql`excluded.is_complete`,
+        },
+      });
+  }
+}
+
 // Core reconciliation generation. The caller must have already checked site
 // access. Computes the NEXT version for the period so a regeneration (after
 // Reopen) never overwrites a prior version. A freshly generated recon is
@@ -1648,6 +1707,10 @@ async function runReconciliationForPeriod(
   if (invoice.status !== "locked") {
     throw new ForbiddenError("Cannot generate reconciliation until the invoice is locked");
   }
+
+  // Bridge: derive this period's demand_intervals from the raw `readings` the Pi writes,
+  // so the measured side below is sourced from actual metering (no-op if none / already done).
+  await materializeDemandIntervalsFromRaw(billingPeriod);
 
   // Gather measured data from demand intervals within the billing period
   const allIntervals = await db
@@ -3058,7 +3121,7 @@ async function fetchRawReadings(
   if (opts.to) conds.push(opts.endExclusive ? sql`measured_at < ${opts.to}` : sql`measured_at <= ${opts.to}`);
   const where = sql.join(conds, sql` AND `);
   const res = await db.execute(sql`
-    SELECT meter_id, measured_at, energy_import_kwh, energy_import_kvarh, power_total, va_total
+    SELECT meter_id, measured_at, energy_import_kwh, energy_import_kvarh, energy_kvah, power_total, va_total
     FROM readings
     WHERE ${where}
     ORDER BY measured_at ASC
@@ -3068,6 +3131,7 @@ async function fetchRawReadings(
     measuredAt: new Date(r.measured_at as string | number | Date),
     energyImportKwh: toNum(r.energy_import_kwh),
     energyImportKvarh: toNum(r.energy_import_kvarh),
+    apparentEnergyKvah: toNum(r.energy_kvah),
     powerTotalW: toNum(r.power_total),
     vaTotal: toNum(r.va_total),
   }));
