@@ -23,6 +23,8 @@ export interface RawReadingRow {
   measuredAt: Date;
   energyImportKwh: number | null;
   energyImportKvarh: number | null;
+  /** Cumulative apparent-energy register (kVAh) — drives interval demand (kVA) for billing. */
+  apparentEnergyKvah: number | null;
   /** Instantaneous active power, in WATTS (device native). */
   powerTotalW: number | null;
   /** Instantaneous apparent power, in VA (device native). */
@@ -259,6 +261,101 @@ export function bucketIntervals(rows: RawReadingRow[], intervalMinutes: number):
       avgDemandKw: haveKw ? kw.toFixed(3) : null,
       avgDemandKva: haveKva ? kva.toFixed(3) : null,
       isComplete: true,
+    });
+  }
+  return out;
+}
+
+/** A per-meter clock-aligned interval derived from raw readings, for BILLING/reconciliation.
+ * Boundary-correct (register-at-boundary) so per-interval energies telescope to the true
+ * total — matching workers.aggregateDemandIntervals, but sourced from the raw `readings`
+ * table. Numeric fields are strings for the demand_intervals columns they upsert into. */
+export interface DerivedMeterInterval {
+  intervalStart: Date;
+  intervalMinutes: number;
+  activeEnergyKwh: string;
+  reactiveEnergyKvarh: string;
+  apparentEnergyKvah: string;
+  avgDemandKw: string;
+  avgDemandKva: string;
+  sampleCount: number;
+  expectedSamples: number;
+  isComplete: boolean;
+}
+
+type EnergyRegister = "energyImportKwh" | "energyImportKvarh" | "apparentEnergyKvah";
+
+/**
+ * Derive one meter's clock-aligned demand intervals from its raw samples, for billing. PURE.
+ *
+ * Interval energy = the cumulative register at the interval END boundary minus the value at
+ * its START boundary (each = the last reading at or before that boundary). This attributes
+ * boundary-straddling consumption to the right interval, handles single-sample intervals, and
+ * Σ interval deltas telescopes to (last register − first register), conserving energy — the
+ * same method as workers.aggregateDemandIntervals (task 5). Demand = energy / interval-hours.
+ * A backwards delta (register rollover / meter reset) clamps to 0. Emits only intervals that
+ * contain at least one sample.
+ */
+export function deriveMeterIntervals(
+  rows: RawReadingRow[],
+  intervalMinutes: number,
+): DerivedMeterInterval[] {
+  if (rows.length === 0) return [];
+  const sorted = [...rows].sort((a, b) => a.measuredAt.getTime() - b.measuredAt.getTime());
+  const intervalMs = Math.max(1, intervalMinutes) * 60 * 1000;
+
+  const firstMs = sorted[0].measuredAt.getTime();
+  const lastMs = sorted[sorted.length - 1].measuredAt.getTime();
+  const startMs = Math.floor(firstMs / intervalMs) * intervalMs; // clock-aligned
+
+  const earliest = (field: EnergyRegister): number | null => {
+    for (const r of sorted) {
+      const v = num(r[field]);
+      if (v !== null) return v;
+    }
+    return null;
+  };
+  const registerAtOrBefore = (field: EnergyRegister, t: number): number | null => {
+    let val: number | null = null;
+    for (const r of sorted) {
+      if (r.measuredAt.getTime() > t) break;
+      const v = num(r[field]);
+      if (v !== null) val = v;
+    }
+    return val ?? earliest(field);
+  };
+  const intervalEnergy = (field: EnergyRegister, s: number, e: number): number => {
+    const a = registerAtOrBefore(field, s);
+    const b = registerAtOrBefore(field, e);
+    if (a === null || b === null) return 0;
+    const d = b - a;
+    return d < 0 ? 0 : d;
+  };
+
+  const hours = intervalMinutes / 60;
+  const expectedSamples = Math.ceil((intervalMinutes * 60) / 60);
+  const out: DerivedMeterInterval[] = [];
+  for (let s = startMs; s <= lastMs; s += intervalMs) {
+    const e = s + intervalMs;
+    const sampleCount = sorted.filter(
+      (r) => r.measuredAt.getTime() >= s && r.measuredAt.getTime() < e,
+    ).length;
+    if (sampleCount === 0) continue;
+
+    const active = intervalEnergy("energyImportKwh", s, e);
+    const reactive = intervalEnergy("energyImportKvarh", s, e);
+    const apparent = intervalEnergy("apparentEnergyKvah", s, e);
+    out.push({
+      intervalStart: new Date(s),
+      intervalMinutes,
+      activeEnergyKwh: active.toFixed(3),
+      reactiveEnergyKvarh: reactive.toFixed(3),
+      apparentEnergyKvah: apparent.toFixed(3),
+      avgDemandKw: (active / hours).toFixed(3),
+      avgDemandKva: (apparent / hours).toFixed(3),
+      sampleCount,
+      expectedSamples,
+      isComplete: sampleCount >= expectedSamples * 0.9,
     });
   }
   return out;

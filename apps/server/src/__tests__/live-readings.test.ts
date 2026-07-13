@@ -4,6 +4,7 @@ import {
   average,
   bucketEnergyByCalendar,
   bucketIntervals,
+  deriveMeterIntervals,
   peakDemandKva,
   registerDelta,
   windowEnergy,
@@ -20,6 +21,7 @@ function sample(
     measuredAt: new Date(iso),
     energyImportKwh: fields.energyImportKwh ?? null,
     energyImportKvarh: fields.energyImportKvarh ?? null,
+    apparentEnergyKvah: fields.apparentEnergyKvah ?? null,
     powerTotalW: fields.powerTotalW ?? null,
     vaTotal: fields.vaTotal ?? null,
   };
@@ -183,5 +185,61 @@ describe("bucketIntervals", () => {
 
   it("returns nothing for no samples", () => {
     expect(bucketIntervals([], 30)).toEqual([]);
+  });
+});
+
+describe("deriveMeterIntervals (billing)", () => {
+  it("uses register-at-boundary energy that conserves across interval boundaries", () => {
+    // 30-min intervals. Cumulative active (kWh) + apparent (kVAh) registers.
+    const rows = [
+      sample("m", "2026-07-13T00:00:00Z", { energyImportKwh: 1000, apparentEnergyKvah: 1010 }),
+      sample("m", "2026-07-13T00:15:00Z", { energyImportKwh: 1002, apparentEnergyKvah: 1013 }),
+      sample("m", "2026-07-13T00:30:00Z", { energyImportKwh: 1005, apparentEnergyKvah: 1017 }),
+      sample("m", "2026-07-13T00:45:00Z", { energyImportKwh: 1009, apparentEnergyKvah: 1022 }),
+    ];
+    const out = deriveMeterIntervals(rows, 30);
+    expect(out).toHaveLength(2);
+
+    // [00:00,00:30): 1005−1000 = 5 kWh (boundary at 00:30); demand = 5 / 0.5h = 10 kW.
+    expect(out[0]?.intervalStart.toISOString()).toBe("2026-07-13T00:00:00.000Z");
+    expect(out[0]?.activeEnergyKwh).toBe("5.000");
+    expect(out[0]?.avgDemandKw).toBe("10.000");
+    expect(out[0]?.apparentEnergyKvah).toBe("7.000"); // 1017−1010
+    expect(out[0]?.avgDemandKva).toBe("14.000"); // 7 / 0.5h
+
+    // [00:30,01:00): 1009−1005 = 4 kWh.
+    expect(out[1]?.activeEnergyKwh).toBe("4.000");
+
+    // Σ interval energy telescopes to the total register delta (1009−1000 = 9) — conserved.
+    const total = out.reduce((s, iv) => s + Number(iv.activeEnergyKwh), 0);
+    expect(total).toBeCloseTo(9, 3);
+  });
+
+  it("clamps a backwards register (rollover / reset) to 0 energy", () => {
+    const rows = [
+      sample("m", "2026-07-13T00:00:00Z", { energyImportKwh: 100 }),
+      sample("m", "2026-07-13T00:20:00Z", { energyImportKwh: 50 }),
+    ];
+    const out = deriveMeterIntervals(rows, 30);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.activeEnergyKwh).toBe("0.000");
+  });
+
+  it("emits only intervals that contain at least one sample (skips gaps)", () => {
+    const rows = [
+      sample("m", "2026-07-13T00:00:00Z", { energyImportKwh: 10 }),
+      sample("m", "2026-07-13T00:10:00Z", { energyImportKwh: 12 }),
+      // gap over the next few intervals, then a sample two hours later
+      sample("m", "2026-07-13T02:05:00Z", { energyImportKwh: 30 }),
+    ];
+    const out = deriveMeterIntervals(rows, 30);
+    expect(out.map((iv) => iv.intervalStart.toISOString())).toEqual([
+      "2026-07-13T00:00:00.000Z",
+      "2026-07-13T02:00:00.000Z",
+    ]);
+  });
+
+  it("returns nothing for no samples", () => {
+    expect(deriveMeterIntervals([], 30)).toEqual([]);
   });
 });
