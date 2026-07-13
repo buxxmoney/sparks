@@ -26,6 +26,7 @@ import {
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   type RawReadingRow,
+  bucketEnergyByCalendar,
   bucketIntervals,
   peakDemandKva,
   windowEnergy,
@@ -3159,8 +3160,22 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
   const parsed = readingsEnergyByPeriodInput.parse(input);
   await requireSiteAccess(ctx, parsed.siteId);
   const limit = parsed.limit ?? 12;
+  const granularity = parsed.granularity ?? "billing_period";
 
   const meterIds = await siteMeterIds(parsed.siteId);
+
+  // Explicit calendar granularity: bucket the raw samples by week/month over a bounded
+  // trailing window (so we don't scan the whole history), then keep the last `limit`.
+  if (granularity === "week" || granularity === "month") {
+    const now = new Date();
+    const from =
+      granularity === "week"
+        ? new Date(now.getTime() - limit * 7 * 24 * 60 * 60 * 1000)
+        : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1));
+    const rows = await fetchRawReadings(meterIds, { from });
+    const buckets = bucketEnergyByCalendar(rows, granularity);
+    return { basis: granularity, periods: buckets.slice(-limit) };
+  }
 
   const periods = await db.query.billingPeriods.findMany({
     where: eq(billingPeriods.siteId, parsed.siteId),
@@ -3194,34 +3209,11 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
     return { basis: "billing_period" as const, periods: buckets.slice(-limit) };
   }
 
-  // Fallback: group the site's raw samples by calendar month (UTC) and delta each month.
-  const allRows = await fetchRawReadings(meterIds);
-  const byMonth = new Map<string, RawReadingRow[]>();
-  for (const r of allRows) {
-    const key = `${r.measuredAt.getUTCFullYear()}-${r.measuredAt.getUTCMonth()}`;
-    const arr = byMonth.get(key);
-    if (arr) arr.push(r);
-    else byMonth.set(key, [r]);
-  }
-
-  const months = [...byMonth.entries()]
-    .map(([key, rows]) => {
-      const [y, m] = key.split("-").map(Number);
-      const start = new Date(Date.UTC(y, m, 1));
-      const end = new Date(Date.UTC(y, m + 1, 1));
-      const energy = windowEnergy(rows);
-      return {
-        label: start.toLocaleDateString("en-ZA", { month: "short", year: "2-digit" }),
-        periodStart: start.toISOString(),
-        periodEnd: end.toISOString(),
-        activeEnergyKwh: energy.activeEnergyKwh,
-        reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
-        _sort: start.getTime(),
-      };
-    })
-    .sort((a, b) => a._sort - b._sort)
-    .map(({ _sort, ...rest }) => rest);
-
+  // Fallback: no billing periods yet → bucket the site's raw samples by calendar month.
+  const now = new Date();
+  const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1));
+  const allRows = await fetchRawReadings(meterIds, { from });
+  const months = bucketEnergyByCalendar(allRows, "month");
   return { basis: "calendar_month" as const, periods: months.slice(-limit) };
 }
 

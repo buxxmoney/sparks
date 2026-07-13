@@ -111,16 +111,11 @@ export default function SiteDetailsPage() {
   const { data: latest } = useRPC(() => client.readings.latest({ siteId }), [siteId, tick]);
   const { data: mtd } = useRPC(() => client.readings.monthToDate({ siteId }), [siteId, tick]);
   const { data: devicesData } = useRPC(() => client.devices.list({ siteId }), [siteId, tick]);
-  const { data: demand } = useRPC(() => client.demand.listIntervals({ siteId }), [siteId, tick]);
-  // Energy per billing period is slow-moving — no need to tie it to the 30s tick.
-  const { data: energyByPeriod } = useRPC(
-    () => client.readings.energyByPeriod({ siteId }),
-    [siteId],
-  );
+  // The history chart owns its own data fetching (it varies by the day / period the user
+  // picks in its controls), so the page no longer fetches intervals or energy-by-period.
 
   const reading = latest?.reading;
   const devices = devicesData?.devices ?? [];
-  const intervals = demand?.intervals ?? [];
   // Below this width the devices table's minimum column widths exceed the
   // viewport and it spills; re-arrange each row into a stacked card instead.
   // The same breakpoint shrinks the header action buttons so three of them
@@ -293,7 +288,11 @@ export default function SiteDetailsPage() {
       {/* Historical — 24h power series + energy across billing periods (switchable).
           The chart owns its header row (title + metric selector). */}
       <Card padding={5}>
-        <ConsumptionChart intervals={intervals} energyByPeriod={energyByPeriod ?? null} />
+        <ConsumptionChart
+          siteId={siteId}
+          demandIntervalMinutes={site.demandIntervalMinutes}
+          timezone={site.timezone}
+        />
       </Card>
 
       {/* Devices */}
