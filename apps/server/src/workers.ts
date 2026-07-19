@@ -18,6 +18,11 @@ import { PreconditionError } from "./middleware";
 import { hashBuffer, renderHtmlToPdf, renderReportHtml } from "./reports";
 import { putObject } from "./storage";
 
+/** Tolerance for snapping an interval boundary to its on-the-boundary sample — meters timestamp
+ * a :00/:30 sample a millisecond or two after the exact boundary. ≫ that jitter, ≪ the sampling
+ * cadence, so it captures the boundary sample without reaching the next real one. */
+const BOUNDARY_SNAP_MS = 5_000;
+
 /**
  * Aggregate readings into demand intervals for a meter.
  * Computes clock-aligned intervals in UTC.
@@ -55,11 +60,15 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
 
   const intervals = computeIntervals(startTime, endTime, intervalMinutes);
 
-  // Interval energy from CUMULATIVE registers: the register value at the interval END
-  // boundary minus the value at its START boundary, each = the last reading at or before
-  // that boundary. This attributes consumption that straddles a boundary to the right
-  // interval, handles single-sample intervals (old first/last-WITHIN logic yielded 0), and
-  // Σ interval deltas telescopes to (last register − first register), conserving energy.
+  const intervalMs = intervalMinutes * 60 * 1000;
+
+  // Interval energy from CUMULATIVE registers: the register at the interval END boundary minus
+  // the value at its START boundary, where each boundary register = the FIRST reading in the
+  // bucket starting at that boundary. Anchoring on the first in-bucket sample (not the last
+  // sample ≤ the exact boundary) captures the on-the-half-hour reading even though meters
+  // timestamp it a millisecond or two late, so demand is not under-read at every boundary.
+  // Σ interval deltas telescopes across covered buckets, conserving energy. A gap bucket falls
+  // back to the last reading ≤ the boundary so telescoping survives the gap.
   type EnergyField = "activeEnergyKwh" | "reactiveEnergyKvarh" | "apparentEnergyKvah";
   const earliestRegister = (field: EnergyField): number | null => {
     for (const r of meterReadings) {
@@ -76,15 +85,29 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
     // Before the first reading ⇒ baseline at the earliest register (no energy yet consumed).
     return val ?? earliestRegister(field);
   };
+  // Snap the boundary to its on-the-boundary sample with a small tolerance: meters timestamp a
+  // :00/:30 reading a millisecond or two late, so the last reading ≤ (boundary + BOUNDARY_SNAP_MS)
+  // captures it. The window is ≫ that jitter but ≪ the sampling cadence, so it never reaches the
+  // next real sample (keeping a mid-next-bucket reset/rollover out of this interval).
+  const boundaryRegister = (field: EnergyField, t: Date): number | null =>
+    registerAtOrBefore(field, new Date(t.getTime() + BOUNDARY_SNAP_MS));
   const intervalEnergy = (field: EnergyField, start: Date, end: Date): string => {
-    const a = registerAtOrBefore(field, start);
-    const b = registerAtOrBefore(field, end);
+    const a = boundaryRegister(field, start);
+    const b = boundaryRegister(field, end);
     if (a === null || b === null) return "0";
     const delta = b - a;
     // A negative delta is a cumulative-register rollover / meter reset — never emit negative
     // energy; clamp to 0 (detectDataGaps flags the discontinuity separately).
     return (delta < 0 ? 0 : delta).toFixed(3);
   };
+
+  // Sample count per clock-aligned bucket, so an interval counts as complete only when both its
+  // own bucket and the next are well-sampled (its demand reads across both boundaries).
+  const bucketCount = new Map<number, number>();
+  for (const r of meterReadings) {
+    const b = Math.floor(new Date(r.time).getTime() / intervalMs) * intervalMs;
+    bucketCount.set(b, (bucketCount.get(b) ?? 0) + 1);
+  }
 
   for (const interval of intervals) {
     const intervalReadings = meterReadings.filter(
@@ -116,7 +139,9 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
           ).toFixed(4)
         : null;
 
-    const isComplete = sampleCount >= expectedSamples * 0.9;
+    const nextBucketCount = bucketCount.get(interval.end.getTime()) ?? 0;
+    const isComplete =
+      sampleCount >= expectedSamples * 0.9 && nextBucketCount >= expectedSamples * 0.9;
 
     await db
       .insert(demandIntervals)
