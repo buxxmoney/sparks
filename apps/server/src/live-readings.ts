@@ -47,6 +47,11 @@ function num(v: number | null | undefined): number | null {
   return v === null || v === undefined || Number.isNaN(v) ? null : v;
 }
 
+/** Tolerance for snapping an interval boundary to its on-the-boundary sample. Meters timestamp
+ * a :00/:30 sample a millisecond or two after the exact boundary; this window (≫ that jitter,
+ * ≪ the ~1-minute sampling cadence) captures it without ever reaching the next real sample. */
+const BOUNDARY_SNAP_MS = 5_000;
+
 /**
  * Energy consumed across a set of time-ordered samples = (last register − first register),
  * clamped at 0. Samples MUST be passed oldest→newest (the SQL fetch orders by measured_at).
@@ -70,27 +75,6 @@ export function registerDelta(
   return d < 0 ? 0 : d;
 }
 
-/** Arithmetic mean of a field across samples. null if no samples carry it. */
-export function average(
-  samples: RawReadingRow[],
-  pick: (r: RawReadingRow) => number | null,
-): number | null {
-  let sum = 0;
-  let n = 0;
-  for (const s of samples) {
-    const v = num(pick(s));
-    if (v === null) continue;
-    sum += v;
-    n += 1;
-  }
-  return n === 0 ? null : sum / n;
-}
-
-/** Clock-aligned bucket start (epoch seconds) for a timestamp. */
-function bucketStartSec(epochMs: number, intervalSec: number): number {
-  const epochSec = Math.floor(epochMs / 1000);
-  return Math.floor(epochSec / intervalSec) * intervalSec;
-}
 
 /**
  * Total active/reactive energy across a set of raw samples: per meter, the register
@@ -184,95 +168,107 @@ export function bucketEnergyByCalendar(
 }
 
 /**
- * Peak demand (kVA) over a window: the highest clock-aligned interval average of apparent
- * power across the site. Demand charges bill the peak *interval average*, never the
- * instantaneous spike, so we bucket first, average within each bucket, then take the max.
+ * Peak demand (kVA) over a window: the highest clock-aligned interval-average of apparent
+ * power across the site. Demand charges bill the peak *interval average*, never an
+ * instantaneous spike — so this must match what billing/reconciliation charges, and it
+ * computes demand the SAME way `deriveMeterIntervals` does: per meter, apparent-energy
+ * register Δ over each clock-aligned interval ÷ interval-hours, summed across meters.
+ *
+ * Two things this deliberately does NOT do, which the old instantaneous-`va_total` mean got
+ * wrong:
+ *   - It never averages momentary VA snapshots (those spike above any true interval average).
+ *   - It ignores INCOMPLETE intervals — a data gap (a few samples straddling a big register
+ *     jump) yields a bogus sky-high demand, so an interval only counts when every meter has
+ *     a full sample count for it. If no interval is complete, peak is "0.000".
  */
 export function peakDemandKva(rows: RawReadingRow[], intervalMinutes: number): string {
-  const intervalSec = Math.max(1, intervalMinutes) * 60;
-  const buckets = new Map<number, RawReadingRow[]>();
+  // Group raw samples by meter, then derive each meter's energy-based clock-aligned intervals.
+  const byMeter = new Map<string, RawReadingRow[]>();
   for (const r of rows) {
-    const b = bucketStartSec(r.measuredAt.getTime(), intervalSec);
-    const arr = buckets.get(b);
+    const arr = byMeter.get(r.meterId);
     if (arr) arr.push(r);
-    else buckets.set(b, [r]);
+    else byMeter.set(r.meterId, [r]);
   }
-  let peak = 0;
-  for (const samples of buckets.values()) {
-    const avgVa = average(samples, (s) => s.vaTotal);
-    if (avgVa !== null) {
-      const kva = avgVa / 1000;
-      if (kva > peak) peak = kva;
+
+  // intervalStart(ms) → summed kVA across meters + whether EVERY meter's interval is complete.
+  const site = new Map<number, { kva: number; complete: boolean }>();
+  for (const samples of byMeter.values()) {
+    for (const iv of deriveMeterIntervals(samples, intervalMinutes)) {
+      const key = iv.intervalStart.getTime();
+      const prev = site.get(key) ?? { kva: 0, complete: true };
+      prev.kva += Number(iv.avgDemandKva);
+      prev.complete = prev.complete && iv.isComplete;
+      site.set(key, prev);
     }
+  }
+
+  let peak = 0;
+  for (const v of site.values()) {
+    if (v.complete && v.kva > peak) peak = v.kva;
   }
   return peak.toFixed(3);
 }
 
 /**
- * Bucket raw samples into clock-aligned intervals (oldest→newest) for the load chart.
- * Per interval: energy = per-meter register delta summed; demand = per-meter average
- * instantaneous power (W→kW, VA→kVA) summed across meters. A field is null when no
- * sample in the interval carried it (so the chart can gap rather than plot a false 0).
+ * Bucket raw samples into clock-aligned intervals (oldest→newest) for the load chart's
+ * "average demand per interval" series. Demand and energy are derived the SAME way billing and
+ * peak demand are — per meter via `deriveMeterIntervals` (energy-register Δ over the interval,
+ * boundary-snapped, ÷ interval-hours), then summed across meters — so the chart, the peak tile,
+ * and the bill all agree. A metric is null when NO sample in the interval carried its register
+ * (so the chart can gap rather than plot a false 0); `isComplete` is the real completeness flag.
  */
 export function bucketIntervals(rows: RawReadingRow[], intervalMinutes: number): IntervalRow[] {
-  const intervalSec = Math.max(1, intervalMinutes) * 60;
-  // bucketStart → meterId → samples
-  const buckets = new Map<number, Map<string, RawReadingRow[]>>();
+  const intervalMs = Math.max(1, intervalMinutes) * 60 * 1000;
+
+  // Per clock-aligned interval-start: which register fields any sample carried (gap-vs-0).
+  const present = new Map<number, { kwh: boolean; kvarh: boolean; kvah: boolean }>();
   for (const r of rows) {
-    const b = bucketStartSec(r.measuredAt.getTime(), intervalSec);
-    let perMeter = buckets.get(b);
-    if (!perMeter) {
-      perMeter = new Map();
-      buckets.set(b, perMeter);
-    }
-    const arr = perMeter.get(r.meterId);
-    if (arr) arr.push(r);
-    else perMeter.set(r.meterId, [r]);
+    const key = Math.floor(r.measuredAt.getTime() / intervalMs) * intervalMs;
+    const p = present.get(key) ?? { kwh: false, kvarh: false, kvah: false };
+    if (r.energyImportKwh !== null) p.kwh = true;
+    if (r.energyImportKvarh !== null) p.kvarh = true;
+    if (r.apparentEnergyKvah !== null) p.kvah = true;
+    present.set(key, p);
   }
 
-  const out: IntervalRow[] = [];
-  for (const [bucketStart, perMeter] of [...buckets.entries()].sort((a, z) => a[0] - z[0])) {
-    let active = 0;
-    let reactive = 0;
-    let kw = 0;
-    let kva = 0;
-    let haveActive = false;
-    let haveReactive = false;
-    let haveKw = false;
-    let haveKva = false;
-    for (const samples of perMeter.values()) {
-      const a = registerDelta(samples, (s) => s.energyImportKwh);
-      if (a !== null) {
-        active += a;
-        haveActive = true;
-      }
-      const re = registerDelta(samples, (s) => s.energyImportKvarh);
-      if (re !== null) {
-        reactive += re;
-        haveReactive = true;
-      }
-      const pw = average(samples, (s) => s.powerTotalW);
-      if (pw !== null) {
-        kw += pw / 1000;
-        haveKw = true;
-      }
-      const va = average(samples, (s) => s.vaTotal);
-      if (va !== null) {
-        kva += va / 1000;
-        haveKva = true;
-      }
-    }
-    out.push({
-      intervalStart: new Date(bucketStart * 1000).toISOString(),
-      intervalMinutes,
-      activeEnergyKwh: haveActive ? active.toFixed(3) : null,
-      reactiveEnergyKvarh: haveReactive ? reactive.toFixed(3) : null,
-      avgDemandKw: haveKw ? kw.toFixed(3) : null,
-      avgDemandKva: haveKva ? kva.toFixed(3) : null,
-      isComplete: true,
-    });
+  // Group by meter, derive each meter's energy-based intervals, sum across meters per interval.
+  const byMeter = new Map<string, RawReadingRow[]>();
+  for (const r of rows) {
+    const arr = byMeter.get(r.meterId);
+    if (arr) arr.push(r);
+    else byMeter.set(r.meterId, [r]);
   }
-  return out;
+  const agg = new Map<
+    number,
+    { active: number; reactive: number; kw: number; kva: number; complete: boolean }
+  >();
+  for (const samples of byMeter.values()) {
+    for (const iv of deriveMeterIntervals(samples, intervalMinutes)) {
+      const key = iv.intervalStart.getTime();
+      const a = agg.get(key) ?? { active: 0, reactive: 0, kw: 0, kva: 0, complete: true };
+      a.active += Number(iv.activeEnergyKwh);
+      a.reactive += Number(iv.reactiveEnergyKvarh);
+      a.kw += Number(iv.avgDemandKw);
+      a.kva += Number(iv.avgDemandKva);
+      a.complete = a.complete && iv.isComplete;
+      agg.set(key, a);
+    }
+  }
+
+  return [...agg.entries()]
+    .sort((x, z) => x[0] - z[0])
+    .map(([start, a]) => {
+      const p = present.get(start) ?? { kwh: false, kvarh: false, kvah: false };
+      return {
+        intervalStart: new Date(start).toISOString(),
+        intervalMinutes,
+        activeEnergyKwh: p.kwh ? a.active.toFixed(3) : null,
+        reactiveEnergyKvarh: p.kvarh ? a.reactive.toFixed(3) : null,
+        avgDemandKw: p.kwh ? a.kw.toFixed(3) : null,
+        avgDemandKva: p.kvah ? a.kva.toFixed(3) : null,
+        isComplete: a.complete,
+      };
+    });
 }
 
 /** A per-meter clock-aligned interval derived from raw readings, for BILLING/reconciliation.
@@ -297,13 +293,14 @@ type EnergyRegister = "energyImportKwh" | "energyImportKvarh" | "apparentEnergyK
 /**
  * Derive one meter's clock-aligned demand intervals from its raw samples, for billing. PURE.
  *
- * Interval energy = the cumulative register at the interval END boundary minus the value at
- * its START boundary (each = the last reading at or before that boundary). This attributes
- * boundary-straddling consumption to the right interval, handles single-sample intervals, and
- * Σ interval deltas telescopes to (last register − first register), conserving energy — the
- * same method as workers.aggregateDemandIntervals (task 5). Demand = energy / interval-hours.
- * A backwards delta (register rollover / meter reset) clamps to 0. Emits only intervals that
- * contain at least one sample.
+ * Interval energy = the cumulative register at the interval END boundary minus the value at its
+ * START boundary, where each boundary register is snapped to its on-the-boundary sample with a
+ * small tolerance (see `boundaryRegister`) — capturing the :00/:30 reading even though meters
+ * timestamp it a millisecond or two late, so demand is not under-read at every boundary. Σ
+ * interval deltas telescopes across covered buckets, conserving energy; a backwards delta
+ * (register rollover / meter reset) clamps to 0. Demand = energy / interval-hours. Emits only
+ * intervals whose own bucket has ≥1 sample; an interval is `isComplete` only when both its
+ * bucket and the next are well-sampled (its demand reads across both boundaries).
  */
 export function deriveMeterIntervals(
   rows: RawReadingRow[],
@@ -333,22 +330,38 @@ export function deriveMeterIntervals(
     }
     return val ?? earliest(field);
   };
+  // Register snapshot AT a clock boundary. Meters timestamp their on-the-half-hour samples a
+  // millisecond or two LATE (e.g. 10:30:00.001), so anchoring strictly on the last reading
+  // ≤ the exact boundary would skip that boundary sample and grab the one ~a minute earlier —
+  // under-reading every interval's demand. We therefore snap with a small tolerance: the last
+  // reading at or before (boundary + BOUNDARY_SNAP_MS). The tolerance is far larger than the
+  // sub-second jitter yet far smaller than the sampling cadence, so it never reaches into the
+  // next real sample (which keeps a mid-next-bucket reset/rollover out of this interval).
+  const boundaryRegister = (field: EnergyRegister, t: number): number | null =>
+    registerAtOrBefore(field, t + BOUNDARY_SNAP_MS);
   const intervalEnergy = (field: EnergyRegister, s: number, e: number): number => {
-    const a = registerAtOrBefore(field, s);
-    const b = registerAtOrBefore(field, e);
+    const a = boundaryRegister(field, s);
+    const b = boundaryRegister(field, e);
     if (a === null || b === null) return 0;
     const d = b - a;
     return d < 0 ? 0 : d;
   };
 
+  // Sample count per clock-aligned bucket, computed once.
+  const bucketCount = new Map<number, number>();
+  for (const r of sorted) {
+    const b = Math.floor(r.measuredAt.getTime() / intervalMs) * intervalMs;
+    bucketCount.set(b, (bucketCount.get(b) ?? 0) + 1);
+  }
   const hours = intervalMinutes / 60;
   const expectedSamples = Math.ceil((intervalMinutes * 60) / 60);
+  const wellSampled = (bucketStart: number): boolean =>
+    (bucketCount.get(bucketStart) ?? 0) >= expectedSamples * 0.9;
+
   const out: DerivedMeterInterval[] = [];
   for (let s = startMs; s <= lastMs; s += intervalMs) {
     const e = s + intervalMs;
-    const sampleCount = sorted.filter(
-      (r) => r.measuredAt.getTime() >= s && r.measuredAt.getTime() < e,
-    ).length;
+    const sampleCount = bucketCount.get(s) ?? 0;
     if (sampleCount === 0) continue;
 
     const active = intervalEnergy("energyImportKwh", s, e);
@@ -364,7 +377,10 @@ export function deriveMeterIntervals(
       avgDemandKva: (apparent / hours).toFixed(3),
       sampleCount,
       expectedSamples,
-      isComplete: sampleCount >= expectedSamples * 0.9,
+      // Demand spans this bucket's boundary AND the next bucket's, so it is only trustworthy
+      // ("complete") when BOTH buckets are well-sampled — which also rejects the interval that
+      // sits just before a data gap (its demand is inflated by the post-gap register jump).
+      isComplete: wellSampled(s) && wellSampled(e),
     });
   }
   return out;

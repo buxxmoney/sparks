@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
   type RawReadingRow,
-  average,
   bucketEnergyByCalendar,
   bucketIntervals,
   deriveMeterIntervals,
@@ -54,16 +53,6 @@ describe("registerDelta", () => {
   });
 });
 
-describe("average", () => {
-  it("means only the samples that carry the field", () => {
-    const rows = [
-      sample("m", "2026-07-15T00:00:00Z", { powerTotalW: 2000 }),
-      sample("m", "2026-07-15T00:01:00Z", {}),
-      sample("m", "2026-07-15T00:02:00Z", { powerTotalW: 4000 }),
-    ];
-    expect(average(rows, (r) => r.powerTotalW)).toBe(3000);
-  });
-});
 
 describe("windowEnergy", () => {
   it("sums each meter's register delta across the window", () => {
@@ -138,16 +127,68 @@ describe("bucketEnergyByCalendar", () => {
 });
 
 describe("peakDemandKva", () => {
-  it("takes the highest interval AVERAGE, not an instantaneous spike", () => {
+  // A fully-sampled 30-min bucket: 30 one-per-minute samples, apparent-energy register starting
+  // at `firstReg` and rising a hair each minute. Samples land 1ms AFTER each minute, mimicking a
+  // meter's slightly-late timestamps — so the boundary snap must capture the :00/:30 sample
+  // rather than the one a minute earlier. An interval is only "complete" (and so eligible to be
+  // the peak) when its own bucket AND the next are fully sampled.
+  function fullBucket(meterId: string, startIso: string, firstReg: number): RawReadingRow[] {
+    const t0 = new Date(startIso).getTime();
+    const rows: RawReadingRow[] = [];
+    for (let i = 0; i < 30; i++) {
+      rows.push(
+        sample(meterId, new Date(t0 + i * 60_000 + 1).toISOString(), {
+          apparentEnergyKvah: firstReg + i * 0.001,
+        }),
+      );
+    }
+    return rows;
+  }
+
+  it("bills the peak interval-average, snapping to the millisecond-late boundary sample", () => {
+    // Three consecutive full buckets ⇒ two complete intervals:
+    //   [00:00,00:30): boundary 100→105 ⇒ 5 kVAh / 0.5h = 10 kVA
+    //   [00:30,01:00): boundary 105→113 ⇒ 8 kVAh / 0.5h = 16 kVA  (the peak)
+    // Without the boundary snap the :30 register would read the :29 sample and collapse to ~0.
     const rows = [
-      // Interval A [00:00,00:30): a 10 kVA instantaneous spike but averages to 6 kVA.
-      sample("m", "2026-07-15T00:00:00Z", { vaTotal: 10000 }),
-      sample("m", "2026-07-15T00:15:00Z", { vaTotal: 2000 }),
-      // Interval B [00:30,01:00): steady 7 kVA — the true billable peak.
-      sample("m", "2026-07-15T00:30:00Z", { vaTotal: 7000 }),
-      sample("m", "2026-07-15T00:45:00Z", { vaTotal: 7000 }),
+      ...fullBucket("m", "2026-07-15T00:00:00Z", 100),
+      ...fullBucket("m", "2026-07-15T00:30:00Z", 105),
+      ...fullBucket("m", "2026-07-15T01:00:00Z", 113),
     ];
-    expect(peakDemandKva(rows, 30)).toBe("7.000");
+    expect(peakDemandKva(rows, 30)).toBe("16.000");
+  });
+
+  it("ignores an incomplete (data-gap) interval even when its register jump implies huge demand", () => {
+    const rows = [
+      // Two full buckets ⇒ one complete interval [00:30,01:00) = 16 kVA (the real peak).
+      ...fullBucket("m", "2026-07-15T00:30:00Z", 105),
+      ...fullBucket("m", "2026-07-15T01:00:00Z", 113),
+      // Sparse bucket [01:30,02:00): only 3 samples, register leaps to 200. The interval
+      // [01:00,01:30) reading into it computes ~174 kVA but is incomplete ⇒ excluded.
+      sample("m", "2026-07-15T01:30:00.001Z", { apparentEnergyKvah: 200 }),
+      sample("m", "2026-07-15T01:40:00.001Z", { apparentEnergyKvah: 260 }),
+      sample("m", "2026-07-15T01:50:00.001Z", { apparentEnergyKvah: 320 }),
+    ];
+    expect(peakDemandKva(rows, 30)).toBe("16.000");
+  });
+
+  it("sums coincident per-meter demand across meters within an interval", () => {
+    // Complete interval [00:30,01:00): m1 = 8 kVAh→16 kVA, m2 = 3 kVAh→6 kVA ⇒ site 22 kVA.
+    const rows = [
+      ...fullBucket("m1", "2026-07-15T00:30:00Z", 105),
+      ...fullBucket("m1", "2026-07-15T01:00:00Z", 113),
+      ...fullBucket("m2", "2026-07-15T00:30:00Z", 500),
+      ...fullBucket("m2", "2026-07-15T01:00:00Z", 503),
+    ];
+    expect(peakDemandKva(rows, 30)).toBe("22.000");
+  });
+
+  it("is 0.000 when no interval has two well-sampled buckets", () => {
+    const rows = [
+      sample("m", "2026-07-15T00:00:00.001Z", { apparentEnergyKvah: 100 }),
+      sample("m", "2026-07-15T00:20:00.001Z", { apparentEnergyKvah: 130 }),
+    ];
+    expect(peakDemandKva(rows, 30)).toBe("0.000");
   });
 });
 
@@ -155,17 +196,17 @@ describe("bucketIntervals", () => {
   it("buckets into clock-aligned intervals oldest→newest with per-interval energy + demand", () => {
     const base = "2026-07-15T00:00:00Z";
     const t = (min: number) => new Date(new Date(base).getTime() + min * 60000).toISOString();
-    // Fed out of order to prove sorting. Registers rise; power is constant within each bucket.
+    // Fed out of order to prove sorting. Demand is energy-based: register Δ / 0.5h.
     const rows = [
-      // Bucket 2 [01:00,01:30): 1003→1006 (3 kWh), 6000 W → 6 kW.
-      sample("m", t(60), { energyImportKwh: 1003, powerTotalW: 6000 }),
-      sample("m", t(75), { energyImportKwh: 1006, powerTotalW: 6000 }),
-      // Bucket 0 [00:00,00:30): 1000→1001 (1 kWh), 2000 W → 2 kW.
-      sample("m", t(0), { energyImportKwh: 1000, powerTotalW: 2000 }),
-      sample("m", t(15), { energyImportKwh: 1001, powerTotalW: 2000 }),
-      // Bucket 1 [00:30,01:00): 1001→1003 (2 kWh), 4000 W → 4 kW.
-      sample("m", t(30), { energyImportKwh: 1001, powerTotalW: 4000 }),
-      sample("m", t(45), { energyImportKwh: 1003, powerTotalW: 4000 }),
+      // Bucket 2 [01:00,01:30): 1003→1006 (3 kWh) ⇒ 6 kW.
+      sample("m", t(60), { energyImportKwh: 1003 }),
+      sample("m", t(75), { energyImportKwh: 1006 }),
+      // Bucket 0 [00:00,00:30): 1000→1001 (1 kWh) ⇒ 2 kW.
+      sample("m", t(0), { energyImportKwh: 1000 }),
+      sample("m", t(15), { energyImportKwh: 1001 }),
+      // Bucket 1 [00:30,01:00): 1001→1003 (2 kWh) ⇒ 4 kW.
+      sample("m", t(30), { energyImportKwh: 1001 }),
+      sample("m", t(45), { energyImportKwh: 1003 }),
     ];
     const out = bucketIntervals(rows, 30);
     expect(out).toHaveLength(3);
@@ -175,27 +216,32 @@ describe("bucketIntervals", () => {
     expect(out[0]?.intervalMinutes).toBe(30);
   });
 
-  it("sums energy and demand across meters within an interval", () => {
+  it("sums energy and energy-based demand across meters within an interval", () => {
+    // One interval [00:00,00:30). Demand = apparent/active register Δ ÷ 0.5h, summed across meters.
     const rows = [
-      sample("m1", "2026-07-15T00:00:00Z", { energyImportKwh: 100, powerTotalW: 2000, vaTotal: 2200 }),
-      sample("m1", "2026-07-15T00:15:00Z", { energyImportKwh: 103, powerTotalW: 2000, vaTotal: 2200 }),
-      sample("m2", "2026-07-15T00:00:00Z", { energyImportKwh: 500, powerTotalW: 3000, vaTotal: 3100 }),
-      sample("m2", "2026-07-15T00:15:00Z", { energyImportKwh: 504, powerTotalW: 3000, vaTotal: 3100 }),
+      // m1: active 100→103 (3 kWh ⇒ 6 kW), apparent 110→114 (4 kVAh ⇒ 8 kVA)
+      sample("m1", "2026-07-15T00:00:00Z", { energyImportKwh: 100, apparentEnergyKvah: 110 }),
+      sample("m1", "2026-07-15T00:29:00Z", { energyImportKwh: 103, apparentEnergyKvah: 114 }),
+      // m2: active 500→504 (4 kWh ⇒ 8 kW), apparent 600→603 (3 kVAh ⇒ 6 kVA)
+      sample("m2", "2026-07-15T00:00:00Z", { energyImportKwh: 500, apparentEnergyKvah: 600 }),
+      sample("m2", "2026-07-15T00:29:00Z", { energyImportKwh: 504, apparentEnergyKvah: 603 }),
     ];
     const out = bucketIntervals(rows, 30);
     expect(out).toHaveLength(1);
     expect(out[0]?.activeEnergyKwh).toBe("7.000"); // 3 + 4
-    expect(out[0]?.avgDemandKw).toBe("5.000"); // 2 + 3
-    expect(out[0]?.avgDemandKva).toBe("5.300"); // 2.2 + 3.1
+    expect(out[0]?.avgDemandKw).toBe("14.000"); // 6 + 8
+    expect(out[0]?.avgDemandKva).toBe("14.000"); // 8 + 6
+    expect(out[0]?.reactiveEnergyKvarh).toBeNull(); // no reactive register carried
   });
 
-  it("nulls a metric when no sample in the interval carries it (so the chart can gap)", () => {
+  it("nulls a metric when no sample in the interval carries its register (so the chart can gap)", () => {
+    // Only instantaneous power, no energy registers ⇒ nothing to derive demand from → null.
     const rows = [
       sample("m", "2026-07-15T00:00:00Z", { powerTotalW: 2000 }),
       sample("m", "2026-07-15T00:15:00Z", { powerTotalW: 2000 }),
     ];
     const out = bucketIntervals(rows, 30);
-    expect(out[0]?.avgDemandKw).toBe("2.000");
+    expect(out[0]?.avgDemandKw).toBeNull();
     expect(out[0]?.activeEnergyKwh).toBeNull();
     expect(out[0]?.avgDemandKva).toBeNull();
   });
