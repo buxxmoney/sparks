@@ -82,7 +82,7 @@ describe("bucketEnergyByCalendar", () => {
       sample("m", "2026-07-03T00:00:00Z", { energyImportKwh: 130 }),
       sample("m", "2026-07-28T00:00:00Z", { energyImportKwh: 175 }),
     ];
-    const out = bucketEnergyByCalendar(rows, "month");
+    const out = bucketEnergyByCalendar(rows, "month", "UTC");
     expect(out).toHaveLength(2);
     expect(out[0]?.periodStart).toBe("2026-06-01T00:00:00.000Z");
     expect(out[1]?.periodStart).toBe("2026-07-01T00:00:00.000Z");
@@ -98,7 +98,7 @@ describe("bucketEnergyByCalendar", () => {
       sample("m", "2026-07-13T05:00:00Z", { energyImportKwh: 108 }),
       sample("m", "2026-07-13T22:00:00Z", { energyImportKwh: 114 }),
     ];
-    const out = bucketEnergyByCalendar(rows, "day");
+    const out = bucketEnergyByCalendar(rows, "day", "UTC");
     expect(out).toHaveLength(2);
     expect(out[0]?.periodStart).toBe("2026-07-12T00:00:00.000Z");
     expect(out[0]?.periodEnd).toBe("2026-07-13T00:00:00.000Z");
@@ -114,7 +114,7 @@ describe("bucketEnergyByCalendar", () => {
       sample("m", "2026-07-20T06:00:00Z", { energyImportKwh: 14 }),
       sample("m", "2026-07-22T06:00:00Z", { energyImportKwh: 21 }), // next week → 7 kWh
     ];
-    const out = bucketEnergyByCalendar(rows, "week");
+    const out = bucketEnergyByCalendar(rows, "week", "UTC");
     expect(out).toHaveLength(2);
     expect(out[0]?.periodStart).toBe("2026-07-13T00:00:00.000Z");
     expect(out[1]?.periodStart).toBe("2026-07-20T00:00:00.000Z");
@@ -122,7 +122,23 @@ describe("bucketEnergyByCalendar", () => {
   });
 
   it("is empty for no samples", () => {
-    expect(bucketEnergyByCalendar([], "month")).toEqual([]);
+    expect(bucketEnergyByCalendar([], "month", "UTC")).toEqual([]);
+  });
+
+  it("buckets by the site's LOCAL day, not UTC (Africa/Johannesburg = UTC+2)", () => {
+    // 22:30Z on 13 Jul is 00:30 on 14 Jul in Johannesburg → it belongs to the 14th, not the 13th.
+    const rows = [
+      sample("m", "2026-07-13T06:00:00Z", { energyImportKwh: 100 }), // 08:00 SAST, 13 Jul
+      sample("m", "2026-07-13T20:00:00Z", { energyImportKwh: 105 }), // 22:00 SAST, 13 Jul → +5
+      sample("m", "2026-07-13T22:30:00Z", { energyImportKwh: 105 }), // 00:30 SAST, 14 Jul
+      sample("m", "2026-07-14T14:00:00Z", { energyImportKwh: 112 }), // 16:00 SAST, 14 Jul → +7
+    ];
+    const out = bucketEnergyByCalendar(rows, "day", "Africa/Johannesburg");
+    expect(out).toHaveLength(2);
+    // Local day starts are 22:00Z of the prior day (UTC+2).
+    expect(out[0]?.periodStart).toBe("2026-07-12T22:00:00.000Z"); // 13 Jul local
+    expect(out[1]?.periodStart).toBe("2026-07-13T22:00:00.000Z"); // 14 Jul local
+    expect(out.map((b) => b.activeEnergyKwh)).toEqual(["5.000", "7.000"]);
   });
 });
 

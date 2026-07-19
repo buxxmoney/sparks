@@ -109,32 +109,65 @@ export interface EnergyBucket {
   reactiveEnergyKvarh: string;
 }
 
-function dayStartUtc(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+// Local calendar day/month of a UTC instant in an IANA timezone.
+function zonedParts(d: Date, tz: string): { y: number; mo: number; day: number } {
+  const p = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+  const get = (t: string) => Number(p.find((x) => x.type === t)?.value);
+  return { y: get("year"), mo: get("month"), day: get("day") };
 }
 
-function monthStartUtc(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+// Milliseconds that `tz` is ahead of UTC at instant `d`.
+function tzOffsetMs(d: Date, tz: string): number {
+  const p = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t: string) => Number(p.find((x) => x.type === t)?.value);
+  const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour") % 24, get("minute"), get("second"));
+  return asUtc - d.getTime();
 }
 
-// Monday-start week containing d, at 00:00 UTC.
-function weekStartUtc(d: Date): Date {
-  const dow = d.getUTCDay(); // 0=Sun … 6=Sat
-  const sinceMonday = (dow + 6) % 7;
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - sinceMonday));
+// The UTC instant of local midnight (00:00 in `tz`) for calendar date y-mo-day. Day/month
+// arithmetic overflows are normalised by Date.UTC (e.g. day+7, month+1).
+function zonedMidnightUtc(y: number, mo: number, day: number, tz: string): Date {
+  const guess = new Date(Date.UTC(y, mo - 1, day));
+  return new Date(guess.getTime() - tzOffsetMs(guess, tz));
 }
 
 /**
  * Bucket raw samples by calendar day, week (Monday-start), or month, oldest→newest — each
- * bucket's energy = the per-meter register delta within it (via windowEnergy). Grouping is
- * in UTC, matching the prior calendar-month behaviour. PURE.
+ * bucket's energy = the per-meter register delta within it (via windowEnergy). Grouping is in
+ * the SITE's timezone `tz` (pass "UTC" for UTC days), so a "daily" bar covers local midnight→
+ * midnight, not a UTC day offset from it. PURE.
  */
 export function bucketEnergyByCalendar(
   rows: RawReadingRow[],
   unit: "day" | "week" | "month",
+  tz: string,
 ): EnergyBucket[] {
-  const bucketStart = (d: Date): Date =>
-    unit === "month" ? monthStartUtc(d) : unit === "week" ? weekStartUtc(d) : dayStartUtc(d);
+  // The UTC instant of the local bucket start containing `d`.
+  const bucketStart = (d: Date): Date => {
+    const { y, mo, day } = zonedParts(d, tz);
+    if (unit === "month") return zonedMidnightUtc(y, mo, 1, tz);
+    if (unit === "week") {
+      // Monday of the local week (calendar-only day-of-week from the local date).
+      const dow = new Date(Date.UTC(y, mo - 1, day)).getUTCDay(); // 0=Sun … 6=Sat
+      const sinceMonday = (dow + 6) % 7;
+      return zonedMidnightUtc(y, mo, day - sinceMonday, tz);
+    }
+    return zonedMidnightUtc(y, mo, day, tz);
+  };
 
   const groups = new Map<number, RawReadingRow[]>(); // key = bucket-start epoch ms
   for (const r of rows) {
@@ -148,15 +181,18 @@ export function bucketEnergyByCalendar(
     .sort((a, z) => a[0] - z[0])
     .map(([key, group]) => {
       const start = new Date(key);
+      const sp = zonedParts(start, tz);
       const end =
         unit === "month"
-          ? new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1))
-          : new Date(key + (unit === "week" ? 7 : 1) * 24 * 60 * 60 * 1000);
+          ? zonedMidnightUtc(sp.y, sp.mo + 1, 1, tz)
+          : unit === "week"
+            ? zonedMidnightUtc(sp.y, sp.mo, sp.day + 7, tz)
+            : zonedMidnightUtc(sp.y, sp.mo, sp.day + 1, tz);
       const energy = windowEnergy(group);
       const label =
         unit === "month"
-          ? start.toLocaleDateString("en-ZA", { month: "short", year: "2-digit", timeZone: "UTC" })
-          : start.toLocaleDateString("en-ZA", { day: "numeric", month: "short", timeZone: "UTC" });
+          ? start.toLocaleDateString("en-ZA", { month: "short", year: "2-digit", timeZone: tz })
+          : start.toLocaleDateString("en-ZA", { day: "numeric", month: "short", timeZone: tz });
       return {
         label,
         periodStart: start.toISOString(),
