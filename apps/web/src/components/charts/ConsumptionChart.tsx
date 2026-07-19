@@ -27,6 +27,7 @@ type IntervalRow = {
   reactiveEnergyKvarh: string | null;
   avgDemandKw: string | null;
   avgDemandKva: string | null;
+  isComplete: boolean;
 };
 
 // One bucket as returned by readings.energyByPeriod.
@@ -161,8 +162,10 @@ function fmtDayLabel(dayStr: string): string {
   });
 }
 
-function fmtTime(iso: string) {
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+// Interval labels must read in the SITE's timezone (the day window is chosen in it), NOT the
+// viewer's browser zone — otherwise a 10:00Z peak shows at a browser-dependent hour.
+function fmtTime(iso: string, tz: string) {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: tz });
 }
 
 // Axis ticks read faster compacted (216k, 1.2M) — the tooltip carries exact values.
@@ -345,10 +348,14 @@ export function ConsumptionChart({
 
   // ── Power view: per-interval demand series for the chosen day. ──
   const metric = POWER[metricKey];
-  const data = intervals.map((iv) => ({
-    label: fmtTime(iv.intervalStart),
-    value: Number.parseFloat((iv[metric.field] as string) ?? "0"),
-  }));
+  const data = intervals.map((iv) => {
+    const raw = iv[metric.field] as string | null;
+    // Gap incomplete intervals (data gaps): the register catches up in one interval, inflating
+    // its demand into a phantom spike that can outrank the true peak. Null ⇒ the area breaks
+    // there rather than plotting a false value — matching how the peak-demand tile excludes them.
+    const value = iv.isComplete && raw != null ? Number.parseFloat(raw) : null;
+    return { label: fmtTime(iv.intervalStart, timezone), value };
+  });
 
   const dayControl = (
     <input
@@ -389,6 +396,7 @@ export function ConsumptionChart({
                 strokeLinecap="round"
                 fill={metric.color}
                 fillOpacity={0.1}
+                connectNulls={false}
                 isAnimationActive={false}
               />
             </AreaChart>

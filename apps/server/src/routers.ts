@@ -659,23 +659,49 @@ export async function siteInvitesAccept(ctx: AuthContext, input: unknown) {
 
 /* ─────────────── Devices Router ─────────────── */
 
-// Safe projection for device READS — excludes api_key_hash (the HMAC signing key) and the
-// SIM identifiers (PII). Used by devicesList/devicesGet so secrets never leave the server.
-function deviceSafeColumns() {
-  return {
-    id: devices.id,
-    siteId: devices.siteId,
-    serialNumber: devices.serialNumber,
-    hardwareModel: devices.hardwareModel,
-    connectivityMode: devices.connectivityMode,
-    firmwareVersion: devices.firmwareVersion,
-    status: devices.status,
-    lastSeenAt: devices.lastSeenAt,
-    upsStatus: devices.upsStatus,
-    upsBatteryPct: devices.upsBatteryPct,
-    createdAt: devices.createdAt,
-    updatedAt: devices.updatedAt,
-  };
+// A meter's live connectivity, derived from its ingestion — the current hardware model is
+// meter-centric (the Pi ingests per-meter JWTs via /ingest/raw and never writes a `devices`
+// row), so "Devices & Connectivity" reflects each meter and how recently it last reported.
+export type DeviceConnectivity = {
+  id: string;
+  serialNumber: string;
+  connectivityMode: string | null;
+  status: "online" | "degraded" | "offline";
+  lastSeenAt: Date | null;
+};
+
+// The meter reports ~once a minute, so a gap of minutes means it stopped talking.
+const CONNECTIVITY_ONLINE_MS = 10 * 60 * 1000; // ≤10 min since last sample ⇒ online
+const CONNECTIVITY_DEGRADED_MS = 60 * 60 * 1000; // ≤60 min ⇒ degraded; older ⇒ offline
+
+// Map a set of meters to connectivity entries: last-seen = the meter's newest reading, status
+// from its staleness. One grouped query for the whole set.
+async function meterConnectivity(
+  meterRows: { id: string; serialNumber: string }[],
+): Promise<DeviceConnectivity[]> {
+  if (meterRows.length === 0) return [];
+  const idList = sql.join(
+    meterRows.map((m) => sql`${m.id}`),
+    sql`, `,
+  );
+  const res = await db.execute(sql`
+    SELECT meter_id, max(measured_at) AS latest
+    FROM readings
+    WHERE meter_id IN (${idList})
+    GROUP BY meter_id
+  `);
+  const latest = new Map<string, Date>();
+  for (const r of res.rows as Record<string, unknown>[]) {
+    latest.set(String(r.meter_id), new Date(r.latest as string | number | Date));
+  }
+  const now = Date.now();
+  return meterRows.map((m) => {
+    const seen = latest.get(m.id) ?? null;
+    const age = seen ? now - seen.getTime() : Number.POSITIVE_INFINITY;
+    const status =
+      age <= CONNECTIVITY_ONLINE_MS ? "online" : age <= CONNECTIVITY_DEGRADED_MS ? "degraded" : "offline";
+    return { id: m.id, serialNumber: m.serialNumber, connectivityMode: null, status, lastSeenAt: seen };
+  });
 }
 
 export async function devicesList(ctx: AuthContext, input: unknown) {
@@ -683,31 +709,24 @@ export async function devicesList(ctx: AuthContext, input: unknown) {
   const limit = parsed.limit || 50;
   const offset = parsed.offset || 0;
 
-  // NEVER return api_key_hash: it IS the HMAC signing key, so leaking it lets anyone forge
-  // a device's /ingest signatures. Also drop SIM identifiers (PII). Select safe columns only.
-  const cols = deviceSafeColumns();
-
   if (parsed.siteId) {
     await requireSiteAccess(ctx, parsed.siteId);
-    const rows = await db
-      .select(cols)
-      .from(devices)
-      .where(eq(devices.siteId, parsed.siteId))
-      .limit(limit)
-      .offset(offset);
+    const meterRows = await db
+      .select({ id: meters.id, serialNumber: meters.serialNumber })
+      .from(meters)
+      .where(eq(meters.siteId, parsed.siteId));
+    const rows = (await meterConnectivity(meterRows)).slice(offset, offset + limit);
     return { devices: rows, total: rows.length };
   }
 
-  // No site filter ⇒ scope to the CALLER'S OWN ORG only (never every org's devices). This
-  // joins through the device's site, so unassigned (site_id NULL) devices — which belong to
-  // no org yet and are operator-managed — are correctly excluded.
-  const rows = await db
-    .select(cols)
-    .from(devices)
-    .innerJoin(sites, eq(sites.id, devices.siteId))
-    .where(eq(sites.organizationId, ctx.organizationId))
-    .limit(limit)
-    .offset(offset);
+  // No site filter ⇒ scope to the CALLER'S OWN ORG only (never every org's meters). Join
+  // through the meter's site so only meters on the caller's org are included.
+  const meterRows = await db
+    .select({ id: meters.id, serialNumber: meters.serialNumber })
+    .from(meters)
+    .innerJoin(sites, eq(sites.id, meters.siteId))
+    .where(eq(sites.organizationId, ctx.organizationId));
+  const rows = (await meterConnectivity(meterRows)).slice(offset, offset + limit);
   return { devices: rows, total: rows.length };
 }
 
@@ -3145,6 +3164,16 @@ async function siteDemandInterval(siteId: string): Promise<number> {
   return site?.demandIntervalMinutes ?? 30;
 }
 
+// The site's IANA timezone — energy charts bucket calendar periods (day/week/month) in it so
+// a "daily" bar is local midnight→midnight, not a UTC day.
+async function siteTimezone(siteId: string): Promise<string> {
+  const site = await db.query.sites.findFirst({
+    where: eq(sites.id, siteId),
+    columns: { timezone: true },
+  });
+  return site?.timezone ?? "Africa/Johannesburg";
+}
+
 export async function readingsLatest(ctx: AuthContext, input: unknown) {
   const parsed = readingsLatestInput.parse(input);
   await requireSiteAccess(ctx, parsed.siteId);
@@ -3227,6 +3256,7 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
   const granularity = parsed.granularity ?? "billing_period";
 
   const meterIds = await siteMeterIds(parsed.siteId);
+  const tz = await siteTimezone(parsed.siteId);
 
   // Explicit calendar granularity: bucket the raw samples by day/week/month over a bounded
   // trailing window (so we don't scan the whole history), then keep the last `limit`.
@@ -3237,7 +3267,7 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
         ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1))
         : new Date(now.getTime() - limit * (granularity === "week" ? 7 : 1) * 24 * 60 * 60 * 1000);
     const rows = await fetchRawReadings(meterIds, { from });
-    const buckets = bucketEnergyByCalendar(rows, granularity);
+    const buckets = bucketEnergyByCalendar(rows, granularity, tz);
     return { basis: granularity, periods: buckets.slice(-limit) };
   }
 
@@ -3277,7 +3307,7 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
   const now = new Date();
   const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1));
   const allRows = await fetchRawReadings(meterIds, { from });
-  const months = bucketEnergyByCalendar(allRows, "month");
+  const months = bucketEnergyByCalendar(allRows, "month", tz);
   return { basis: "calendar_month" as const, periods: months.slice(-limit) };
 }
 
