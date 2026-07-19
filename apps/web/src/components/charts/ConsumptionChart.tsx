@@ -236,7 +236,7 @@ export function ConsumptionChart({
 }) {
   const [metricKey, setMetricKey] = useState<MetricKey>("energy");
   const [day, setDay] = useState<string>(() => todayInTz(timezone));
-  const [granularity, setGranularity] = useState<Granularity>("month");
+  const [granularity, setGranularity] = useState<Granularity>("day");
 
   // Auto-refresh the live power series (only material when viewing today).
   const [tick, setTick] = useState(0);
