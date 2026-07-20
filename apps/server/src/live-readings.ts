@@ -52,6 +52,13 @@ function num(v: number | null | undefined): number | null {
  * ≪ the ~1-minute sampling cadence) captures it without ever reaching the next real sample. */
 const BOUNDARY_SNAP_MS = 5_000;
 
+/** Max distance from an interval boundary to the nearest reading for that boundary's register to
+ * be trusted. Demand needs only the register at each boundary, so an interval is trustworthy when
+ * a reading sits within this window of BOTH boundaries — how densely the MIDDLE was sampled is
+ * irrelevant. A dropout that swallows a boundary (nearest reading further than this) is the only
+ * thing that makes an interval's demand unreliable. */
+const NEAR_BOUNDARY_MS = 4 * 60_000;
+
 /**
  * Energy consumed across a set of time-ordered samples = (last register − first register),
  * clamped at 0. Samples MUST be passed oldest→newest (the SQL fetch orders by measured_at).
@@ -335,8 +342,9 @@ type EnergyRegister = "energyImportKwh" | "energyImportKvarh" | "apparentEnergyK
  * timestamp it a millisecond or two late, so demand is not under-read at every boundary. Σ
  * interval deltas telescopes across covered buckets, conserving energy; a backwards delta
  * (register rollover / meter reset) clamps to 0. Demand = energy / interval-hours. Emits only
- * intervals whose own bucket has ≥1 sample; an interval is `isComplete` only when both its
- * bucket and the next are well-sampled (its demand reads across both boundaries).
+ * intervals whose own bucket has ≥1 sample; an interval is `isComplete` only when a reading sits
+ * near BOTH boundaries (the two register values the demand needs) — middle sampling density is
+ * irrelevant, so a mid-interval dropout does NOT gap it; only a boundary-swallowing gap does.
  */
 export function deriveMeterIntervals(
   rows: RawReadingRow[],
@@ -383,16 +391,23 @@ export function deriveMeterIntervals(
     return d < 0 ? 0 : d;
   };
 
-  // Sample count per clock-aligned bucket, computed once.
+  // Sample count per clock-aligned bucket (informational only).
   const bucketCount = new Map<number, number>();
   for (const r of sorted) {
     const b = Math.floor(r.measuredAt.getTime() / intervalMs) * intervalMs;
     bucketCount.set(b, (bucketCount.get(b) ?? 0) + 1);
   }
+  // Is there a reading within NEAR_BOUNDARY_MS of clock time `t`? (times ascending)
+  const times = sorted.map((r) => r.measuredAt.getTime());
+  const hasReadingNear = (t: number): boolean => {
+    for (const rt of times) {
+      if (rt < t - NEAR_BOUNDARY_MS) continue;
+      return rt <= t + NEAR_BOUNDARY_MS;
+    }
+    return false;
+  };
   const hours = intervalMinutes / 60;
   const expectedSamples = Math.ceil((intervalMinutes * 60) / 60);
-  const wellSampled = (bucketStart: number): boolean =>
-    (bucketCount.get(bucketStart) ?? 0) >= expectedSamples * 0.9;
 
   const out: DerivedMeterInterval[] = [];
   for (let s = startMs; s <= lastMs; s += intervalMs) {
@@ -413,10 +428,11 @@ export function deriveMeterIntervals(
       avgDemandKva: (apparent / hours).toFixed(3),
       sampleCount,
       expectedSamples,
-      // Demand spans this bucket's boundary AND the next bucket's, so it is only trustworthy
-      // ("complete") when BOTH buckets are well-sampled — which also rejects the interval that
-      // sits just before a data gap (its demand is inflated by the post-gap register jump).
-      isComplete: wellSampled(s) && wellSampled(e),
+      // Demand = register at START boundary vs END boundary, so it's trustworthy whenever a
+      // reading sits near BOTH boundaries — regardless of middle sampling density. It's only
+      // unreliable when a dropout swallows a boundary (no reading near it), e.g. the interval
+      // straddling a 55-min gap whose boundary register is guessed from a far-away sample.
+      isComplete: hasReadingNear(s) && hasReadingNear(e),
     });
   }
   return out;

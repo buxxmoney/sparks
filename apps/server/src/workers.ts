@@ -23,6 +23,11 @@ import { putObject } from "./storage";
  * cadence, so it captures the boundary sample without reaching the next real one. */
 const BOUNDARY_SNAP_MS = 5_000;
 
+/** Max distance from an interval boundary to the nearest reading for that boundary's register to
+ * be trusted — an interval's demand is reliable when a reading sits within this window of both
+ * boundaries, regardless of middle sampling density. */
+const NEAR_BOUNDARY_MS = 4 * 60_000;
+
 /**
  * Aggregate readings into demand intervals for a meter.
  * Computes clock-aligned intervals in UTC.
@@ -60,15 +65,10 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
 
   const intervals = computeIntervals(startTime, endTime, intervalMinutes);
 
-  const intervalMs = intervalMinutes * 60 * 1000;
-
   // Interval energy from CUMULATIVE registers: the register at the interval END boundary minus
-  // the value at its START boundary, where each boundary register = the FIRST reading in the
-  // bucket starting at that boundary. Anchoring on the first in-bucket sample (not the last
-  // sample ≤ the exact boundary) captures the on-the-half-hour reading even though meters
-  // timestamp it a millisecond or two late, so demand is not under-read at every boundary.
-  // Σ interval deltas telescopes across covered buckets, conserving energy. A gap bucket falls
-  // back to the last reading ≤ the boundary so telescoping survives the gap.
+  // the value at its START boundary, each snapped to the on-the-boundary sample (see
+  // boundaryRegister). Σ interval deltas telescopes across covered buckets, conserving energy;
+  // a gap bucket falls back to the last reading ≤ the boundary so telescoping survives the gap.
   type EnergyField = "activeEnergyKwh" | "reactiveEnergyKvarh" | "apparentEnergyKvah";
   const earliestRegister = (field: EnergyField): number | null => {
     for (const r of meterReadings) {
@@ -101,13 +101,17 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
     return (delta < 0 ? 0 : delta).toFixed(3);
   };
 
-  // Sample count per clock-aligned bucket, so an interval counts as complete only when both its
-  // own bucket and the next are well-sampled (its demand reads across both boundaries).
-  const bucketCount = new Map<number, number>();
-  for (const r of meterReadings) {
-    const b = Math.floor(new Date(r.time).getTime() / intervalMs) * intervalMs;
-    bucketCount.set(b, (bucketCount.get(b) ?? 0) + 1);
-  }
+  // Demand needs only the register at each boundary, so an interval is trustworthy whenever a
+  // reading sits within NEAR_BOUNDARY_MS of BOTH boundaries — middle sampling density is
+  // irrelevant. Only a dropout that swallows a boundary makes its demand unreliable.
+  const readingTimes = meterReadings.map((r) => new Date(r.time).getTime()).sort((a, b) => a - b);
+  const hasReadingNear = (t: number): boolean => {
+    for (const rt of readingTimes) {
+      if (rt < t - NEAR_BOUNDARY_MS) continue;
+      return rt <= t + NEAR_BOUNDARY_MS;
+    }
+    return false;
+  };
 
   for (const interval of intervals) {
     const intervalReadings = meterReadings.filter(
@@ -139,9 +143,8 @@ export async function aggregateDemandIntervals(meterId: string): Promise<void> {
           ).toFixed(4)
         : null;
 
-    const nextBucketCount = bucketCount.get(interval.end.getTime()) ?? 0;
     const isComplete =
-      sampleCount >= expectedSamples * 0.9 && nextBucketCount >= expectedSamples * 0.9;
+      hasReadingNear(interval.start.getTime()) && hasReadingNear(interval.end.getTime());
 
     await db
       .insert(demandIntervals)
