@@ -223,7 +223,8 @@ describe("Device Ingestion API (mounted route)", () => {
     expect(iv.activeEnergyKwh).toBe("5.000");
     // avg demand = 5 kWh / 0.5 h = 10 kW.
     expect(iv.avgDemandKw).toBe("10.000");
-    // Only 5 of 30 expected samples present → flagged incomplete for downstream gap handling.
+    // Completeness is boundary-based: the :30 end boundary's nearest reading is :25 (5 min away,
+    // beyond the tolerance), so this interval is flagged incomplete for downstream gap handling.
     expect(iv.sampleCount).toBe(5);
     expect(iv.isComplete).toBe(false);
   });

@@ -174,18 +174,37 @@ describe("peakDemandKva", () => {
     expect(peakDemandKva(rows, 30)).toBe("16.000");
   });
 
-  it("ignores an incomplete (data-gap) interval even when its register jump implies huge demand", () => {
+  it("ignores an interval whose boundary a dropout swallowed, even with a huge register jump", () => {
     const rows = [
       // Two full buckets ⇒ one complete interval [00:30,01:00) = 16 kVA (the real peak).
       ...fullBucket("m", "2026-07-15T00:30:00Z", 105),
       ...fullBucket("m", "2026-07-15T01:00:00Z", 113),
-      // Sparse bucket [01:30,02:00): only 3 samples, register leaps to 200. The interval
-      // [01:00,01:30) reading into it computes ~174 kVA but is incomplete ⇒ excluded.
-      sample("m", "2026-07-15T01:30:00.001Z", { apparentEnergyKvah: 200 }),
-      sample("m", "2026-07-15T01:40:00.001Z", { apparentEnergyKvah: 260 }),
-      sample("m", "2026-07-15T01:50:00.001Z", { apparentEnergyKvah: 320 }),
+      // ~1h dropout, then readings resume at 02:26 with the register jumped to 200. The interval
+      // [02:00,02:30) reads a giant delta, but its 02:00 boundary has NO reading nearby (nearest
+      // are 01:29 and 02:26, both far beyond the tolerance) ⇒ incomplete ⇒ excluded from the peak.
+      sample("m", "2026-07-15T02:26:00.001Z", { apparentEnergyKvah: 200 }),
+      sample("m", "2026-07-15T02:27:00.001Z", { apparentEnergyKvah: 200.4 }),
+      sample("m", "2026-07-15T02:28:00.001Z", { apparentEnergyKvah: 200.8 }),
     ];
     expect(peakDemandKva(rows, 30)).toBe("16.000");
+  });
+
+  it("does NOT gap an interval when the dropout is mid-interval (both boundaries still sampled)", () => {
+    // [00:30,01:00): readings AT both boundaries (:30 and :00) but a 27-min hole in the middle.
+    // Demand only needs the two boundary registers, so this stays complete and correct.
+    const rows = [
+      sample("m", "2026-07-15T00:30:00.001Z", { apparentEnergyKvah: 105 }),
+      sample("m", "2026-07-15T00:31:00.001Z", { apparentEnergyKvah: 105.4 }),
+      // … minutes 32–57 dropped (a mid-interval gap that touches neither boundary) …
+      sample("m", "2026-07-15T00:58:00.001Z", { apparentEnergyKvah: 112 }),
+      sample("m", "2026-07-15T00:59:00.001Z", { apparentEnergyKvah: 112.5 }),
+      sample("m", "2026-07-15T01:00:00.001Z", { apparentEnergyKvah: 113 }), // the :00 boundary
+    ];
+    const iv = deriveMeterIntervals(rows, 30).find(
+      (x) => x.intervalStart.toISOString() === "2026-07-15T00:30:00.000Z",
+    );
+    expect(iv?.isComplete).toBe(true); // boundaries sampled ⇒ trustworthy despite the middle hole
+    expect(iv?.avgDemandKva).toBe("16.000"); // (113 − 105) / 0.5 h
   });
 
   it("sums coincident per-meter demand across meters within an interval", () => {
