@@ -359,11 +359,14 @@ export function ConsumptionChart({
 
   // Each point sits at its interval's START, and the area only paints between two points — so a
   // complete interval right before a gap would paint nothing across its own half-hour, making the
-  // data look like it ends 30 min early. Hold that value one slot into the gap so the block fills
-  // to its end boundary; the blank then begins where the data truly stops.
+  // data look like it ends 30 min early. Hold that value into ONLY the first gap slot so the block
+  // fills to its end boundary; the blank then begins where the data truly stops. Use the ORIGINAL
+  // values so the hold can't chain forward and bridge the whole gap (a gap is always ≥2 slots).
+  const original = data.map((d) => d.value);
   for (let i = 1; i < data.length; i++) {
-    const prev = data[i - 1].value;
-    if (data[i].value === null && prev !== null) data[i] = { ...data[i], value: prev };
+    if (original[i] === null && original[i - 1] !== null) {
+      data[i] = { ...data[i], value: original[i - 1] };
+    }
   }
 
   const dayControl = (
