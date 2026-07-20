@@ -357,6 +357,15 @@ export function ConsumptionChart({
     return { label: fmtTime(iv.intervalStart, timezone), value };
   });
 
+  // Each point sits at its interval's START, and the area only paints between two points — so a
+  // complete interval right before a gap would paint nothing across its own half-hour, making the
+  // data look like it ends 30 min early. Hold that value one slot into the gap so the block fills
+  // to its end boundary; the blank then begins where the data truly stops.
+  for (let i = 1; i < data.length; i++) {
+    const prev = data[i - 1].value;
+    if (data[i].value === null && prev !== null) data[i] = { ...data[i], value: prev };
+  }
+
   const dayControl = (
     <input
       type="date"
