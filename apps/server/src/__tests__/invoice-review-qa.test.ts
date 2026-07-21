@@ -19,6 +19,7 @@ import {
 import { eq } from "drizzle-orm";
 import { adminListReviewQueue, adminReviewReconciliation } from "../admin";
 import type { AuthContext } from "../middleware";
+import { dispatchOperatorBillSubmitted } from "../notifications";
 import {
   alertsAcknowledge,
   alertsList,
@@ -343,6 +344,26 @@ describe("Invoice review & QA overhaul", () => {
     const entry = queue.queue.find((q) => q.reconId === reconId);
     expect(entry?.reviewRequestedAt).toBeTruthy();
     expect(entry?.reviewNote).toBe("Please double-check the demand.");
+  });
+
+  it("puts a submitted bill in the Sparks operators' Alerts inbox (not the customer's)", async () => {
+    await dispatchOperatorBillSubmitted({
+      invoiceId,
+      siteId,
+      organizationId: orgId,
+      siteName: "QA Site",
+      note: "Check the demand charge.",
+    });
+
+    // The operator gets one actionable alert that links to the admin queue.
+    const opInbox = await alertsList(operatorCtx);
+    expect(opInbox.alerts.length).toBe(1);
+    expect(opInbox.alerts[0].type).toBe("review_submitted");
+    expect(opInbox.alerts[0].siteId).toBe(siteId);
+    expect((opInbox.alerts[0].payload as { href?: string }).href).toBe("/admin");
+
+    // The customer (non-operator) does NOT receive the operator alert.
+    expect((await alertsList(ownerCtx)).alerts.length).toBe(0);
   });
 
   it("delivers the outcome to the customer's Alerts inbox and tracks read state", async () => {

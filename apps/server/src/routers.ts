@@ -64,7 +64,11 @@ import {
   generateReconciliation,
   priceSegments,
 } from "./reconciliation";
-import { dispatchInvoiceParsed, dispatchReviewSubmitted } from "./notifications";
+import {
+  dispatchInvoiceParsed,
+  dispatchOperatorBillSubmitted,
+  dispatchReviewSubmitted,
+} from "./notifications";
 import { sendSms } from "./sms";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
@@ -2852,6 +2856,16 @@ export async function invoicesRequestReview(ctx: AuthContext, input: unknown) {
     siteId: invoice.siteId,
     organizationId: site?.organizationId ?? "",
     siteName: site?.name ?? "your site",
+  });
+
+  // And put it in the Sparks operators' Alerts inbox — so a submitted bill isn't
+  // just a silent row in the review queue.
+  void dispatchOperatorBillSubmitted({
+    invoiceId: invoice.id,
+    siteId: invoice.siteId,
+    organizationId: site?.organizationId ?? "",
+    siteName: site?.name ?? "a site",
+    note: parsed.note ?? null,
   });
 
   return { invoiceId: parsed.invoiceId, reviewRequestedAt: new Date() };

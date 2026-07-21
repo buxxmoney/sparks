@@ -257,6 +257,60 @@ export async function dispatchInvoiceParsed(params: {
 }
 
 /**
+ * Notify the Sparks OPERATORS, in their in-app Alerts inbox, that a customer has
+ * submitted a bill for review — so it's not just a silent row in the operator
+ * queue (and an email that may be missed). Delivered to every platform-operator
+ * user on the 'app' channel; the alert deep-links to the operator admin queue.
+ * Best-effort; never throws.
+ */
+export async function dispatchOperatorBillSubmitted(params: {
+  invoiceId: string;
+  siteId: string;
+  organizationId: string;
+  siteName: string;
+  note?: string | null;
+}): Promise<void> {
+  try {
+    const db = getDb();
+    const operators = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.isPlatformOperator, true));
+    if (operators.length === 0) return;
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        organizationId: params.organizationId,
+        siteId: params.siteId,
+        type: "review_submitted",
+        severity: "warning",
+        title: `New bill to review — ${params.siteName}`,
+        message: params.note
+          ? `A customer sent a bill to Sparks for review.\n\nTheir note: ${params.note}`
+          : "A customer sent a bill to Sparks for review. Open the review queue to action it.",
+        // href routes operators to the admin queue (they have no per-site access,
+        // so the customer invoice link wouldn't resolve for them).
+        payload: { invoiceId: params.invoiceId, href: "/admin" },
+        status: "open",
+      })
+      .returning();
+
+    for (const op of operators) {
+      await db.insert(alertDeliveries).values({
+        alertId: alert.id,
+        channel: "app",
+        recipientUserId: op.id,
+        status: "sent",
+        sentAt: new Date(),
+      });
+    }
+  } catch (err) {
+    console.error(`[notify] operator bill-submitted alert failed for ${params.invoiceId}:`, err);
+  }
+}
+
+/**
  * Confirmation for the customer that their bill has been SENT to Sparks for review —
  * closing the loop (ready → sent → outcome) in their Alerts inbox AND by text.
  * Best-effort; never throws.

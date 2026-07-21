@@ -18,6 +18,9 @@ type AlertPayload = {
   reconId?: string;
   invoiceId?: string;
   verified?: boolean;
+  // Explicit destination that overrides the site-derived link (e.g. operator
+  // alerts point at "/admin", where the recipient has no per-site access).
+  href?: string;
   // New: several attachments. `attachmentName` is the legacy single-attachment shape.
   attachments?: { key: string; name: string }[];
   attachmentName?: string | null;
@@ -85,15 +88,18 @@ export default function AlertsPage() {
             const payload = a.payload as AlertPayload;
             const unread = !a.readAt;
             const verified = payload?.verified === true;
-            // Where this alert takes you: the invoice (parse-ready) or the
-            // reconciliation (review outcome), on the alert's site.
-            const targetHref = a.siteId
-              ? payload?.invoiceId
-                ? `/sites/${a.siteId}/invoices/${payload.invoiceId}`
-                : payload?.reconId
-                  ? `/sites/${a.siteId}/bill-check/${payload.reconId}`
-                  : null
-              : null;
+            // Where this alert takes you: an explicit payload href wins (operator
+            // alerts → /admin); otherwise the invoice (parse-ready) or the bill
+            // check (review outcome), on the alert's site.
+            const targetHref = payload?.href
+              ? payload.href
+              : a.siteId
+                ? payload?.invoiceId
+                  ? `/sites/${a.siteId}/invoices/${payload.invoiceId}`
+                  : payload?.reconId
+                    ? `/sites/${a.siteId}/bill-check/${payload.reconId}`
+                    : null
+                : null;
             // Opening a message just navigates — it does NOT mark it read, because
             // marking read deletes it (see alertsAcknowledge). The recipient dismisses
             // explicitly via "Mark read" / "Mark all read".
@@ -155,6 +161,13 @@ export default function AlertsPage() {
                         variant="primary"
                         icon={<Scale size={16} />}
                         href={`/sites/${a.siteId}/bill-check/${payload.reconId}`}
+                      />
+                    ) : payload?.href ? (
+                      <Button
+                        label="Open review queue"
+                        variant="primary"
+                        icon={<Scale size={16} />}
+                        href={payload.href}
                       />
                     ) : null}
                     {/* New multi-attachment shape, then legacy single. */}
