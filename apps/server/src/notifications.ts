@@ -7,7 +7,7 @@ import {
   siteAccess,
   user,
 } from "@sparks/db";
-import { billReviewOutcomeEmail, sendEmail } from "./email";
+import { billReviewOutcomeEmail, meterDownEmail, sendEmail } from "./email";
 import { sendSms } from "./sms";
 import { putObject } from "./storage";
 
@@ -253,6 +253,85 @@ export async function dispatchInvoiceParsed(params: {
     );
   } catch (err) {
     console.error(`[notify] invoice-parsed alert failed for ${params.invoiceId}:`, err);
+  }
+}
+
+/**
+ * Notify the Sparks OPERATORS that a meter has gone offline — an in-app alert AND
+ * an email to every platform-operator, because operators don't watch the customer
+ * dashboards. The caller (evaluateDeviceOffline) owns the transition/dedup, so this
+ * fires once per offline event. Returns the alert id. Best-effort; never throws.
+ */
+export async function dispatchOperatorMeterDown(params: {
+  deviceId: string;
+  serialNumber: string;
+  siteId: string;
+  organizationId: string;
+  siteName: string;
+  minutesSinceLastSeen: number;
+  lastSeenAt: Date | null;
+  webUrl: string;
+}): Promise<void> {
+  try {
+    const db = getDb();
+    const operators = await db
+      .select({ id: user.id, email: user.email })
+      .from(user)
+      .where(eq(user.isPlatformOperator, true));
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        organizationId: params.organizationId,
+        siteId: params.siteId,
+        deviceId: params.deviceId,
+        type: "device_offline",
+        severity: "critical",
+        title: `Meter offline — ${params.siteName}`,
+        message: `Meter ${params.serialNumber} has stopped reporting (no data for ${params.minutesSinceLastSeen}+ minutes). Its readings and any bill checks will have a gap until it's back online.`,
+        payload: { deviceId: params.deviceId, href: "/admin" },
+        status: "open",
+      })
+      .returning();
+
+    const email = meterDownEmail({
+      siteName: params.siteName,
+      serialNumber: params.serialNumber,
+      minutes: params.minutesSinceLastSeen,
+      lastSeen: params.lastSeenAt,
+      link: `${params.webUrl}/admin`,
+    });
+
+    for (const op of operators) {
+      // In-app inbox item.
+      await db.insert(alertDeliveries).values({
+        alertId: alert.id,
+        channel: "app",
+        recipientUserId: op.id,
+        status: "sent",
+        sentAt: new Date(),
+      });
+      // Email — operators don't watch dashboards, so this is the primary signal.
+      if (op.email) {
+        try {
+          await sendEmail({ to: op.email, subject: email.subject, html: email.html });
+          await db.insert(alertDeliveries).values({
+            alertId: alert.id,
+            channel: "email",
+            recipientUserId: op.id,
+            status: "sent",
+            sentAt: new Date(),
+          });
+        } catch (err) {
+          console.error(`[notify] meter-down email to ${op.email} failed:`, err);
+          await db
+            .insert(alertDeliveries)
+            .values({ alertId: alert.id, channel: "email", recipientUserId: op.id, status: "failed" });
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[notify] operator meter-down alert failed for device ${params.deviceId}:`, err);
   }
 }
 

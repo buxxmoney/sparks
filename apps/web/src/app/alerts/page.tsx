@@ -164,7 +164,7 @@ export default function AlertsPage() {
                       />
                     ) : payload?.href ? (
                       <Button
-                        label="Open review queue"
+                        label={a.type === "device_offline" ? "Open in admin" : "Open review queue"}
                         variant="primary"
                         icon={<Scale size={16} />}
                         href={payload.href}

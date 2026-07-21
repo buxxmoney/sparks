@@ -8,6 +8,8 @@ import {
   dataGaps,
   sites,
   alerts,
+  alertDeliveries,
+  user,
 } from "@sparks/db";
 import { randomUUID } from "node:crypto";
 import { eq, and } from "drizzle-orm";
@@ -15,6 +17,7 @@ import {
   aggregateDemandIntervals,
   detectDataGaps,
   evaluateDeviceOffline,
+  monitorDeviceHealth,
 } from "../workers";
 
 let testSiteId: string;
@@ -487,5 +490,45 @@ describe("evaluateDeviceOffline", () => {
       );
 
     expect(alerts_list.length).toBe(1);
+  });
+
+  it("delivers the offline alert to Sparks operators (in-app) and the sweep finds the device", async () => {
+    const operatorId = `op-${randomUUID()}`;
+    await db
+      .insert(user)
+      .values({ id: operatorId, email: `${operatorId}@sparks.test`, isPlatformOperator: true });
+
+    try {
+      await db
+        .update(devices)
+        .set({ lastSeenAt: new Date(Date.now() - 20 * 60 * 1000) })
+        .where(eq(devices.id, testDeviceId));
+
+      // The periodic sweep should evaluate this site-assigned device.
+      const result = await monitorDeviceHealth(15);
+      expect(result.checked).toBeGreaterThanOrEqual(1);
+
+      const [offlineAlert] = await db
+        .select()
+        .from(alerts)
+        .where(and(eq(alerts.deviceId, testDeviceId), eq(alerts.type, "device_offline")))
+        .limit(1);
+      expect(offlineAlert).toBeDefined();
+
+      // The operator got an in-app inbox delivery for it.
+      const deliveries = await db
+        .select()
+        .from(alertDeliveries)
+        .where(
+          and(
+            eq(alertDeliveries.alertId, offlineAlert.id),
+            eq(alertDeliveries.recipientUserId, operatorId),
+            eq(alertDeliveries.channel, "app"),
+          ),
+        );
+      expect(deliveries.length).toBe(1);
+    } finally {
+      await db.delete(user).where(eq(user.id, operatorId));
+    }
   });
 });

@@ -262,3 +262,30 @@ export function billReviewOutcomeEmail(data: {
     </div>`,
   };
 }
+
+/**
+ * Operator-facing meter-offline alert — sent to the Sparks team when a meter stops
+ * reporting, since operators don't watch the customer dashboards. Links to admin.
+ */
+export function meterDownEmail(data: {
+  siteName: string;
+  serialNumber: string;
+  minutes: number;
+  lastSeen: Date | null;
+  link: string;
+}): { subject: string; html: string } {
+  const lastSeenStr = data.lastSeen ? data.lastSeen.toISOString().replace("T", " ").slice(0, 16) : "never";
+  return {
+    subject: `Meter offline — ${data.siteName} (${data.serialNumber})`,
+    html: `<div style="font-family:system-ui,sans-serif;max-width:560px;color:#111827">
+      <span style="display:inline-block;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;background:#fee2e2;color:#991b1b">Meter offline</span>
+      <h2 style="margin:10px 0 8px">${escapeHtml(data.serialNumber)} stopped reporting</h2>
+      <p style="color:#6b7280;margin:0 0 12px">Site: ${escapeHtml(data.siteName)}</p>
+      <div style="font-size:14px;line-height:1.6">
+        This meter has sent no data for at least ${data.minutes} minutes (last seen ${lastSeenStr} UTC).
+        Its readings — and any bill checks that depend on them — will have a gap until it's back online.
+      </div>
+      ${button(data.link, "Open the operator console")}
+    </div>`,
+  };
+}

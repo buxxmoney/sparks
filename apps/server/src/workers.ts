@@ -12,9 +12,10 @@ import {
   sites,
   tariffProfiles,
 } from "@sparks/db";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNotNull } from "drizzle-orm";
 import { parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
 import { PreconditionError } from "./middleware";
+import { dispatchOperatorMeterDown } from "./notifications";
 import { hashBuffer, renderHtmlToPdf, renderReportHtml } from "./reports";
 import { putObject } from "./storage";
 
@@ -353,15 +354,17 @@ export async function evaluateDeviceOffline(
     const existingAlert = existingAlertList[0];
 
     if (!existingAlert) {
-      await db.insert(alerts).values({
-        organizationId: site.organizationId,
-        siteId: site.id,
+      // Operators don't watch the customer dashboards, so this both creates the
+      // alert and pushes it to every platform-operator (in-app inbox + email).
+      await dispatchOperatorMeterDown({
         deviceId,
-        type: "device_offline",
-        severity: "critical",
-        title: "Device Offline",
-        message: `Device ${device.serialNumber} has not reported data for ${thresholdMinutes} minutes`,
-        status: "open",
+        serialNumber: device.serialNumber,
+        siteId: site.id,
+        organizationId: site.organizationId,
+        siteName: site.name,
+        minutesSinceLastSeen: thresholdMinutes,
+        lastSeenAt: lastSeen,
+        webUrl: process.env.WEB_URL || "http://localhost:3000",
       });
     }
 
@@ -397,6 +400,31 @@ export async function evaluateDeviceOffline(
         .where(eq(alerts.id, offlineAlert.id));
     }
   }
+}
+
+/**
+ * Sweep every site-assigned device and evaluate its offline status, so a meter
+ * that goes quiet raises an operator alert + email without anyone watching a
+ * dashboard. Runs on an interval from the server process (see index.ts). Each
+ * device is evaluated independently — one failure is logged and never aborts the
+ * rest. Returns how many devices were checked. Safe to run concurrently-guarded
+ * by the caller (a slow sweep shouldn't overlap the next tick).
+ */
+export async function monitorDeviceHealth(thresholdMinutes = 15): Promise<{ checked: number }> {
+  const deviceRows = await db
+    .select({ id: devices.id })
+    .from(devices)
+    .where(isNotNull(devices.siteId));
+
+  for (const d of deviceRows) {
+    try {
+      await evaluateDeviceOffline(d.id, thresholdMinutes);
+    } catch (err) {
+      console.error(`[monitor] offline check failed for device ${d.id}:`, err);
+    }
+  }
+
+  return { checked: deviceRows.length };
 }
 
 /**

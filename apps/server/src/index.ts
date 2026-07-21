@@ -13,6 +13,7 @@ import { ForbiddenError, UnauthorizedError, requireSession } from "./middleware"
 import type { ORPCContext } from "./orpc";
 import { appRouter } from "./router.orpc";
 import { getObject, objectExists, verifyObjectToken } from "./storage";
+import { monitorDeviceHealth } from "./workers";
 
 // Re-export the router type so the typed client (packages/api) can consume it.
 export type { AppRouter } from "./router.orpc";
@@ -141,6 +142,30 @@ if (typeof Bun === "undefined") {
       console.log(`Server running on port ${port}`);
     },
   );
+
+  // Device-health monitor: sweep every few minutes so a meter that stops
+  // reporting raises an operator alert + email (operators don't watch the customer
+  // dashboards). Re-entrancy-guarded so a slow sweep can't overlap the next tick;
+  // disable with DEVICE_MONITOR_DISABLED=1.
+  if (process.env.DEVICE_MONITOR_DISABLED !== "1") {
+    const intervalMs = Number.parseInt(process.env.DEVICE_MONITOR_INTERVAL_MS || "300000"); // 5 min
+    let sweeping = false;
+    const sweep = async () => {
+      if (sweeping) return;
+      sweeping = true;
+      try {
+        await monitorDeviceHealth();
+      } catch (err) {
+        console.error("[monitor] device-health sweep failed:", err);
+      } finally {
+        sweeping = false;
+      }
+    };
+    const timer = setInterval(sweep, intervalMs);
+    // Don't let the monitor keep the process alive on shutdown.
+    if (typeof timer.unref === "function") timer.unref();
+    console.log(`Device-health monitor running every ${Math.round(intervalMs / 1000)}s`);
+  }
 }
 
 // Bun runtime export
