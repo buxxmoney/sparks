@@ -401,8 +401,26 @@ function reconContextColumns() {
     expectedLandlordCents: reconciliations.expectedLandlordCents,
     discrepancyVsLandlordCents: reconciliations.discrepancyVsLandlordCents,
     dataIntegrityStatus: reconciliations.dataIntegrityStatus,
+    measuredActiveKwh: reconciliations.measuredActiveKwh,
+    measuredMaxDemandKva: reconciliations.measuredMaxDemandKva,
+    measuredReactiveKvarh: reconciliations.measuredReactiveKvarh,
     reviewRequestedAt: landlordInvoices.reviewRequestedAt,
   };
+}
+
+// A recon whose window caught no metered usage — every measured figure is 0, so
+// it can't be verified (see assertMeteredDataInPeriod). Surfaced on the queue so
+// operators spot the billing-period/data mismatch before they try to sign off.
+function hasNoMeteredData(r: {
+  measuredActiveKwh: string | null;
+  measuredMaxDemandKva: string | null;
+  measuredReactiveKvarh: string | null;
+}): boolean {
+  return (
+    Number(r.measuredActiveKwh ?? 0) === 0 &&
+    Number(r.measuredMaxDemandKva ?? 0) === 0 &&
+    Number(r.measuredReactiveKvarh ?? 0) === 0
+  );
 }
 
 /**
@@ -492,6 +510,7 @@ export async function adminListReviewQueue(ctx: AuthContext) {
       expectedLandlordCents: r.expectedLandlordCents,
       discrepancyVsLandlordCents: r.discrepancyVsLandlordCents,
       dataIntegrityStatus: r.dataIntegrityStatus,
+      noMeteredData: hasNoMeteredData(r),
       reviewNote: r.reviewNote,
       reviewRequestedAt: r.reviewRequestedAt,
       generatedAt: r.generatedAt,
@@ -514,6 +533,7 @@ export async function adminListReviewQueue(ctx: AuthContext) {
         expectedLandlordCents: null as number | null,
         discrepancyVsLandlordCents: null as number | null,
         dataIntegrityStatus: null as string | null,
+        noMeteredData: false,
         reviewNote: null as string | null,
         reviewRequestedAt: s.reviewRequestedAt,
         generatedAt: null as Date | null,

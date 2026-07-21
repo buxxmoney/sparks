@@ -202,7 +202,11 @@ export default function AdminPage() {
     null,
   );
   // The recon the operator is composing an outcome for (null = queue view).
-  const [respondTo, setRespondTo] = useState<{ reconId: string; siteName: string } | null>(null);
+  const [respondTo, setRespondTo] = useState<{
+    reconId: string;
+    siteName: string;
+    noMeteredData: boolean;
+  } | null>(null);
   const [outSubject, setOutSubject] = useState("");
   const [outBody, setOutBody] = useState("");
   // Zero or more PDF documents to attach to the outcome.
@@ -233,8 +237,8 @@ export default function AdminPage() {
   const organizations = orgData?.organizations ?? [];
   const queue = queueData?.queue ?? [];
 
-  const openRespond = (reconId: string, siteName: string) => {
-    setRespondTo({ reconId, siteName });
+  const openRespond = (reconId: string, siteName: string, noMeteredData: boolean) => {
+    setRespondTo({ reconId, siteName, noMeteredData });
     setOutSubject("Your bill review is complete");
     setOutBody("");
     setOutFiles([]);
@@ -920,6 +924,9 @@ export default function AdminPage() {
                   header: "Flags",
                   renderCell: (q) => (
                     <Stack direction="horizontal" gap={1} wrap="wrap">
+                      {q.noMeteredData ? (
+                        <Badge variant="error" label="No measured data" />
+                      ) : null}
                       {q.dataIntegrityStatus === "gaps_present" ? (
                         <Badge label="Data gaps" />
                       ) : null}
@@ -954,7 +961,9 @@ export default function AdminPage() {
                           label="Review & respond"
                           variant="primary"
                           size="sm"
-                          onClick={() => openRespond(q.reconId as string, q.siteName ?? "the site")}
+                          onClick={() =>
+                            openRespond(q.reconId as string, q.siteName ?? "the site", q.noMeteredData)
+                          }
                         />
                       ) : null}
                     </Stack>
@@ -982,6 +991,13 @@ export default function AdminPage() {
                   <strong>Verified — release report</strong> releases their meter-verified report to
                   download; <strong>No issue found</strong> closes the review with no report.
                 </Text>
+                {respondTo.noMeteredData ? (
+                  <Banner
+                    status="warning"
+                    title="No measured data for this billing period"
+                    description="Every measured figure is 0 — no meter readings fall inside this period, so it can't be verified. Send it back (No issue found) with a note to fix the billing dates, or check the site's data coverage."
+                  />
+                ) : null}
                 <TextInput
                   label="Subject"
                   value={outSubject}
@@ -1041,6 +1057,7 @@ export default function AdminPage() {
                     label={reviewBusy ? "Sending…" : "Verified — release report"}
                     variant="primary"
                     isLoading={reviewBusy}
+                    isDisabled={reviewBusy || respondTo.noMeteredData}
                     onClick={() => sendOutcome("reviewed")}
                   />
                   <Button

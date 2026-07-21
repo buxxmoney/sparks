@@ -383,6 +383,11 @@ describe("Invoice review & QA overhaul", () => {
       .set({ measuredActiveKwh: "0.000", measuredMaxDemandKva: "0.000", measuredReactiveKvarh: "0.000" })
       .where(eq(reconciliations.id, reconId));
 
+    // The operator queue surfaces the "no measured data" flag so it's visible
+    // before anyone tries to sign off.
+    const flaggedQueue = await adminListReviewQueue(operatorCtx);
+    expect(flaggedQueue.queue.find((q) => q.reconId === reconId)?.noMeteredData).toBe(true);
+
     // The operator cannot VERIFY it.
     await expect(
       adminReviewReconciliation(operatorCtx, {
