@@ -69,6 +69,7 @@ import {
   dispatchOperatorBillSubmitted,
   dispatchReviewSubmitted,
 } from "./notifications";
+import { assertMeteredDataInPeriod } from "./report-guards";
 import { sendSms } from "./sms";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
@@ -2018,6 +2019,10 @@ export async function reconciliationGeneratePdf(ctx: AuthContext, input: unknown
       "We're still checking this bill. The meter-verified report unlocks once it has been verified.",
     );
   }
+
+  // A meter-verified report with no metered data in the period is indefensible —
+  // refuse to seal it (see report-guards).
+  await assertMeteredDataInPeriod(recon);
 
   const result = await generateReportPdf(parsed.reconId, ctx.userId);
 

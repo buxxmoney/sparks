@@ -366,6 +366,50 @@ describe("Invoice review & QA overhaul", () => {
     expect((await alertsList(ownerCtx)).alerts.length).toBe(0);
   });
 
+  it("refuses to verify or seal a bill check with no metered data in the period", async () => {
+    const { reconId } = await confirmReconcileOk(ownerCtx, {
+      invoiceId,
+      lines: [
+        { lineItemId: activeLineId, utility: "electricity", supplyGroup: "tenant", component: "active_energy", valueCents: 300000 },
+        { lineItemId: demandLineId, utility: "electricity", supplyGroup: "tenant", component: "demand", valueCents: 550000 },
+        { lineItemId: waterLineId, utility: "water", supplyGroup: "unknown", component: "volume", valueCents: 50000 },
+      ],
+    });
+
+    // Simulate a period whose window has no metered usage (e.g. an invoice period
+    // that predates when the meter started reporting) — all measured figures 0.
+    await db
+      .update(reconciliations)
+      .set({ measuredActiveKwh: "0.000", measuredMaxDemandKva: "0.000", measuredReactiveKvarh: "0.000" })
+      .where(eq(reconciliations.id, reconId));
+
+    // The operator cannot VERIFY it.
+    await expect(
+      adminReviewReconciliation(operatorCtx, {
+        reconId,
+        status: "reviewed",
+        subject: "Verified",
+        body: "Looks good",
+      }),
+    ).rejects.toThrow(/no meter readings fall within/i);
+
+    // And even if it were marked reviewed, SEALING the report is refused too.
+    await db.update(reconciliations).set({ reviewStatus: "reviewed" }).where(eq(reconciliations.id, reconId));
+    await expect(reconciliationGeneratePdf(ownerCtx, { reconId })).rejects.toThrow(
+      /no meter readings fall within/i,
+    );
+
+    // Sending it BACK (flagged) is still allowed — the guard only gates verification.
+    await db.update(reconciliations).set({ reviewStatus: "provisional" }).where(eq(reconciliations.id, reconId));
+    const back = await adminReviewReconciliation(operatorCtx, {
+      reconId,
+      status: "flagged",
+      subject: "Needs data",
+      body: "No metered usage in this period — check the billing dates.",
+    });
+    expect(back.reconciliation.reviewStatus).toBe("flagged");
+  });
+
   it("delivers the outcome to the customer's Alerts inbox and tracks read state", async () => {
     const { reconId } = await confirmReconcileOk(ownerCtx, {
       invoiceId,

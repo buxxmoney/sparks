@@ -20,6 +20,7 @@ import { ensureSiteIngestRole, rotateSiteIngestPassword, siteIngestRoleName } fr
 import { extractPdfText } from "./invoices";
 import { llamaParseConfigured, parseScheduleToMarkdown } from "./llamaparse";
 import { PreconditionError, requirePlatformOperator, type AuthContext } from "./middleware";
+import { assertMeteredDataInPeriod } from "./report-guards";
 import { dispatchBillOutcome } from "./notifications";
 import { putObject } from "./storage";
 import {
@@ -602,6 +603,13 @@ export async function adminReviewReconciliation(ctx: AuthContext, input: unknown
   });
   if (!recon) {
     throw new Error("Bill check not found");
+  }
+
+  // Verifying (releasing the meter-verified report) requires real metered data in
+  // the period — refuse to sign off a bill check built on zero measured usage.
+  // Sending it back (flagged) or any other status is still allowed.
+  if (parsed.status === "reviewed") {
+    await assertMeteredDataInPeriod(recon);
   }
 
   const [updated] = await db
