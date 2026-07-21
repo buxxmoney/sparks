@@ -33,7 +33,12 @@ import {
   windowEnergy,
 } from "./live-readings";
 import { auth } from "./auth";
-import { type BillingPeriodPolicy, materializePeriods } from "./billing";
+import {
+  type BillingPeriodPolicy,
+  materializePeriods,
+  recentPeriods,
+  resolveCurrentPeriod,
+} from "./billing";
 import { billReviewRequestEmail, sendEmail, siteInviteEmail } from "./email";
 import {
   analyzeInvoiceTariffs,
@@ -3218,7 +3223,21 @@ export async function readingsMonthToDate(ctx: AuthContext, input: unknown) {
   await requireSiteAccess(ctx, parsed.siteId);
 
   const now = parsed.asOf ?? new Date();
-  const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+
+  // The live "billing period to date" window follows the site's active billing
+  // policy (custom anchor day, etc.), not a hardcoded calendar month — otherwise
+  // saving a billing cycle in settings never moves the dashboard's energy and
+  // peak-demand cards.
+  const policy = await db.query.billingCyclePolicies.findFirst({
+    where: and(
+      eq(billingCyclePolicies.siteId, parsed.siteId),
+      isNull(billingCyclePolicies.effectiveTo),
+    ),
+  });
+  const { periodStart } = resolveCurrentPeriod(
+    { recurrence: policy?.recurrence ?? "calendar_month", anchorDay: policy?.anchorDay ?? undefined },
+    now,
+  );
 
   const meterIds = await siteMeterIds(parsed.siteId);
   if (meterIds.length === 0) {
@@ -3303,8 +3322,47 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
     return { basis: "billing_period" as const, periods: buckets.slice(-limit) };
   }
 
-  // Fallback: no billing periods yet → bucket the site's raw samples by calendar month.
+  // No billing periods materialized yet. If the site has an active billing policy,
+  // derive the trailing periods straight from it so the chart reflects the saved
+  // cycle (custom anchor day etc.) immediately — before any invoice/materialization.
   const now = new Date();
+  const policy = await db.query.billingCyclePolicies.findFirst({
+    where: and(
+      eq(billingCyclePolicies.siteId, parsed.siteId),
+      isNull(billingCyclePolicies.effectiveTo),
+    ),
+  });
+
+  if (policy) {
+    const windows = recentPeriods(
+      {
+        recurrence: policy.recurrence,
+        anchorDay: policy.anchorDay ?? undefined,
+      },
+      now,
+      limit,
+    );
+    const buckets = await Promise.all(
+      windows.map(async (w) => {
+        const rows = await fetchRawReadings(meterIds, {
+          from: w.periodStart,
+          to: w.periodEnd,
+          endExclusive: true,
+        });
+        const energy = windowEnergy(rows);
+        return {
+          label: w.periodStart.toLocaleDateString("en-ZA", { day: "numeric", month: "short" }),
+          periodStart: w.periodStart.toISOString(),
+          periodEnd: w.periodEnd.toISOString(),
+          activeEnergyKwh: energy.activeEnergyKwh,
+          reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
+        };
+      }),
+    );
+    return { basis: "billing_period" as const, periods: buckets };
+  }
+
+  // Last resort: no policy at all → bucket the site's raw samples by calendar month.
   const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1));
   const allRows = await fetchRawReadings(meterIds, { from });
   const months = bucketEnergyByCalendar(allRows, "month", tz);

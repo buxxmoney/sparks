@@ -1,5 +1,67 @@
 import { describe, it, expect } from "bun:test";
-import { materializePeriods, type BillingPeriodPolicy } from "../billing";
+import {
+  materializePeriods,
+  recentPeriods,
+  resolveCurrentPeriod,
+  type BillingPeriodPolicy,
+} from "../billing";
+
+describe("resolveCurrentPeriod", () => {
+  it("uses the calendar month for calendar_month", () => {
+    const { periodStart, periodEnd } = resolveCurrentPeriod(
+      { recurrence: "calendar_month" },
+      new Date("2026-07-21T10:00:00Z"),
+    );
+    expect(periodStart).toEqual(new Date(Date.UTC(2026, 6, 1)));
+    expect(periodEnd).toEqual(new Date(Date.UTC(2026, 7, 1)));
+  });
+
+  it("day_of_month: now on/after the anchor stays in the current month", () => {
+    const { periodStart, periodEnd } = resolveCurrentPeriod(
+      { recurrence: "day_of_month", anchorDay: 15 },
+      new Date("2026-07-21T10:00:00Z"),
+    );
+    expect(periodStart).toEqual(new Date(Date.UTC(2026, 6, 15)));
+    expect(periodEnd).toEqual(new Date(Date.UTC(2026, 7, 15)));
+  });
+
+  it("day_of_month: now before the anchor falls into the previous period", () => {
+    const { periodStart, periodEnd } = resolveCurrentPeriod(
+      { recurrence: "day_of_month", anchorDay: 15 },
+      new Date("2026-07-10T10:00:00Z"),
+    );
+    expect(periodStart).toEqual(new Date(Date.UTC(2026, 5, 15)));
+    expect(periodEnd).toEqual(new Date(Date.UTC(2026, 6, 15)));
+  });
+
+  it("day_of_month: clamps a >month-length anchor to the last day (Feb)", () => {
+    const { periodStart, periodEnd } = resolveCurrentPeriod(
+      { recurrence: "day_of_month", anchorDay: 31 },
+      new Date("2026-02-15T10:00:00Z"),
+    );
+    // Feb 2026 has 28 days → anchor clamps to the 28th; Jan anchors at 31.
+    expect(periodStart).toEqual(new Date(Date.UTC(2026, 0, 31)));
+    expect(periodEnd).toEqual(new Date(Date.UTC(2026, 1, 28)));
+  });
+});
+
+describe("recentPeriods", () => {
+  it("returns aligned trailing periods oldest→newest ending with the current one", () => {
+    const periods = recentPeriods(
+      { recurrence: "day_of_month", anchorDay: 15 },
+      new Date("2026-07-21T10:00:00Z"),
+      3,
+    );
+    expect(periods).toHaveLength(3);
+    expect(periods[0].periodStart).toEqual(new Date(Date.UTC(2026, 4, 15)));
+    expect(periods[1].periodStart).toEqual(new Date(Date.UTC(2026, 5, 15)));
+    expect(periods[2].periodStart).toEqual(new Date(Date.UTC(2026, 6, 15)));
+    expect(periods[2].periodEnd).toEqual(new Date(Date.UTC(2026, 7, 15)));
+    // Contiguous, half-open: each end meets the next start.
+    expect(periods[0].periodEnd).toEqual(periods[1].periodStart);
+    expect(periods[1].periodEnd).toEqual(periods[2].periodStart);
+  });
+});
 
 describe("materializePeriods", () => {
   describe("calendar_month", () => {

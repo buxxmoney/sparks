@@ -53,6 +53,62 @@ function formatDateAsLabel(start: Date, end: Date): string {
   return `${startStr}–${endStr}`;
 }
 
+// Resolve the billing period that contains `now` for a site's active policy —
+// the [periodStart, periodEnd) window used by the live "billing period to date"
+// dashboard cards (energy + peak demand). The settings UI only exposes
+// `calendar_month` and `day_of_month`, so those are computed exactly (with
+// short-month clamping); any other recurrence falls back to the calendar month
+// so the dashboard still shows a sensible window.
+export function resolveCurrentPeriod(
+  policy: Pick<BillingPeriodPolicy, "recurrence" | "anchorDay">,
+  now: Date,
+): { periodStart: Date; periodEnd: Date } {
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+
+  if (policy.recurrence === "day_of_month") {
+    const anchorDay = policy.anchorDay || 1;
+    // Anchor date for an arbitrary month, clamped to that month's last day
+    // (clamp_last_day): e.g. anchor 31 → Feb 28/29.
+    const anchorFor = (y: number, m: number): Date => {
+      const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+      return new Date(Date.UTC(y, m, Math.min(anchorDay, lastDay)));
+    };
+
+    const thisMonthAnchor = anchorFor(year, month);
+    if (now >= thisMonthAnchor) {
+      return { periodStart: thisMonthAnchor, periodEnd: anchorFor(year, month + 1) };
+    }
+    return { periodStart: anchorFor(year, month - 1), periodEnd: thisMonthAnchor };
+  }
+
+  // calendar_month (and fallback for unsupported recurrences)
+  return {
+    periodStart: new Date(Date.UTC(year, month, 1)),
+    periodEnd: new Date(Date.UTC(year, month + 1, 1)),
+  };
+}
+
+// The trailing `count` billing periods ending with the one containing `now`,
+// derived from the active policy and returned oldest→newest. Used to bucket the
+// "energy by billing period" chart directly from the policy when no periods have
+// been materialized yet (e.g. right after a cycle is saved in settings), so the
+// chart reflects the saved cycle without waiting on an invoice upload.
+export function recentPeriods(
+  policy: Pick<BillingPeriodPolicy, "recurrence" | "anchorDay">,
+  now: Date,
+  count: number,
+): Array<{ periodStart: Date; periodEnd: Date }> {
+  const out: Array<{ periodStart: Date; periodEnd: Date }> = [];
+  let cursor = now;
+  for (let i = 0; i < count; i++) {
+    const period = resolveCurrentPeriod(policy, cursor);
+    out.unshift(period);
+    cursor = new Date(period.periodStart.getTime() - 1); // step into the previous period
+  }
+  return out;
+}
+
 export function* materializePeriods(
   policy: BillingPeriodPolicy,
   rangeStart: Date,
