@@ -982,7 +982,22 @@ export async function billingPoliciesSet(ctx: AuthContext, input: unknown) {
 
   await db.insert(billingCyclePolicies).values(newPolicy);
 
-  return newPolicy;
+  // Saving the cycle should lay down the concrete billing periods it implies —
+  // otherwise the chart and reconciliation/invoice flows wouldn't reflect it
+  // until an invoice was uploaded. Best-effort: a failure here must not fail the
+  // save (the policy is what was asked for; periods can be re-materialized).
+  let periodsCreated = 0;
+  try {
+    ({ created: periodsCreated } = await materializePolicyPeriods(
+      parsed.siteId,
+      { recurrence: newPolicy.recurrence, anchorDay: newPolicy.anchorDay ?? undefined },
+      site.demandIntervalMinutes,
+    ));
+  } catch (err) {
+    console.error(`[billing] materialize periods failed for site ${parsed.siteId}:`, err);
+  }
+
+  return { ...newPolicy, periodsCreated };
 }
 
 export async function billingPeriodsList(ctx: AuthContext, input: unknown) {
@@ -2163,6 +2178,87 @@ async function findOrCreateInvoicePeriod(
     })
     .returning();
   return created;
+}
+
+// Lay down the concrete billing_periods rows a saved cycle implies, over the
+// site's data history (earliest reading → now, capped). This is what makes
+// saving the cycle in settings actually populate the "energy by billing period"
+// chart and give the reconciliation/invoice flows real periods to pick — not
+// just the live "to date" card.
+//
+// Safety: only ever touches its OWN `generated` rows. It first clears stale
+// generated periods (from a previous policy) that nothing references, then fills
+// gaps — any period authored by an invoice or a human (invoice_derived/manual),
+// or a generated one an invoice/reconciliation points at, is left untouched, and
+// no new period is created where it would overlap a surviving one.
+async function materializePolicyPeriods(
+  siteId: string,
+  policy: { recurrence: BillingPeriodPolicy["recurrence"]; anchorDay?: number },
+  demandIntervalMinutes: number,
+): Promise<{ created: number }> {
+  const meterIds = await siteMeterIds(siteId);
+  if (meterIds.length === 0) return { created: 0 };
+
+  // Earliest sample bounds how far back to generate; no readings → nothing to bucket.
+  const idList = sql.join(
+    meterIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  const res = await db.execute(
+    sql`SELECT MIN(measured_at) AS earliest FROM readings WHERE meter_id IN (${idList})`,
+  );
+  const earliestRaw = (res.rows[0] as { earliest: string | Date | null } | undefined)?.earliest;
+  if (!earliestRaw) return { created: 0 };
+  const earliest = new Date(earliestRaw);
+  const now = new Date();
+
+  // Drop our own stale generated rows so a changed cycle regenerates instead of
+  // being blocked by last cycle's periods. Never delete referenced ones (FK) or
+  // periods authored by invoices/humans.
+  await db.execute(sql`
+    DELETE FROM billing_periods bp
+    WHERE bp.site_id = ${siteId}
+      AND bp.source = 'generated'
+      AND NOT EXISTS (SELECT 1 FROM landlord_invoices li WHERE li.billing_period_id = bp.id)
+      AND NOT EXISTS (SELECT 1 FROM reconciliations r WHERE r.billing_period_id = bp.id)
+  `);
+
+  // Walk aligned periods backward from the current one until the earliest sample
+  // is covered, capped so a long history can't generate unbounded rows.
+  const MAX_PERIODS = 60;
+  const windows: Array<{ periodStart: Date; periodEnd: Date }> = [];
+  let cursor = now;
+  for (let i = 0; i < MAX_PERIODS; i++) {
+    const w = resolveCurrentPeriod(policy, cursor);
+    windows.unshift(w);
+    if (w.periodStart <= earliest) break;
+    cursor = new Date(w.periodStart.getTime() - 1);
+  }
+
+  // Skip any window overlapping a surviving period (invoice/manual/referenced).
+  const survivors = await db.query.billingPeriods.findMany({
+    where: eq(billingPeriods.siteId, siteId),
+    columns: { periodStart: true, periodEnd: true },
+  });
+  const overlaps = (w: { periodStart: Date; periodEnd: Date }) =>
+    survivors.some((p) => w.periodStart < p.periodEnd && p.periodStart < w.periodEnd);
+
+  const toInsert = windows.filter((w) => !overlaps(w));
+  if (toInsert.length === 0) return { created: 0 };
+
+  await db.insert(billingPeriods).values(
+    toInsert.map((w) => ({
+      siteId,
+      periodStart: w.periodStart,
+      periodEnd: w.periodEnd,
+      boundaryInclusivity: "half_open" as const,
+      demandIntervalMinutes,
+      label: w.periodStart.toLocaleString("en-ZA", { month: "long", year: "numeric" }),
+      source: "generated" as const,
+      status: "open" as const,
+    })),
+  );
+  return { created: toInsert.length };
 }
 
 // Upload an invoice and start parsing ASYNCHRONOUSLY. Parsing calls out to Claude

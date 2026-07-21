@@ -438,6 +438,38 @@ describe("oRPC Routers", () => {
       });
       expect(result.recurrence).toBe("day_of_month");
       expect(result.version).toBe(1);
+      // Saving a cycle materializes the periods it implies; the count rides back
+      // on the response (0 here — the test DB has no raw readings to bucket over).
+      expect(result.periodsCreated).toBe(0);
+    });
+
+    it("should not delete invoice-derived periods when saving a policy", async () => {
+      // An invoice-authored period must survive a cycle save untouched — only our
+      // own generated rows are ever cleared/regenerated.
+      const [invoicePeriod] = await db
+        .insert(billingPeriods)
+        .values({
+          siteId,
+          periodStart: new Date("2026-01-01"),
+          periodEnd: new Date("2026-02-01"),
+          boundaryInclusivity: "half_open",
+          demandIntervalMinutes: 30,
+          source: "invoice_derived",
+        })
+        .returning();
+
+      await billingPoliciesSet(ownerCtx, {
+        siteId,
+        recurrence: "day_of_month",
+        anchorDay: 15,
+        boundaryInclusivity: "half_open",
+      });
+
+      const survivor = await db.query.billingPeriods.findFirst({
+        where: eq(billingPeriods.id, invoicePeriod.id),
+      });
+      expect(survivor).toBeDefined();
+      expect(survivor?.source).toBe("invoice_derived");
     });
 
     it("should deny set policy without site access", async () => {
