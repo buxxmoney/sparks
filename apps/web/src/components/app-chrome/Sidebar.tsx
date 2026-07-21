@@ -111,10 +111,10 @@ function NavSections() {
             isSelected={pathname.startsWith(`/sites/${siteId}/invoices`)}
           />
           <SideNavItem
-            label="Reconciliations"
+            label="Bill checks"
             icon={<Scale size={ICON_SIZE} />}
-            href={`/sites/${siteId}/reconciliation`}
-            isSelected={pathname.startsWith(`/sites/${siteId}/reconciliation`)}
+            href={`/sites/${siteId}/bill-check`}
+            isSelected={pathname.startsWith(`/sites/${siteId}/bill-check`)}
           />
           <SideNavItem
             label="Settings"

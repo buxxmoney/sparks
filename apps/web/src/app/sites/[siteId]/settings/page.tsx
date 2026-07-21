@@ -256,7 +256,7 @@ export default function SiteSettingsPage() {
             {billingErr ? <Banner status="error" title={billingErr} /> : null}
             <Text type="supporting">
               Tell us exactly when this site&apos;s billing period runs so invoices and
-              reconciliations line up with the landlord&apos;s cycle.
+              bill checks line up with the landlord&apos;s cycle.
             </Text>
             <Selector
               label="Cycle"

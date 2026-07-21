@@ -451,7 +451,7 @@ export async function generateReportPdf(
   });
 
   if (!recon) {
-    throw new Error(`Reconciliation ${reconId} not found`);
+    throw new Error(`Bill check ${reconId} not found`);
   }
 
   // Fetch related data
@@ -460,7 +460,7 @@ export async function generateReportPdf(
   });
 
   if (!site) {
-    throw new Error("Site for reconciliation not found");
+    throw new Error("Site for bill check not found");
   }
 
   // Get meter data (assume one meter per site for this phase)
@@ -469,10 +469,10 @@ export async function generateReportPdf(
   });
 
   if (!meter) {
-    // A sealed dispute PDF is meter-measured evidence, so it needs a meter installed
+    // A meter-verified report is meter-measured evidence, so it needs a meter installed
     // on the site. Surface this as an actionable message, not a generic 500.
     throw new PreconditionError(
-      "This site has no meter installed, so a sealed dispute PDF can't be generated — it relies on meter-measured usage. You can still send the customer your written review outcome.",
+      "This site has no meter installed, so a meter-verified report can't be generated — it relies on meter-measured usage. You can still send the customer your written review outcome.",
     );
   }
 
@@ -504,7 +504,7 @@ export async function generateReportPdf(
       // GUARD: Refuse to seal if legal_ceiling tariff is not attorney-validated
       if (!ceilingTariff.validatedByAttorney) {
         throw new Error(
-          `Cannot seal report: legal ceiling tariff "${ceilingTariff.name}" has not been validated by attorney. Set validatedByAttorney=true before generating dispute-ready PDF.`,
+          `Cannot finalize report: legal ceiling tariff "${ceilingTariff.name}" has not been validated by attorney. Set validatedByAttorney=true before generating the meter-verified report.`,
         );
       }
     }

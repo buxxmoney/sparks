@@ -184,7 +184,7 @@ export default function SiteDetailsPage() {
           </Stack>
         </Stack>
         <Stack direction="horizontal" gap={2} wrap="wrap">
-          <Button label="Reconciliations" variant="primary" size={btnSize} icon={<Scale size={16} />} href={`/sites/${siteId}/reconciliation`} />
+          <Button label="Bill checks" variant="primary" size={btnSize} icon={<Scale size={16} />} href={`/sites/${siteId}/bill-check`} />
           <Button label="Invoices" variant="secondary" size={btnSize} icon={<FileText size={16} />} href={`/sites/${siteId}/invoices`} />
           <Button label="Settings" variant="secondary" size={btnSize} icon={<Settings size={16} />} href={`/sites/${siteId}/settings`} />
         </Stack>

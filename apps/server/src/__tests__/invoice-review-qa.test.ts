@@ -291,12 +291,12 @@ describe("Invoice review & QA overhaul", () => {
       ],
     });
 
-    // Provisional → the sealed PDF is refused.
+    // Provisional → the meter-verified report is refused.
     try {
       await reconciliationGeneratePdf(ownerCtx, { reconId });
       expect.unreachable("Should refuse to seal a provisional reconciliation");
     } catch (e) {
-      expect((e as Error).message).toContain("under Sparks review");
+      expect((e as Error).message).toContain("still checking this bill");
     }
 
     // The operator QA queue lists it.

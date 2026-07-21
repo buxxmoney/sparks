@@ -254,7 +254,7 @@ export function billReviewOutcomeEmail(data: {
     html: `<div style="font-family:system-ui,sans-serif;max-width:560px;color:#111827">
       <span style="display:inline-block;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;background:${
         data.verified ? "#dcfce7;color:#166534" : "#f3f4f6;color:#374151"
-      }">${data.verified ? "Report available" : "No reconciliation found"}</span>
+      }">${data.verified ? "Report available" : "No issue found"}</span>
       <h2 style="margin:10px 0 8px">${escapeHtml(data.subject)}</h2>
       <p style="color:#6b7280;margin:0 0 12px">Review outcome for ${escapeHtml(data.siteName)}</p>
       <div style="font-size:14px;line-height:1.6">${bodyHtml}</div>

@@ -92,7 +92,7 @@ export function AppChrome({ children }: { children: ReactNode }) {
           }}
         >
           <span>© 2026 Sparks Metering (Pty) Ltd. All rights reserved.</span>
-          <span>Live metering &amp; billing reconciliation</span>
+          <span>Live metering &amp; bill checks</span>
         </footer>
       </div>
     </AppShell>

@@ -256,7 +256,7 @@ export default function InvoiceDetailPage() {
             <CalendarRange size={16} color="hsl(221 83% 45%)" />
             <Text weight="semibold">Billing period</Text>
             <Text type="supporting">
-              — the dates we read from your invoice. They set the period your usage is reconciled
+              — the dates we read from your invoice. They set the period your usage is checked
               against, so check they match your bill and adjust if needed.
             </Text>
           </span>
@@ -326,20 +326,20 @@ export default function InvoiceDetailPage() {
             <Banner
               status="success"
               title={sentMsg || "Sent to Sparks — our team is reviewing your bill."}
-              description="We'll check the charges against your meter and get back to you. Your reconciliation is provisional until we've verified it."
+              description="We'll check the charges against your meter and get back to you. Your bill check is provisional until we've verified it."
             />
             <Heading level={4}>
-              Reconcilable total: {fmtRand(invoice.confirmedTotalCents ?? 0)}
+              Amount we're checking: {fmtRand(invoice.confirmedTotalCents ?? 0)}
             </Heading>
             <Stack direction="horizontal" gap={3} wrap="wrap">
               <Button
-                label="View reconciliation"
+                label="View bill check"
                 variant="primary"
                 icon={<Scale size={16} />}
                 href={
                   sentReconId
-                    ? `/sites/${siteId}/reconciliation/${sentReconId}`
-                    : `/sites/${siteId}/reconciliation`
+                    ? `/sites/${siteId}/bill-check/${sentReconId}`
+                    : `/sites/${siteId}/bill-check`
                 }
               />
             </Stack>

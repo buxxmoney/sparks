@@ -52,7 +52,7 @@ export default function ReconciliationDetailPage() {
     refetch,
   } = useRPC(() => client.reconciliation.get({ reconId }), [reconId]);
   const { data: site } = useRPC(() => client.sites.get({ siteId }), [siteId]);
-  // Viewers can see the outcome but not download the sealed PDF (editors+ only).
+  // Viewers can see the outcome but not download the meter-verified report (editors+ only).
   const canAct = site ? site.myLevel !== "viewer" : false;
 
   const handleDownloadPDF = async () => {
@@ -85,7 +85,7 @@ export default function ReconciliationDetailPage() {
   }
 
   if (!recon) {
-    return <Banner status="error" title="Reconciliation not found" />;
+    return <Banner status="error" title="Bill check not found" />;
   }
 
   const hasDG = recon.gapCount > 0;
@@ -95,19 +95,19 @@ export default function ReconciliationDetailPage() {
   const reviewBadge: { variant: "success" | "warning" | "neutral"; label: string } = isVerified
     ? { variant: "success", label: "Verified by Sparks" }
     : reviewStatus === "flagged"
-      ? { variant: "warning", label: "Flagged by Sparks" }
-      : { variant: "neutral", label: "Provisional — under review" };
+      ? { variant: "warning", label: "Needs another look" }
+      : { variant: "neutral", label: "We're checking your bill" };
 
   return (
     <Stack gap={5}>
       <Stack direction="horizontal" justify="between" align="end" wrap="wrap" gap={3}>
         <Stack gap={2}>
-          <Link href={`/sites/${siteId}/reconciliation`}>
+          <Link href={`/sites/${siteId}/bill-check`}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <ArrowLeft size={16} /> Back to reconciliations
+              <ArrowLeft size={16} /> Back to bill checks
             </span>
           </Link>
-          <Heading level={2}>Reconciliation report</Heading>
+          <Heading level={2}>Bill check</Heading>
         </Stack>
         <Stack direction="horizontal" align="center" gap={3} wrap="wrap">
           <Badge variant={reviewBadge.variant} label={reviewBadge.label} />
@@ -118,9 +118,9 @@ export default function ReconciliationDetailPage() {
                   ? pdfLoading
                     ? "Preparing…"
                     : recon.pdfHash
-                      ? "Download sealed PDF"
-                      : "Generate & download PDF"
-                  : "Sealed PDF locked"
+                      ? "Download report"
+                      : "Generate & download report"
+                  : "Report locked"
               }
               variant="secondary"
               icon={<Download size={16} />}
@@ -139,23 +139,23 @@ export default function ReconciliationDetailPage() {
       {isVerified ? (
         <Banner
           status="success"
-          title="Verified by Sparks — this reconciliation is dispute-ready."
-          description="The sealed PDF carries a hash-stamped evidence trail you can download above."
+          title="Verified by Sparks — your meter-verified report is ready."
+          description="The report carries a hash-stamped evidence trail you can download above."
         />
       ) : reviewStatus === "flagged" ? (
         <Banner
           status="warning"
-          title="Sparks flagged this reconciliation"
+          title="Sparks needs another look at this bill"
           description={
             recon.reviewNote ||
-            "Our team spotted something to correct. Reopen the invoice, fix the grouping, and reconcile again."
+            "Our team spotted something to correct. Reopen the invoice, fix the grouping, and check it again."
           }
         />
       ) : (
         <Banner
           status="info"
-          title="Provisional — under Sparks review"
-          description="Your bill is with our team. We'll check the charges against your meter and send you the outcome. The sealed dispute PDF unlocks once Sparks has verified the reconciliation."
+          title="We're checking your bill"
+          description="Your bill is with our team. We'll check the charges against your meter and send you the outcome. The meter-verified report unlocks once Sparks has checked your bill."
         />
       )}
 
@@ -199,7 +199,7 @@ export default function ReconciliationDetailPage() {
       {/* Tariff comparison / component breakdown / metadata are intentionally NOT
           shown to the customer: they're pre-verification internals that would confuse
           them. The human-reviewed verdict is delivered by Sparks as a review outcome
-          (Alerts inbox + email). Once verified, the sealed dispute PDF is the artifact. */}
+          (Alerts inbox + email). Once verified, the meter-verified report is the artifact. */}
     </Stack>
   );
 }

@@ -231,8 +231,8 @@ export function renderReportHtml(data: ReportData): string {
         <div class="tagline">Energy Reconciliation</div>
       </span>
     </div>
-    <h1>Electricity Reconciliation Report</h1>
-    <div class="subtitle">Dispute-ready report with measured vs. billed reconciliation</div>
+    <h1>Meter-Verified Bill Check</h1>
+    <div class="subtitle">Your metered usage checked against the billed amount</div>
 
     <!-- Site & Meter Provenance -->
     <div class="section">

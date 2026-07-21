@@ -91,7 +91,7 @@ export default function AlertsPage() {
               ? payload?.invoiceId
                 ? `/sites/${a.siteId}/invoices/${payload.invoiceId}`
                 : payload?.reconId
-                  ? `/sites/${a.siteId}/reconciliation/${payload.reconId}`
+                  ? `/sites/${a.siteId}/bill-check/${payload.reconId}`
                   : null
               : null;
             // Opening a message just navigates — it does NOT mark it read, because
@@ -104,7 +104,7 @@ export default function AlertsPage() {
             return (
               <Card key={a.deliveryId} padding={5}>
                 <Stack gap={3}>
-                  {/* Clickable header + message → opens the invoice/reconciliation. */}
+                  {/* Clickable header + message → opens the invoice/bill-check. */}
                   <div
                     onClick={targetHref ? openAlert : undefined}
                     onKeyDown={
@@ -151,10 +151,10 @@ export default function AlertsPage() {
                   <Stack direction="horizontal" gap={2} wrap="wrap">
                     {payload?.reconId && a.siteId ? (
                       <Button
-                        label="View reconciliation"
+                        label="View bill check"
                         variant="primary"
                         icon={<Scale size={16} />}
-                        href={`/sites/${a.siteId}/reconciliation/${payload.reconId}`}
+                        href={`/sites/${a.siteId}/bill-check/${payload.reconId}`}
                       />
                     ) : null}
                     {/* New multi-attachment shape, then legacy single. */}

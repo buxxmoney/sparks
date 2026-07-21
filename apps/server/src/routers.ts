@@ -1744,7 +1744,7 @@ async function runReconciliationForPeriod(
   // Guard (docs/02 §6): only a locked invoice's confirmed totals are authoritative.
   // Refuse to generate a dispute-grade reconciliation against unconfirmed numbers.
   if (invoice.status !== "locked") {
-    throw new ForbiddenError("Cannot generate reconciliation until the invoice is locked");
+    throw new ForbiddenError("Cannot generate the bill check until the invoice is locked");
   }
 
   // Bridge: derive this period's demand_intervals from the raw `readings` the Pi writes,
@@ -1894,7 +1894,7 @@ export async function reconciliationGet(ctx: AuthContext, input: unknown) {
   });
 
   if (!recon) {
-    throw new Error("Reconciliation not found");
+    throw new Error("Bill check not found");
   }
 
   await requireSiteAccess(ctx, recon.siteId);
@@ -1960,13 +1960,13 @@ export async function reconciliationFinalize(ctx: AuthContext, input: unknown) {
   });
 
   if (!recon) {
-    throw new Error("Reconciliation not found");
+    throw new Error("Bill check not found");
   }
 
   await requireSiteEditor(ctx, recon.siteId);
 
   if (!recon.invoiceId) {
-    throw new Error("Reconciliation has no associated invoice");
+    throw new Error("Bill check has no associated invoice");
   }
 
   const invoice = await db.query.landlordInvoices.findFirst({
@@ -1978,7 +1978,7 @@ export async function reconciliationFinalize(ctx: AuthContext, input: unknown) {
   }
 
   if (invoice.status !== "locked") {
-    throw new ForbiddenError("Cannot finalize reconciliation until invoice is locked");
+    throw new ForbiddenError("Cannot finalize the bill check until the invoice is locked");
   }
 
   await db
@@ -2001,17 +2001,17 @@ export async function reconciliationGeneratePdf(ctx: AuthContext, input: unknown
   });
 
   if (!recon) {
-    throw new Error("Reconciliation not found");
+    throw new Error("Bill check not found");
   }
 
   await requireSiteEditor(ctx, recon.siteId);
 
-  // The sealed dispute PDF is the legal output — it only unlocks once Sparks QA
-  // has signed the reconciliation off. While it is provisional (or flagged) the
-  // customer still sees the numbers on-screen, but no sealed evidence is produced.
+  // The meter-verified report is the legal output — it only unlocks once Sparks QA
+  // has signed the bill check off. While it is provisional (or flagged) the
+  // customer still sees the numbers on-screen, but no verified evidence is produced.
   if (recon.reviewStatus !== "reviewed") {
     throw new ForbiddenError(
-      "This reconciliation is still under Sparks review. The sealed dispute PDF unlocks once it has been verified.",
+      "We're still checking this bill. The meter-verified report unlocks once it has been verified.",
     );
   }
 
@@ -2033,14 +2033,14 @@ export async function reportGetPdf(ctx: AuthContext, input: unknown) {
   });
 
   if (!recon) {
-    throw new Error("Reconciliation not found");
+    throw new Error("Bill check not found");
   }
 
   await requireSiteEditor(ctx, recon.siteId);
 
   if (!recon.pdfStorageKey || !recon.pdfHash) {
     throw new Error(
-      "PDF has not been generated for this reconciliation. Call reconciliation.generatePdf first.",
+      "The report has not been generated for this bill check. Call reconciliation.generatePdf first.",
     );
   }
 

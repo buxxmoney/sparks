@@ -482,7 +482,7 @@ describe("Report PDF Generation", () => {
         await reconciliationGeneratePdf(ownerCtx, { reconId });
         expect.unreachable("Should have refused a provisional reconciliation");
       } catch (e: unknown) {
-        expect((e as Error).message).toContain("under Sparks review");
+        expect((e as Error).message).toContain("still checking this bill");
       }
     });
 

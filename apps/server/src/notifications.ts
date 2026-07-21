@@ -120,7 +120,7 @@ export async function dispatchBillOutcome(params: {
     })
     .returning();
 
-  const link = `${params.webUrl}/sites/${params.siteId}/reconciliation/${params.reconId}`;
+  const link = `${params.webUrl}/sites/${params.siteId}/bill-check/${params.reconId}`;
   const email = billReviewOutcomeEmail({
     siteName: params.siteName,
     subject: params.subject,

@@ -349,8 +349,8 @@ export default function AdminPage() {
         kind: "success",
         text:
           status === "reviewed"
-            ? "Sent — reconciliation confirmed; the customer can download their sealed report."
-            : "Sent — closed with no reconciliation; no report was generated.",
+            ? "Sent — verified; the customer can download their meter-verified report."
+            : "Sent — closed with no issue found; no report was generated.",
       });
       setRespondTo(null);
       refetchQueue();
@@ -442,12 +442,12 @@ export default function AdminPage() {
         res.regenerateError
           ? {
               kind: "error",
-              text: `Tariff assigned to ${assignTo.siteName}, but recomputing the reconciliation failed: ${res.regenerateError}`,
+              text: `Tariff assigned to ${assignTo.siteName}, but recomputing the bill check failed: ${res.regenerateError}`,
             }
           : {
               kind: "success",
               text: res.regenerated
-                ? `Landlord tariff assigned to ${assignTo.siteName} and the reconciliation recomputed — the expected side is filled in.`
+                ? `Landlord tariff assigned to ${assignTo.siteName} and the bill check recomputed — the expected side is filled in.`
                 : `Landlord tariff assigned to ${assignTo.siteName}.`,
             },
       );
@@ -766,7 +766,7 @@ export default function AdminPage() {
             <Text type="supporting">
               Enter the landlord's stated rates. On save this becomes the site's landlord tariff
               {assignTo.billingPeriodId
-                ? " and the bill's reconciliation is recomputed, filling in the pending “expected” side."
+                ? " and the bill check is recomputed, filling in the pending “expected” side."
                 : "."}{" "}
               Leave a charge blank if it doesn't apply.
             </Text>
@@ -850,7 +850,7 @@ export default function AdminPage() {
           <Text type="supporting">
             Bills customers have sent to Sparks, waiting on you. Assign a landlord tariff where the
             expected side is still pending, then review &amp; respond — verify to unlock the
-            customer's sealed dispute PDF, or send it back for a fix. Responded bills move to Reviewed.
+            customer's meter-verified report, or send it back for a fix. Responded bills move to Reviewed.
           </Text>
           {queueMsg ? <Banner status={queueMsg.kind} title={queueMsg.text} /> : null}
           {queueLoading ? (
@@ -979,8 +979,8 @@ export default function AdminPage() {
                 <Text type="supporting">
                   Write the description that goes to the customer's Alerts inbox and email, and
                   attach a document if you prepared one. Choose the outcome:{" "}
-                  <strong>Reconciliation found</strong> releases their sealed dispute report to
-                  download; <strong>No reconciliation</strong> closes the review with no report.
+                  <strong>Verified — release report</strong> releases their meter-verified report to
+                  download; <strong>No issue found</strong> closes the review with no report.
                 </Text>
                 <TextInput
                   label="Subject"
@@ -1038,13 +1038,13 @@ export default function AdminPage() {
                 </Stack>
                 <Stack direction="horizontal" gap={3} wrap="wrap">
                   <Button
-                    label={reviewBusy ? "Sending…" : "Reconciliation found — release report"}
+                    label={reviewBusy ? "Sending…" : "Verified — release report"}
                     variant="primary"
                     isLoading={reviewBusy}
                     onClick={() => sendOutcome("reviewed")}
                   />
                   <Button
-                    label="No reconciliation found"
+                    label="No issue found"
                     variant="secondary"
                     isDisabled={reviewBusy}
                     onClick={() => sendOutcome("flagged")}
@@ -1153,7 +1153,7 @@ export default function AdminPage() {
                       r.reviewStatus === "reviewed" ? (
                         <Badge variant="success" label="Report released" />
                       ) : (
-                        <Badge variant="neutral" label="No reconciliation" />
+                        <Badge variant="neutral" label="No issue found" />
                       ),
                   },
                   {
@@ -1721,7 +1721,7 @@ export default function AdminPage() {
                         <Banner
                           status="warning"
                           title="Delete this organization"
-                          description="Removes the organization and ALL of its sites, meters, readings, bills and reconciliations. This can't be undone — use only when a customer ends their subscription. Their user login is left intact."
+                          description="Removes the organization and ALL of its sites, meters, readings, bills and bill checks. This can't be undone — use only when a customer ends their subscription. Their user login is left intact."
                         />
                         <TextInput
                           label={`Type "${manageOrg.name}" to confirm`}

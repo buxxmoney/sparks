@@ -38,17 +38,17 @@ export default function ReconciliationPage() {
             <ArrowLeft size={16} /> Back to site
           </span>
         </Link>
-        <Heading level={2}>Reconciliations</Heading>
+        <Heading level={2}>Bill checks</Heading>
       </Stack>
 
       <Banner
         status="info"
-        title="Reconciliations are generated from the invoices you send us. Upload your invoice and send it for review, and we'll generate the reconciliation for you."
+        title="Bill checks are generated from the invoices you send us. Upload your invoice and send it for review, and we'll check it against your meter for you."
       />
 
       <Card padding={5}>
         <Stack gap={3}>
-          <Text weight="semibold">Reconciliation history</Text>
+          <Text weight="semibold">Bill check history</Text>
           {reconLoading ? (
             <Stack gap={2}>
               <Skeleton height={40} />
@@ -119,7 +119,7 @@ export default function ReconciliationPage() {
                       label="View"
                       variant="secondary"
                       size="sm"
-                      href={`/sites/${siteId}/reconciliation/${r.id}`}
+                      href={`/sites/${siteId}/bill-check/${r.id}`}
                     />
                   ),
                 },
@@ -128,7 +128,7 @@ export default function ReconciliationPage() {
               dividers="rows"
             />
           ) : (
-            <Text type="supporting">No reconciliations yet.</Text>
+            <Text type="supporting">No bill checks yet.</Text>
           )}
         </Stack>
       </Card>

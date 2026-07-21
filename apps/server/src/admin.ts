@@ -601,7 +601,7 @@ export async function adminReviewReconciliation(ctx: AuthContext, input: unknown
     where: eq(reconciliations.id, parsed.reconId),
   });
   if (!recon) {
-    throw new Error("Reconciliation not found");
+    throw new Error("Bill check not found");
   }
 
   const [updated] = await db

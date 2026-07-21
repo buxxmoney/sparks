@@ -70,7 +70,7 @@ export default function DashboardPage() {
       <Stack gap={1}>
         <Heading level={2}>Your sites</Heading>
         <Text type="supporting">
-          Live metering and billing reconciliation across your portfolio.
+          Live metering and bill checks across your portfolio.
         </Text>
       </Stack>
 
