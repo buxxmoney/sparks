@@ -50,6 +50,9 @@ import {
 import type { AuthContext } from "./middleware";
 import {
   ForbiddenError,
+  invalidateMembershipCache,
+  invalidateSiteAccessCache,
+  invalidateSiteCache,
   PreconditionError,
   requireOrg,
   requireOrgOwner,
@@ -70,6 +73,18 @@ import {
   dispatchReviewSubmitted,
 } from "./notifications";
 import { assertMeteredDataInPeriod } from "./report-guards";
+import { TtlCache } from "./cache";
+
+// Hot dashboard reads are recomputed from raw `readings` on every ~30s poll, per
+// viewer. Cache the RESULT (not the authz — that's per-user, cached separately) by
+// site for a few seconds: staleness ≤ READ_TTL is invisible (meters report ~1/min),
+// and single-flight collapses a page's parallel burst to one computation. New data
+// arrives via ingestion (a different path), so no explicit invalidation is needed.
+const READ_TTL = 20_000;
+const readCache = new TtlCache<unknown>();
+function cachedRead<T>(key: string, loader: () => Promise<T>): Promise<T> {
+  return readCache.memo(key, READ_TTL, loader as () => Promise<unknown>) as Promise<T>;
+}
 import { sendSms } from "./sms";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
@@ -275,6 +290,7 @@ export async function orgSetMemberRole(ctx: AuthContext, input: unknown) {
     },
   });
 
+  invalidateMembershipCache(parsed.userId);
   return { userId: parsed.userId, role: parsed.role };
 }
 
@@ -323,6 +339,8 @@ export async function orgRemoveMember(ctx: AuthContext, input: unknown) {
     .delete(member)
     .where(and(eq(member.organizationId, parsed.organizationId), eq(member.userId, parsed.userId)));
 
+  invalidateMembershipCache(parsed.userId);
+  for (const id of siteIds) invalidateSiteAccessCache(id, parsed.userId);
   return { removed: true };
 }
 
@@ -456,6 +474,7 @@ export async function sitesDelete(ctx: AuthContext, input: unknown) {
 
   await db.delete(sites).where(eq(sites.id, parsed.siteId));
 
+  invalidateSiteCache(parsed.siteId);
   return { deleted: parsed.siteId };
 }
 
@@ -503,6 +522,7 @@ export async function siteAccessGrant(ctx: AuthContext, input: unknown) {
     });
   }
 
+  invalidateSiteAccessCache(parsed.siteId, parsed.userId);
   return { siteId: parsed.siteId, userId: parsed.userId, role: parsed.role };
 }
 
@@ -514,6 +534,7 @@ export async function siteAccessRevoke(ctx: AuthContext, input: unknown) {
     .delete(siteAccess)
     .where(and(eq(siteAccess.siteId, parsed.siteId), eq(siteAccess.userId, parsed.userId)));
 
+  invalidateSiteAccessCache(parsed.siteId, parsed.userId);
   return { revoked: true };
 }
 
@@ -721,12 +742,15 @@ export async function devicesList(ctx: AuthContext, input: unknown) {
 
   if (parsed.siteId) {
     await requireSiteAccess(ctx, parsed.siteId);
-    const meterRows = await db
-      .select({ id: meters.id, serialNumber: meters.serialNumber })
-      .from(meters)
-      .where(eq(meters.siteId, parsed.siteId));
-    const rows = (await meterConnectivity(meterRows)).slice(offset, offset + limit);
-    return { devices: rows, total: rows.length };
+    const siteId = parsed.siteId;
+    return cachedRead(`devices:${siteId}:${limit}:${offset}`, async () => {
+      const meterRows = await db
+        .select({ id: meters.id, serialNumber: meters.serialNumber })
+        .from(meters)
+        .where(eq(meters.siteId, siteId));
+      const rows = (await meterConnectivity(meterRows)).slice(offset, offset + limit);
+      return { devices: rows, total: rows.length };
+    });
   }
 
   // No site filter ⇒ scope to the CALLER'S OWN ORG only (never every org's meters). Join
@@ -3298,35 +3322,37 @@ export async function readingsLatest(ctx: AuthContext, input: unknown) {
   const parsed = readingsLatestInput.parse(input);
   await requireSiteAccess(ctx, parsed.siteId);
 
-  const meterIds = await siteMeterIds(parsed.siteId);
-  if (meterIds.length === 0) return { reading: null };
+  return cachedRead(`latest:${parsed.siteId}`, async () => {
+    const meterIds = await siteMeterIds(parsed.siteId);
+    if (meterIds.length === 0) return { reading: null };
 
-  const idList = sql.join(
-    meterIds.map((id) => sql`${id}`),
-    sql`, `,
-  );
-  const res = await db.execute(sql`
-    SELECT meter_id, measured_at, power_total, va_total, pf_total
-    FROM readings
-    WHERE meter_id IN (${idList})
-    ORDER BY measured_at DESC
-    LIMIT 1
-  `);
-  const row = (res.rows as Record<string, unknown>[])[0];
-  if (!row) return { reading: null };
+    const idList = sql.join(
+      meterIds.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const res = await db.execute(sql`
+      SELECT meter_id, measured_at, power_total, va_total, pf_total
+      FROM readings
+      WHERE meter_id IN (${idList})
+      ORDER BY measured_at DESC
+      LIMIT 1
+    `);
+    const row = (res.rows as Record<string, unknown>[])[0];
+    if (!row) return { reading: null };
 
-  const kw = toNum(row.power_total);
-  const kva = toNum(row.va_total);
-  const pf = toNum(row.pf_total);
-  return {
-    reading: {
-      meterId: String(row.meter_id),
-      time: new Date(row.measured_at as string | number | Date).toISOString(),
-      totalPowerKw: kw !== null ? (kw / 1000).toFixed(3) : null,
-      totalApparentKva: kva !== null ? (kva / 1000).toFixed(3) : null,
-      powerFactor: pf !== null ? pf.toFixed(4) : null,
-    },
-  };
+    const kw = toNum(row.power_total);
+    const kva = toNum(row.va_total);
+    const pf = toNum(row.pf_total);
+    return {
+      reading: {
+        meterId: String(row.meter_id),
+        time: new Date(row.measured_at as string | number | Date).toISOString(),
+        totalPowerKw: kw !== null ? (kw / 1000).toFixed(3) : null,
+        totalApparentKva: kva !== null ? (kva / 1000).toFixed(3) : null,
+        powerFactor: pf !== null ? pf.toFixed(4) : null,
+      },
+    };
+  });
 }
 
 // Month-to-date active / reactive energy + peak demand for a site, computed from the raw
@@ -3337,45 +3363,52 @@ export async function readingsMonthToDate(ctx: AuthContext, input: unknown) {
   const parsed = readingsMonthToDateInput.parse(input);
   await requireSiteAccess(ctx, parsed.siteId);
 
-  const now = parsed.asOf ?? new Date();
+  // Cache the live case by site; an explicit asOf gets its own key.
+  const key = `mtd:${parsed.siteId}:${parsed.asOf ? parsed.asOf.toISOString() : "live"}`;
+  return cachedRead(key, async () => {
+    const now = parsed.asOf ?? new Date();
 
-  // The live "billing period to date" window follows the site's active billing
-  // policy (custom anchor day, etc.), not a hardcoded calendar month — otherwise
-  // saving a billing cycle in settings never moves the dashboard's energy and
-  // peak-demand cards.
-  const policy = await db.query.billingCyclePolicies.findFirst({
-    where: and(
-      eq(billingCyclePolicies.siteId, parsed.siteId),
-      isNull(billingCyclePolicies.effectiveTo),
-    ),
-  });
-  const { periodStart } = resolveCurrentPeriod(
-    { recurrence: policy?.recurrence ?? "calendar_month", anchorDay: policy?.anchorDay ?? undefined },
-    now,
-  );
+    // The live "billing period to date" window follows the site's active billing
+    // policy (custom anchor day, etc.), not a hardcoded calendar month — otherwise
+    // saving a billing cycle in settings never moves the dashboard's energy and
+    // peak-demand cards.
+    const policy = await db.query.billingCyclePolicies.findFirst({
+      where: and(
+        eq(billingCyclePolicies.siteId, parsed.siteId),
+        isNull(billingCyclePolicies.effectiveTo),
+      ),
+    });
+    const { periodStart } = resolveCurrentPeriod(
+      {
+        recurrence: policy?.recurrence ?? "calendar_month",
+        anchorDay: policy?.anchorDay ?? undefined,
+      },
+      now,
+    );
 
-  const meterIds = await siteMeterIds(parsed.siteId);
-  if (meterIds.length === 0) {
+    const meterIds = await siteMeterIds(parsed.siteId);
+    if (meterIds.length === 0) {
+      return {
+        periodStart: periodStart.toISOString(),
+        activeEnergyKwh: "0.000",
+        reactiveEnergyKvarh: "0.000",
+        peakDemandKva: "0.000",
+        intervalCount: 0,
+      };
+    }
+
+    const intervalMinutes = await siteDemandInterval(parsed.siteId);
+    const rows = await fetchRawReadings(meterIds, { from: periodStart, to: now });
+    const energy = windowEnergy(rows);
+
     return {
       periodStart: periodStart.toISOString(),
-      activeEnergyKwh: "0.000",
-      reactiveEnergyKvarh: "0.000",
-      peakDemandKva: "0.000",
-      intervalCount: 0,
+      activeEnergyKwh: energy.activeEnergyKwh,
+      reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
+      peakDemandKva: peakDemandKva(rows, intervalMinutes),
+      intervalCount: rows.length,
     };
-  }
-
-  const intervalMinutes = await siteDemandInterval(parsed.siteId);
-  const rows = await fetchRawReadings(meterIds, { from: periodStart, to: now });
-  const energy = windowEnergy(rows);
-
-  return {
-    periodStart: periodStart.toISOString(),
-    activeEnergyKwh: energy.activeEnergyKwh,
-    reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
-    peakDemandKva: peakDemandKva(rows, intervalMinutes),
-    intervalCount: rows.length,
-  };
+  });
 }
 
 // Total active energy (kWh) per billing period, for the "energy across billing
@@ -3389,8 +3422,18 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
   const limit = parsed.limit ?? 12;
   const granularity = parsed.granularity ?? "billing_period";
 
-  const meterIds = await siteMeterIds(parsed.siteId);
-  const tz = await siteTimezone(parsed.siteId);
+  return cachedRead(`ebp:${parsed.siteId}:${granularity}:${limit}`, () =>
+    computeEnergyByPeriod(parsed.siteId, granularity, limit),
+  );
+}
+
+async function computeEnergyByPeriod(
+  siteId: string,
+  granularity: "day" | "week" | "month" | "billing_period",
+  limit: number,
+) {
+  const meterIds = await siteMeterIds(siteId);
+  const tz = await siteTimezone(siteId);
 
   // Explicit calendar granularity: bucket the raw samples by day/week/month over a bounded
   // trailing window (so we don't scan the whole history), then keep the last `limit`.
@@ -3406,7 +3449,7 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
   }
 
   const periods = await db.query.billingPeriods.findMany({
-    where: eq(billingPeriods.siteId, parsed.siteId),
+    where: eq(billingPeriods.siteId, siteId),
     orderBy: [asc(billingPeriods.periodStart)],
   });
 
@@ -3443,7 +3486,7 @@ export async function readingsEnergyByPeriod(ctx: AuthContext, input: unknown) {
   const now = new Date();
   const policy = await db.query.billingCyclePolicies.findFirst({
     where: and(
-      eq(billingCyclePolicies.siteId, parsed.siteId),
+      eq(billingCyclePolicies.siteId, siteId),
       isNull(billingCyclePolicies.effectiveTo),
     ),
   });

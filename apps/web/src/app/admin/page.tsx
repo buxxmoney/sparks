@@ -18,6 +18,7 @@ import {
   Cpu,
   Plus,
   Copy,
+  Activity,
 } from "lucide-react";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Grid } from "@astryxdesign/core/Grid";
@@ -1476,6 +1477,19 @@ export default function AdminPage() {
                               { key: "name", header: "Site", renderCell: (s) => <Text weight="medium">{s.name}</Text> },
                               { key: "city", header: "City", renderCell: (s) => <Text type="supporting">{s.city ?? "—"}</Text> },
                               { key: "status", header: "Status", renderCell: (s) => <Badge label={s.status} /> },
+                              {
+                                key: "dashboard",
+                                header: "",
+                                renderCell: (s) => (
+                                  <Button
+                                    label="Dashboard"
+                                    variant="secondary"
+                                    size="sm"
+                                    icon={<Activity size={14} />}
+                                    href={`/sites/${s.id}`}
+                                  />
+                                ),
+                              },
                               {
                                 key: "hw",
                                 header: "",

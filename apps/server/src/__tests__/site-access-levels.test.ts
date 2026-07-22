@@ -22,7 +22,15 @@ describe("Tiered site access", () => {
   const legacyMgr = "lvl-legacy-mgr";
   const legacyOwner = "lvl-legacy-owner";
   const outsider = "lvl-outsider";
+  const operatorU = "lvl-operator";
   let siteId: string;
+
+  // A platform operator's own org differs from the customer site's org.
+  const operatorCtx: AuthContext = {
+    userId: operatorU,
+    sessionId: `s-${operatorU}`,
+    organizationId: "sparks-ops-org",
+  };
 
   const ctx = (userId: string): AuthContext => ({ userId, sessionId: `s-${userId}`, organizationId: orgId });
 
@@ -35,6 +43,10 @@ describe("Tiered site access", () => {
         isPlatformOperator: false,
       })),
     );
+    // A Sparks platform operator, belonging to a DIFFERENT org (cross-tenant).
+    await db
+      .insert(user)
+      .values({ id: operatorU, email: `${operatorU}@sparks.test`, isPlatformOperator: true });
     // Two org owners so the last-owner guard has something to protect.
     await db.insert(member).values([
       { id: `m-${ownerA}`, organizationId: orgId, userId: ownerA, role: "owner", createdAt: new Date() },
@@ -76,6 +88,23 @@ describe("Tiered site access", () => {
     expect((await requireSiteEditor(ctx(editorU), siteId)).level).toBe("editor");
     expect((await requireSiteEditor(ctx(adminU), siteId)).level).toBe("site_admin");
     expect((await requireSiteEditor(ctx(ownerA), siteId)).level).toBe("org_owner");
+  });
+
+  it("platform operators get cross-tenant READ access but no writes", async () => {
+    // Read any site cross-org, at the read-only "operator" level.
+    expect((await requireSiteAccess(operatorCtx, siteId)).level).toBe("operator");
+
+    // Write gates reject operators (they mutate via the admin endpoints only).
+    await expect(requireSiteEditor(operatorCtx, siteId)).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(requireSiteAdmin(operatorCtx, siteId)).rejects.toBeInstanceOf(ForbiddenError);
+
+    // A non-operator in a different org is still denied entirely.
+    const strangerCtx: AuthContext = {
+      userId: outsider,
+      sessionId: "s-stranger",
+      organizationId: "some-other-org",
+    };
+    await expect(requireSiteAccess(strangerCtx, siteId)).rejects.toBeInstanceOf(ForbiddenError);
   });
 
   it("only site_admin (or owner) can manage access", async () => {

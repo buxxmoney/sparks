@@ -83,7 +83,7 @@ export default function OrganizationPage() {
     // centered in the remaining space rather than left-aligned under it.
     return (
       <Stack gap={6} height="100%">
-        <Heading level={2}>Organization</Heading>
+        <Heading level={2}>Access</Heading>
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{ width: "100%", maxWidth: 440 }}>
             <EmptyState
@@ -101,7 +101,7 @@ export default function OrganizationPage() {
   return (
     <Stack gap={5}>
       <Stack gap={1}>
-        <Heading level={2}>Organization</Heading>
+        <Heading level={2}>Access</Heading>
         <Text type="supporting">
           Manage who's in your organization and what they can do on each site.
         </Text>

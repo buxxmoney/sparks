@@ -20,6 +20,7 @@ import {
   Settings,
   ShieldCheck,
   UserCircle,
+  Users,
 } from "lucide-react";
 
 import { client } from "@/lib/client";
@@ -57,16 +58,27 @@ function NavSections() {
   return (
     <>
       <SideNavSection title="Platform">
-        <SideNavItem
-          label="Sites"
-          icon={<LayoutDashboard size={ICON_SIZE} />}
-          href="/dashboard"
-          isSelected={pathname === "/dashboard"}
-        />
+        {/* Operators don't own customer sites — their landing surface is the
+            cross-org Organizations browser, not the (empty) personal Sites list. */}
+        {isPlatformOperator ? (
+          <SideNavItem
+            label="Organizations"
+            icon={<Building size={ICON_SIZE} />}
+            href="/organizations"
+            isSelected={pathname.startsWith("/organizations")}
+          />
+        ) : (
+          <SideNavItem
+            label="Sites"
+            icon={<LayoutDashboard size={ICON_SIZE} />}
+            href="/dashboard"
+            isSelected={pathname === "/dashboard"}
+          />
+        )}
         {isOrgOwner ? (
           <SideNavItem
-            label="Organization"
-            icon={<Building size={ICON_SIZE} />}
+            label="Access"
+            icon={<Users size={ICON_SIZE} />}
             href="/organization"
             isSelected={pathname === "/organization"}
           />
@@ -104,24 +116,30 @@ function NavSections() {
             href={`/sites/${siteId}`}
             isSelected={pathname === `/sites/${siteId}`}
           />
-          <SideNavItem
-            label="Invoices"
-            icon={<FileText size={ICON_SIZE} />}
-            href={`/sites/${siteId}/invoices`}
-            isSelected={pathname.startsWith(`/sites/${siteId}/invoices`)}
-          />
-          <SideNavItem
-            label="Bill checks"
-            icon={<Scale size={ICON_SIZE} />}
-            href={`/sites/${siteId}/bill-check`}
-            isSelected={pathname.startsWith(`/sites/${siteId}/bill-check`)}
-          />
-          <SideNavItem
-            label="Settings"
-            icon={<Settings size={ICON_SIZE} />}
-            href={`/sites/${siteId}/settings`}
-            isSelected={pathname.endsWith("/settings")}
-          />
+          {/* Invoices / bill checks / settings are the customer's workflow.
+              Operators monitor read-only, so they get the dashboard only. */}
+          {isPlatformOperator ? null : (
+            <>
+              <SideNavItem
+                label="Invoices"
+                icon={<FileText size={ICON_SIZE} />}
+                href={`/sites/${siteId}/invoices`}
+                isSelected={pathname.startsWith(`/sites/${siteId}/invoices`)}
+              />
+              <SideNavItem
+                label="Bill checks"
+                icon={<Scale size={ICON_SIZE} />}
+                href={`/sites/${siteId}/bill-check`}
+                isSelected={pathname.startsWith(`/sites/${siteId}/bill-check`)}
+              />
+              <SideNavItem
+                label="Settings"
+                icon={<Settings size={ICON_SIZE} />}
+                href={`/sites/${siteId}/settings`}
+                isSelected={pathname.endsWith("/settings")}
+              />
+            </>
+          )}
         </SideNavSection>
       ) : null}
     </>

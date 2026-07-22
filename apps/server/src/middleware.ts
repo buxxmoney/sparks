@@ -2,6 +2,59 @@ import { getDb, member, siteAccess, sites, user } from "@sparks/db";
 import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { auth } from "./auth";
+import { TtlCache } from "./cache";
+
+// A single page load fans one auth check out across ~6 RPCs, each re-querying the
+// same membership / owner / site-access rows. Cache those lookups for a few seconds
+// (single-flight collapses the parallel burst to one DB round trip). Bounded
+// staleness: a permission change lags by at most AUTHZ_TTL unless a write explicitly
+// invalidates it (see the invalidate* helpers, called from the mutating procedures).
+const AUTHZ_TTL = 15_000;
+const authzCache = new TtlCache<boolean | string | null>();
+
+const memoBool = (key: string, loader: () => Promise<boolean>): Promise<boolean> =>
+  authzCache.memo(key, AUTHZ_TTL, loader) as Promise<boolean>;
+const memoStr = (key: string, loader: () => Promise<string | null>): Promise<string | null> =>
+  authzCache.memo(key, AUTHZ_TTL, loader) as Promise<string | null>;
+
+/** Invalidation surface for the write paths. Keep in sync with the key formats below. */
+export function invalidateSiteAccessCache(siteId: string, userId: string): void {
+  authzCache.delete(`access:${siteId}:${userId}`);
+}
+export function invalidateSiteCache(siteId: string): void {
+  authzCache.delete(`siteorg:${siteId}`);
+  authzCache.deletePrefix(`access:${siteId}:`);
+}
+export function invalidateMembershipCache(userId: string): void {
+  authzCache.delete(`firstorg:${userId}`);
+  authzCache.deletePrefix(`member:${userId}:`);
+  authzCache.deletePrefix(`owner:${userId}:`);
+}
+export function invalidateOperatorCache(userId: string): void {
+  authzCache.delete(`op:${userId}`);
+}
+
+// The site's org id (or null when the site doesn't exist) — the only field the
+// authz check needs, cached by siteId.
+function cachedSiteOrgId(siteId: string): Promise<string | null> {
+  return memoStr(`siteorg:${siteId}`, async () => {
+    const s = await getDb().query.sites.findFirst({
+      where: eq(sites.id, siteId),
+      columns: { organizationId: true },
+    });
+    return s?.organizationId ?? null;
+  });
+}
+
+// A user's per-site access role (or null when there's no grant), cached by pair.
+function cachedSiteAccessRole(siteId: string, userId: string): Promise<string | null> {
+  return memoStr(`access:${siteId}:${userId}`, async () => {
+    const a = await getDb().query.siteAccess.findFirst({
+      where: and(eq(siteAccess.siteId, siteId), eq(siteAccess.userId, userId)),
+    });
+    return a?.role ?? null;
+  });
+}
 
 // Layered authorization for the oRPC surface (docs/02 §4.1):
 //   requireSession → requireOrg → requireSiteAccess(role?) → requirePlatformOperator
@@ -107,11 +160,12 @@ export async function requireSession(c: Context): Promise<AuthContext> {
 
 /** True if the user is a better-auth `member` of the organization. */
 async function hasMembership(userId: string, organizationId: string): Promise<boolean> {
-  const db = getDb();
-  const membership = await db.query.member.findFirst({
-    where: and(eq(member.userId, userId), eq(member.organizationId, organizationId)),
+  return memoBool(`member:${userId}:${organizationId}`, async () => {
+    const membership = await getDb().query.member.findFirst({
+      where: and(eq(member.userId, userId), eq(member.organizationId, organizationId)),
+    });
+    return Boolean(membership);
   });
-  return Boolean(membership);
 }
 
 /**
@@ -121,26 +175,30 @@ async function hasMembership(userId: string, organizationId: string): Promise<bo
  * session.me — otherwise requireOrg would see a mismatch. Returns "" if none.
  */
 async function firstMembershipOrg(userId: string): Promise<string> {
-  const db = getDb();
-  const membership = await db.query.member.findFirst({
-    where: eq(member.userId, userId),
-    orderBy: (m, { asc }) => [asc(m.createdAt), asc(m.id)],
+  const org = await memoStr(`firstorg:${userId}`, async () => {
+    const membership = await getDb().query.member.findFirst({
+      where: eq(member.userId, userId),
+      orderBy: (m, { asc }) => [asc(m.createdAt), asc(m.id)],
+    });
+    // "" (not null) so the value is cacheable and distinct from a cache miss.
+    return membership?.organizationId ?? "";
   });
-  return membership?.organizationId ?? "";
+  return org ?? "";
 }
 
 /** True if the user is an org-level `owner` (better-auth member role). */
 export async function isOrgOwner(ctx: AuthContext): Promise<boolean> {
   if (!ctx.organizationId) return false;
-  const db = getDb();
-  const ownerMember = await db.query.member.findFirst({
-    where: and(
-      eq(member.userId, ctx.userId),
-      eq(member.organizationId, ctx.organizationId),
-      eq(member.role, "owner"),
-    ),
+  return memoBool(`owner:${ctx.userId}:${ctx.organizationId}`, async () => {
+    const ownerMember = await getDb().query.member.findFirst({
+      where: and(
+        eq(member.userId, ctx.userId),
+        eq(member.organizationId, ctx.organizationId),
+        eq(member.role, "owner"),
+      ),
+    });
+    return Boolean(ownerMember);
   });
-  return Boolean(ownerMember);
 }
 
 /**
@@ -167,9 +225,14 @@ export async function requireOrgOwner(
 
 // Per-site access levels, lowest → highest. Org owners sit above all of these.
 export type SiteLevel = "viewer" | "editor" | "site_admin";
-export type EffectiveLevel = SiteLevel | "org_owner";
+// "operator" = a Sparks platform operator viewing a customer site cross-tenant.
+// It ranks below viewer for WRITES (meetsLevel(operator, editor) is false), so
+// operators are strictly read-only on customer sites; they mutate only through the
+// dedicated operator admin endpoints. It still satisfies "any access" reads.
+export type EffectiveLevel = SiteLevel | "org_owner" | "operator";
 
 const LEVEL_RANK: Record<EffectiveLevel, number> = {
+  operator: 0,
   viewer: 1,
   editor: 2,
   site_admin: 3,
@@ -212,17 +275,24 @@ export async function requireSiteAccess(
   siteId: string,
   options?: RequireSiteAccessOptions,
 ): Promise<SiteAccessContext> {
-  const db = getDb();
+  const siteOrgId = await cachedSiteOrgId(siteId);
 
-  const site = await db.query.sites.findFirst({
-    where: eq(sites.id, siteId),
-  });
-
-  if (!site) {
+  if (siteOrgId === null) {
     throw new UnauthorizedError("Site not found");
   }
 
-  if (site.organizationId !== authContext.organizationId) {
+  if (siteOrgId !== authContext.organizationId) {
+    // Cross-tenant: allowed only for Sparks platform operators, and READ-ONLY.
+    // The "operator" level ranks below editor, so write gates (requireSiteEditor/
+    // Admin) still reject it — operators mutate customer data only through the
+    // dedicated admin endpoints. (Checked here, so a normal customer accessing
+    // their own site never pays for the extra lookup.)
+    if (await isPlatformOperator(authContext.userId)) {
+      if (options?.minLevel && !meetsLevel("operator", options.minLevel)) {
+        throw new ForbiddenError("Operators have read-only access to customer sites.");
+      }
+      return { ...authContext, siteId, level: "operator" };
+    }
     throw new ForbiddenError("Site belongs to different organization");
   }
 
@@ -232,15 +302,13 @@ export async function requireSiteAccess(
   }
 
   // (b) Explicit per-site grant.
-  const access = await db.query.siteAccess.findFirst({
-    where: and(eq(siteAccess.siteId, siteId), eq(siteAccess.userId, authContext.userId)),
-  });
+  const role = await cachedSiteAccessRole(siteId, authContext.userId);
 
-  if (!access) {
+  if (role === null) {
     throw new ForbiddenError("No access to site");
   }
 
-  const level = normalizeSiteLevel(access.role);
+  const level = normalizeSiteLevel(role);
   if (options?.minLevel && !meetsLevel(level, options.minLevel)) {
     throw new ForbiddenError(
       `This action needs ${options.minLevel.replace("_", " ")} access to the site.`,
@@ -266,13 +334,21 @@ export function requireSiteAdmin(authContext: AuthContext, siteId: string) {
  * better-auth user row.
  */
 export async function requirePlatformOperator(userId: string): Promise<void> {
-  const db = getDb();
-  const row = await db.query.user.findFirst({
-    where: eq(user.id, userId),
-    columns: { isPlatformOperator: true },
-  });
-
-  if (!row?.isPlatformOperator) {
+  if (!(await isPlatformOperator(userId))) {
     throw new ForbiddenError("Platform operator access required");
   }
+}
+
+/** True when the user carries the platform-operator flag. Non-throwing companion
+ * to requirePlatformOperator, used to grant operators cross-tenant read access.
+ * Cached (rarely changes); set via the make-operator script, so a fresh flag lags
+ * by at most AUTHZ_TTL in a running process. */
+export async function isPlatformOperator(userId: string): Promise<boolean> {
+  return memoBool(`op:${userId}`, async () => {
+    const row = await getDb().query.user.findFirst({
+      where: eq(user.id, userId),
+      columns: { isPlatformOperator: true },
+    });
+    return row?.isPlatformOperator ?? false;
+  });
 }

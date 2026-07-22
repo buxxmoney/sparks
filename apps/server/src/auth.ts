@@ -31,6 +31,16 @@ export const auth = betterAuth({
   secret: process.env.BETTER_AUTH_SECRET || "dev-secret-change-in-production",
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3001",
   appName: "Sparks",
+  session: {
+    // Cache the validated session in a short-lived signed cookie so getSession
+    // reads it locally instead of hitting the DB on every request. The dashboard
+    // fires ~6 RPCs per poll; without this each one re-validates the session in
+    // Postgres. Revocation lags by at most maxAge, so keep the window small.
+    cookieCache: {
+      enabled: true,
+      maxAge: 60, // seconds
+    },
+  },
   // Dev ports plus any production web origin(s) from WEB_ORIGINS (comma-separated),
   // e.g. "https://app.sparksmetering.com".
   trustedOrigins: [

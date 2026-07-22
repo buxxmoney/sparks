@@ -156,14 +156,25 @@ export default function SiteDetailsPage() {
     );
   }
 
+  // Sparks operators view any site cross-tenant, read-only (site.myLevel === "operator").
+  // They reach it from the operator console, so send them back there and hide writes.
+  const isOperator = site.myLevel === "operator";
+
   return (
     <Stack gap={6}>
+      {isOperator ? (
+        <Banner
+          status="info"
+          title="Operator view — read-only"
+          description="You're viewing this customer site as a Sparks operator. Changes are made from the operator console."
+        />
+      ) : null}
       {/* Header */}
       <Stack direction="horizontal" justify="between" align="start" wrap="wrap" gap={3}>
         <Stack gap={2}>
-          <Link href="/dashboard">
+          <Link href={isOperator ? "/admin" : "/dashboard"}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <ArrowLeft size={16} /> Back to sites
+              <ArrowLeft size={16} /> {isOperator ? "Back to operator console" : "Back to sites"}
             </span>
           </Link>
           <Stack direction="horizontal" gap={3} align="center">
@@ -183,11 +194,16 @@ export default function SiteDetailsPage() {
             </span>
           </Stack>
         </Stack>
-        <Stack direction="horizontal" gap={2} wrap="wrap">
-          <Button label="Bill checks" variant="primary" size={btnSize} icon={<Scale size={16} />} href={`/sites/${siteId}/bill-check`} />
-          <Button label="Invoices" variant="secondary" size={btnSize} icon={<FileText size={16} />} href={`/sites/${siteId}/invoices`} />
-          <Button label="Settings" variant="secondary" size={btnSize} icon={<Settings size={16} />} href={`/sites/${siteId}/settings`} />
-        </Stack>
+        {/* Invoices / bill checks / settings are the customer's workflow — an
+            operator only monitors the live dashboard, so hide the whole action
+            group for them (the server rejects these writes regardless). */}
+        {isOperator ? null : (
+          <Stack direction="horizontal" gap={2} wrap="wrap">
+            <Button label="Bill checks" variant="primary" size={btnSize} icon={<Scale size={16} />} href={`/sites/${siteId}/bill-check`} />
+            <Button label="Invoices" variant="secondary" size={btnSize} icon={<FileText size={16} />} href={`/sites/${siteId}/invoices`} />
+            <Button label="Settings" variant="secondary" size={btnSize} icon={<Settings size={16} />} href={`/sites/${siteId}/settings`} />
+          </Stack>
+        )}
       </Stack>
 
       {/* Live overview — Current load (power) leads on the left with apparent
