@@ -35,7 +35,10 @@ describe("Component comparison (charged vs expected per component)", () => {
     reactiveEnergyCents: 0,
     fixedCents: 0,
     ancillaryCents: 0,
+    surchargeCents: 0,
     totalCents: 850000,
+    vatCents: 0,
+    totalInclVatCents: 850000,
     details: [],
   };
 
@@ -147,7 +150,7 @@ describe("Reconciliation Engine", () => {
         tariffProfileId: landlordTariffId,
         chargeType: "active_energy",
         unit: "c_per_kwh",
-        rateValue: "2.50", // R2.50 per kWh
+        rateValue: "250", // 250 c/kWh (R2.50 per kWh)
         season: "all",
         touPeriod: "all",
       },
@@ -626,7 +629,7 @@ describe("Reconciliation Engine", () => {
           tariffProfileId: febTariffId,
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: "3.00",
+          rateValue: "300",
           season: "all",
           touPeriod: "all",
         },
@@ -869,7 +872,7 @@ describe("priceSegments — period-level charges counted once across a tariff ch
       usage: { activeKwh: 100, maxDemandKva: 50, reactiveKvarh: 0 },
       profile: {
         rates: [
-          rate("active_energy", "c_per_kwh", 2),
+          rate("active_energy", "c_per_kwh", 200),
           rate("fixed", "r_per_month", 100),
           rate("demand", "r_per_kva", 10),
         ],
@@ -879,7 +882,7 @@ describe("priceSegments — period-level charges counted once across a tariff ch
       usage: { activeKwh: 100, maxDemandKva: 60, reactiveKvarh: 0 },
       profile: {
         rates: [
-          rate("active_energy", "c_per_kwh", 3),
+          rate("active_energy", "c_per_kwh", 300),
           rate("fixed", "r_per_month", 100),
           rate("demand", "r_per_kva", 10),
         ],
@@ -899,7 +902,7 @@ describe("priceSegments — period-level charges counted once across a tariff ch
     const r = priceSegments([
       {
         usage: { activeKwh: 100, maxDemandKva: 50, reactiveKvarh: 0 },
-        profile: { rates: [rate("active_energy", "c_per_kwh", 2), rate("fixed", "r_per_month", 100)] },
+        profile: { rates: [rate("active_energy", "c_per_kwh", 200), rate("fixed", "r_per_month", 100)] },
       },
     ]);
     expect(r.activeEnergyCents).toBe(20000);

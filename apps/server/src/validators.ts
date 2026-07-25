@@ -93,6 +93,14 @@ export const sitesDeleteInput = z.object({
   siteId: z.string().uuid(),
 });
 
+// Live current-bill alert config. `thresholdCents` null (or omitted) disables the
+// alert; `basis` watches the charges-so-far or the projected period-end figure.
+export const sitesSetBillAlertInput = z.object({
+  siteId: z.string().uuid(),
+  thresholdCents: z.number().int().positive().max(1_000_000_000).nullable().optional(),
+  basis: z.enum(["actual", "projected"]).default("actual"),
+});
+
 /* ─────────────── Site Access ─────────────── */
 export const siteAccessListInput = z.object({
   siteId: z.string().uuid(),
@@ -246,6 +254,27 @@ export const tariffsLibraryGetInput = z.object({
   tariffProfileId: z.string().uuid(),
 });
 
+// Structural billing rules a rate table can't express (see server PricingRules):
+// demand floor (City Power 70 kVA minimum), reactive free allowance (30% of kWh),
+// percent-of-subtotal levy (CoJ business surcharge) and VAT.
+// A verbatim citation from a published tariff document backing a profile's
+// rates/rules, shown in the customer-facing calculation view.
+export const tariffSourceCitation = z.object({
+  title: z.string().min(1).max(300),
+  page: z.string().max(40).optional(),
+  quote: z.string().min(1).max(2000),
+  appliesTo: z.array(z.string().max(40)).max(10).optional(),
+  tariffScheduleId: z.string().uuid().optional(),
+});
+
+export const tariffPricingRules = z.object({
+  minDemandKva: z.number().nonnegative().optional(),
+  reactiveAllowanceFactorOfKwh: z.number().min(0).max(1).optional(),
+  reactiveHighSeasonOnly: z.boolean().optional(),
+  surchargeFractionOfSubtotal: z.number().min(0).max(1).optional(),
+  vatFraction: z.number().min(0).max(1).optional(),
+});
+
 export const tariffsProfilesCreateInput = z.object({
   organizationId: z.string().optional(),
   name: z.string().min(1).max(255),
@@ -255,6 +284,8 @@ export const tariffsProfilesCreateInput = z.object({
   distributor: z.string().max(255).optional(),
   currency: z.string().default("ZAR"),
   touSchedule: z.record(z.any()).optional(),
+  pricingRules: tariffPricingRules.optional(),
+  sources: z.array(tariffSourceCitation).max(20).optional(),
   effectiveFrom: z.coerce.date(),
   effectiveTo: z.coerce.date().optional(),
   validatedByAttorney: z.boolean().default(false),
@@ -265,6 +296,8 @@ export const tariffsProfilesUpdateInput = z.object({
   name: z.string().min(1).max(255).optional(),
   distributor: z.string().max(255).optional(),
   touSchedule: z.record(z.any()).optional(),
+  pricingRules: tariffPricingRules.optional(),
+  sources: z.array(tariffSourceCitation).max(20).optional(),
   effectiveTo: z.coerce.date().optional(),
   validatedByAttorney: z.boolean().optional(),
 });
@@ -435,7 +468,9 @@ export const adminReviewReconciliationInput = z.object({
   body: z.string().min(1).max(8000),
   // Zero or more PDF documents to attach to the outcome (each base64-encoded).
   attachments: z
-    .array(z.object({ name: z.string().min(1).max(200), base64: z.string().min(1).max(20_000_000) }))
+    .array(
+      z.object({ name: z.string().min(1).max(200), base64: z.string().min(1).max(20_000_000) }),
+    )
     .max(10)
     .optional(),
 });
@@ -579,6 +614,13 @@ export const readingsEnergyByPeriodInput = z.object({
   granularity: z.enum(["day", "week", "month", "billing_period"]).optional(),
 });
 
+// Live "current bill so far": the in-progress billing period's usage priced under
+// the site's assigned tariffs. `asOf` pins the reference instant for tests.
+export const billingCurrentEstimateInput = z.object({
+  siteId: z.string().uuid(),
+  asOf: z.coerce.date().optional(),
+});
+
 // Time-series demand intervals for charting a site's load over a window (docs/02 §4.1
 // `demand.listIntervals`). Read-only. Defaults to the last 24h when no window is given.
 export const demandListIntervalsInput = z.object({
@@ -688,3 +730,4 @@ export type ReadingsLatestInput = z.infer<typeof readingsLatestInput>;
 export type ReadingsMonthToDateInput = z.infer<typeof readingsMonthToDateInput>;
 export type ReadingsEnergyByPeriodInput = z.infer<typeof readingsEnergyByPeriodInput>;
 export type DemandListIntervalsInput = z.infer<typeof demandListIntervalsInput>;
+export type BillingCurrentEstimateInput = z.infer<typeof billingCurrentEstimateInput>;

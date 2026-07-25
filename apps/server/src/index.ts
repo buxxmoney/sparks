@@ -12,6 +12,7 @@ import { createDeviceRouter, createIngestionRouter } from "./ingestion";
 import { ForbiddenError, UnauthorizedError, requireSession } from "./middleware";
 import type { ORPCContext } from "./orpc";
 import { appRouter } from "./router.orpc";
+import { evaluateBillThresholds } from "./routers";
 import { getObject, objectExists, verifyObjectToken } from "./storage";
 import { monitorDeviceHealth } from "./workers";
 
@@ -60,7 +61,10 @@ app.get("/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOStri
 // IN-PROCESS, which never reaches this HTTP handler.
 app.on(["GET", "POST"], "/api/auth/**", async (c) => {
   if (c.req.method === "POST" && new URL(c.req.url).pathname === "/api/auth/sign-up/email") {
-    return c.json({ error: "Public sign-up is disabled. Accounts are provisioned by Sparks." }, 403);
+    return c.json(
+      { error: "Public sign-up is disabled. Accounts are provisioned by Sparks." },
+      403,
+    );
   }
   return auth.handler(c.req.raw);
 });
@@ -165,6 +169,28 @@ if (typeof Bun === "undefined") {
     // Don't let the monitor keep the process alive on shutdown.
     if (typeof timer.unref === "function") timer.unref();
     console.log(`Device-health monitor running every ${Math.round(intervalMs / 1000)}s`);
+  }
+
+  // Bill-alert monitor: sweep sites with a live-bill threshold and notify their
+  // recipients when the running estimate crosses it (once per billing period).
+  // Slower cadence than device health; disable with BILL_ALERT_DISABLED=1.
+  if (process.env.BILL_ALERT_DISABLED !== "1") {
+    const intervalMs = Number.parseInt(process.env.BILL_ALERT_INTERVAL_MS || "1800000"); // 30 min
+    let sweeping = false;
+    const sweep = async () => {
+      if (sweeping) return;
+      sweeping = true;
+      try {
+        await evaluateBillThresholds();
+      } catch (err) {
+        console.error("[bill-alert] sweep failed:", err);
+      } finally {
+        sweeping = false;
+      }
+    };
+    const timer = setInterval(sweep, intervalMs);
+    if (typeof timer.unref === "function") timer.unref();
+    console.log(`Bill-alert monitor running every ${Math.round(intervalMs / 1000)}s`);
   }
 }
 

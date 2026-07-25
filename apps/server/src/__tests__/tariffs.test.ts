@@ -60,7 +60,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 2.5,
+          rateValue: 250,
           season: "all",
           touPeriod: "all",
         },
@@ -68,7 +68,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.activeEnergyCents).toBe(25000); // 100 kWh * 2.5 R/kWh * 100 cents/R
+    expect(result.activeEnergyCents).toBe(25000); // 100 kWh * 250 c/kWh
     expect(result.totalCents).toBe(25000);
   });
 
@@ -108,7 +108,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
         {
           chargeType: "reactive_energy",
           unit: "c_per_kvarh",
-          rateValue: 1.5,
+          rateValue: 150,
           season: "all",
           touPeriod: "all",
         },
@@ -116,7 +116,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.reactiveEnergyCents).toBe(3750); // 25 kVArh * 1.5 R/kVArh * 100 cents/R
+    expect(result.reactiveEnergyCents).toBe(3750); // 25 kVArh * 150 c/kVArh
     expect(result.totalCents).toBe(3750);
   });
 
@@ -132,7 +132,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 2.0,
+          rateValue: 200,
           season: "all",
           touPeriod: "all",
         },
@@ -154,7 +154,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.activeEnergyCents).toBe(20000); // 100 kWh * 2.0 R/kWh * 100 cents/R
+    expect(result.activeEnergyCents).toBe(20000); // 100 kWh * 200 c/kWh
     expect(result.demandCents).toBe(20000); // 10 kVA * 20 R/kVA * 100 cents/R
     expect(result.fixedCents).toBe(10000); // 100 R * 100 cents/R
     expect(result.totalCents).toBe(50000);
@@ -194,7 +194,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 2.334,
+          rateValue: 233.4,
           season: "all",
           touPeriod: "all",
         },
@@ -202,7 +202,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    expect(result.activeEnergyCents).toBe(23340); // 100 kWh * 2.334 R/kWh * 100 cents/R
+    expect(result.activeEnergyCents).toBe(23340); // 100 kWh * 233.4 c/kWh
   });
 
   it("splits active energy across peak/standard/offpeak TOU bands", () => {
@@ -229,21 +229,21 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 3,
+          rateValue: 300,
           season: "all",
           touPeriod: "peak",
         },
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 2,
+          rateValue: 200,
           season: "all",
           touPeriod: "standard",
         },
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 1,
+          rateValue: 100,
           season: "all",
           touPeriod: "offpeak",
         },
@@ -251,7 +251,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    // peak 120*3=360R, standard 100*2=200R, offpeak 80*1=80R
+    // peak 120 kWh @300c = R360, standard 100 kWh @200c = R200, offpeak 80 kWh @100c = R80
     expect(result.activeEnergyCents).toBe(36000 + 20000 + 8000);
     expect(result.totalCents).toBe(64000);
     expect(result.details.length).toBe(3);
@@ -274,14 +274,14 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 5,
+          rateValue: 500,
           season: "high",
           touPeriod: "all",
         },
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 2,
+          rateValue: 200,
           season: "low",
           touPeriod: "all",
         },
@@ -289,7 +289,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    // high 100*5=500R, low 50*2=100R
+    // high 100 kWh @500c = R500, low 50 kWh @200c = R100
     expect(result.activeEnergyCents).toBe(50000 + 10000);
     expect(result.totalCents).toBe(60000);
     expect(result.activeEnergyCents).toBeGreaterThan(0); // non-"all" tariff no longer 0
@@ -337,7 +337,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 1.5,
+          rateValue: 150,
           season: "all",
           touPeriod: "all",
           blockThresholdKwh: 500,
@@ -345,7 +345,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
         {
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: 2.5,
+          rateValue: 250,
           season: "all",
           touPeriod: "all",
         },
@@ -353,7 +353,7 @@ describe("Tariff Pricing Helper (Pure Function)", () => {
     };
 
     const result = priceUsage(usage, profile);
-    // 0–500 @1.5 = 750R; 500–700 @2.5 = 500R
+    // 0–500 kWh @150c = R750; 500–700 kWh @250c = R500
     expect(result.activeEnergyCents).toBe(75000 + 50000);
     expect(result.totalCents).toBe(125000);
     expect(result.details.length).toBe(2);
@@ -442,7 +442,7 @@ describe("Tariff Routers", () => {
         tariffProfileId: libProfileId,
         chargeType: "active_energy",
         unit: "c_per_kwh",
-        rateValue: "2.50",
+        rateValue: "250",
         season: "all",
         touPeriod: "all",
       });
@@ -511,7 +511,7 @@ describe("Tariff Routers", () => {
         tariffProfileId: profileId,
         chargeType: "active_energy",
         unit: "c_per_kwh",
-        rateValue: "2.50",
+        rateValue: "250",
         season: "all",
         touPeriod: "all",
       });
@@ -522,7 +522,7 @@ describe("Tariff Routers", () => {
         where: eq(tariffRates.tariffProfileId, profileId),
       });
       expect(rates.length).toBe(1);
-      expect(Number(rates[0].rateValue)).toBe(2.5);
+      expect(Number(rates[0].rateValue)).toBe(250);
     });
 
     it("lists rates for a profile", async () => {
@@ -545,7 +545,7 @@ describe("Tariff Routers", () => {
           tariffProfileId: profileId,
           chargeType: "active_energy",
           unit: "c_per_kwh",
-          rateValue: "2.50",
+          rateValue: "250",
           season: "all",
           touPeriod: "all",
         },

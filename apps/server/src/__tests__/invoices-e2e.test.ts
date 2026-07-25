@@ -123,7 +123,7 @@ describe("Invoice End-to-End Workflow", () => {
         tariffProfileId: landlordTariffId,
         chargeType: "active_energy",
         unit: "c_per_kwh",
-        rateValue: "2.50",
+        rateValue: "250",
         season: "all",
         touPeriod: "all",
       },

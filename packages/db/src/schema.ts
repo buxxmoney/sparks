@@ -201,6 +201,7 @@ export const alertType = pgEnum("alert_type", [
   "invoice_ready",
   "invoice_parsed",
   "review_submitted",
+  "bill_threshold",
 ]);
 export const alertSeverity = pgEnum("alert_severity", ["info", "warning", "critical"]);
 export const alertStatus = pgEnum("alert_status", ["open", "acknowledged", "resolved"]);
@@ -220,6 +221,15 @@ export const sites = pgTable(
     supplyZone: text("supply_zone"),
     timezone: text("timezone").notNull().default("Africa/Johannesburg"),
     demandIntervalMinutes: integer("demand_interval_minutes").notNull().default(30),
+    // Live current-bill alert: notify site recipients when the running estimate
+    // crosses this Rand amount (in cents). Null = disabled. `basis` chooses whether
+    // it watches the charges-so-far or the projected period-end figure. The last
+    // period we fired for dedupes to one alert per billing period.
+    billAlertThresholdCents: integer("bill_alert_threshold_cents"),
+    billAlertBasis: text("bill_alert_basis").notNull().default("actual"),
+    billAlertLastFiredPeriodStart: timestamp("bill_alert_last_fired_period_start", {
+      withTimezone: true,
+    }),
     status: text("status").notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -528,6 +538,12 @@ export const tariffProfiles = pgTable(
     distributor: text("distributor"),
     currency: text("currency").notNull().default("ZAR"),
     touSchedule: jsonb("tou_schedule"),
+    // Structural billing rules the rate rows can't express (demand floor,
+    // reactive allowance, percent surcharge, VAT) — see server PricingRules.
+    pricingRules: jsonb("pricing_rules"),
+    // Verbatim citations from published tariff documents backing this profile
+    // (title/page/quote + optional tariff_schedules FK) — see TariffSourceCitation.
+    sources: jsonb("sources"),
     effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
     effectiveTo: timestamp("effective_to", { withTimezone: true }),
     version: integer("version").notNull().default(1),

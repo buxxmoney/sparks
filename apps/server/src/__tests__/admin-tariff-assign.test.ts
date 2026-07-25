@@ -200,7 +200,7 @@ describe("Operator assign-site-tariff", () => {
       siteId,
       name: "Landlord tariff",
       effectiveFrom: pending.billingPeriodStart,
-      rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "2.20" }],
+      rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "220" }],
       regenerateBillingPeriodId: billingPeriodId,
     });
     expect(res.regenerateError).toBeNull();
@@ -240,7 +240,7 @@ describe("Operator assign-site-tariff", () => {
     await adminAssignSiteTariff(operatorCtx, {
       siteId,
       effectiveFrom: new Date(2020, 0, 1),
-      rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "2.20" }],
+      rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "220" }],
       regenerateBillingPeriodId: billingPeriodId,
     });
 
@@ -283,7 +283,7 @@ describe("Operator assign-site-tariff", () => {
       name: "Landlord tariff",
       effectiveFrom: new Date(2020, 0, 1),
       rates: [
-        { chargeType: "active_energy", unit: "c_per_kwh", rateValue: "2.20" },
+        { chargeType: "active_energy", unit: "c_per_kwh", rateValue: "220" },
         { chargeType: "demand", unit: "r_per_kva", rateValue: "95.00" },
       ],
     });
@@ -298,12 +298,12 @@ describe("Operator assign-site-tariff", () => {
     await adminAssignSiteTariff(operatorCtx, {
       siteId,
       effectiveFrom: new Date(2020, 0, 1),
-      rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "2.00" }],
+      rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "200" }],
     });
     await adminAssignSiteTariff(operatorCtx, {
       siteId,
       effectiveFrom: new Date(2020, 0, 1),
-      rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "3.00" }],
+      rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "300" }],
     });
 
     // Only one landlord assignment is still open.
@@ -396,7 +396,7 @@ describe("Operator assign-site-tariff", () => {
       adminAssignSiteTariff(ownerCtx, {
         siteId,
         effectiveFrom: new Date(2020, 0, 1),
-        rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "2.20" }],
+        rates: [{ chargeType: "active_energy", unit: "c_per_kwh", rateValue: "220" }],
       }),
     ).rejects.toBeInstanceOf(ForbiddenError);
 

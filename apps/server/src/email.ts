@@ -218,7 +218,9 @@ function tariffAnalysisHtml(a: TariffAnalysis | null | undefined): string {
         <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${escapeHtml(l.billed)}</td>
         <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${escapeHtml(l.expected ?? "—")}</td>
         <td style="padding:6px 8px;border-bottom:1px solid #eee">${verdictChip(l.verdict)}${
-          l.comment ? `<br><span style="color:#6b7280;font-size:11px">${escapeHtml(l.comment)}</span>` : ""
+          l.comment
+            ? `<br><span style="color:#6b7280;font-size:11px">${escapeHtml(l.comment)}</span>`
+            : ""
         }</td>
       </tr>`,
     )
@@ -264,6 +266,35 @@ export function billReviewOutcomeEmail(data: {
 }
 
 /**
+ * Customer-facing bill-threshold alert — the live current-bill estimate has crossed
+ * the Rand threshold set for the site. Plain, factual: the amount, the threshold, and
+ * whether it's the charges-so-far or the projected figure.
+ */
+export function billThresholdEmail(data: {
+  siteName: string;
+  amountRand: string;
+  thresholdRand: string;
+  basisLabel: string; // "charges so far" | "projected total for the period"
+  periodLabel: string;
+  link: string;
+}): { subject: string; html: string } {
+  return {
+    subject: `Bill alert: ${data.siteName} has passed ${data.thresholdRand}`,
+    html: `<div style="font-family:system-ui,sans-serif;max-width:560px;color:#111827">
+      <span style="display:inline-block;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;background:#fef3c7;color:#92400e">Bill alert</span>
+      <h2 style="margin:10px 0 8px">${escapeHtml(data.siteName)} — ${escapeHtml(data.amountRand)}</h2>
+      <p style="color:#374151;font-size:14px;line-height:1.6;margin:0 0 12px">
+        The ${escapeHtml(data.basisLabel)} for ${escapeHtml(data.periodLabel)} has reached
+        <strong>${escapeHtml(data.amountRand)}</strong>, passing the
+        <strong>${escapeHtml(data.thresholdRand)}</strong> alert you set for this site.
+      </p>
+      <p style="color:#6b7280;font-size:13px;margin:0 0 12px">This is an estimate from your meter and the tariff on file. You can change or turn off this alert in the site's settings.</p>
+      ${button(data.link, "View current bill")}
+    </div>`,
+  };
+}
+
+/**
  * Operator-facing meter-offline alert — sent to the Sparks team when a meter stops
  * reporting, since operators don't watch the customer dashboards. Links to admin.
  */
@@ -274,7 +305,9 @@ export function meterDownEmail(data: {
   lastSeen: Date | null;
   link: string;
 }): { subject: string; html: string } {
-  const lastSeenStr = data.lastSeen ? data.lastSeen.toISOString().replace("T", " ").slice(0, 16) : "never";
+  const lastSeenStr = data.lastSeen
+    ? data.lastSeen.toISOString().replace("T", " ").slice(0, 16)
+    : "never";
   return {
     subject: `Meter offline — ${data.siteName} (${data.serialNumber})`,
     html: `<div style="font-family:system-ui,sans-serif;max-width:560px;color:#111827">

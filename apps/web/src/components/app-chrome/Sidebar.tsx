@@ -1,27 +1,28 @@
 "use client";
 
-import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
-import {
-  SideNav,
-  SideNavSection,
-  SideNavItem,
-  useSideNavCollapse,
-} from "@astryxdesign/core/SideNav";
 import { Badge } from "@astryxdesign/core/Badge";
 import {
-  LayoutDashboard,
+  SideNav,
+  SideNavItem,
+  SideNavSection,
+  useSideNavCollapse,
+} from "@astryxdesign/core/SideNav";
+import {
   Bell,
   Building,
   Building2,
-  Gauge,
   FileText,
+  Gauge,
+  LayoutDashboard,
+  ReceiptText,
   Scale,
   Settings,
   ShieldCheck,
   UserCircle,
   Users,
 } from "lucide-react";
+import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 import { client } from "@/lib/client";
 import { useOrganization } from "@/lib/useOrganization";
@@ -116,8 +117,15 @@ function NavSections() {
             href={`/sites/${siteId}`}
             isSelected={pathname === `/sites/${siteId}`}
           />
-          {/* Invoices / bill checks / settings are the customer's workflow.
-              Operators monitor read-only, so they get the dashboard only. */}
+          {/* Current bill is a read-only monitoring view (live meter × tariff), so
+              operators see it too. Invoices / bill checks / settings are customer
+              workflow — operators are read-only and don't get those. */}
+          <SideNavItem
+            label="Current bill"
+            icon={<ReceiptText size={ICON_SIZE} />}
+            href={`/sites/${siteId}/current-bill`}
+            isSelected={pathname.startsWith(`/sites/${siteId}/current-bill`)}
+          />
           {isPlatformOperator ? null : (
             <>
               <SideNavItem
@@ -234,10 +242,7 @@ export function AppSideNav({
   onCollapsedChange: (isCollapsed: boolean) => void;
 }) {
   return (
-    <SideNav
-      collapsible={{ isCollapsed, onCollapsedChange }}
-      footer={<OrgFooter />}
-    >
+    <SideNav collapsible={{ isCollapsed, onCollapsedChange }} footer={<OrgFooter />}>
       <NavSections />
     </SideNav>
   );

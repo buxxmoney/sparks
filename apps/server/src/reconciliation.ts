@@ -9,7 +9,10 @@ export function emptyBreakdown(): PricingBreakdown {
     reactiveEnergyCents: 0,
     fixedCents: 0,
     ancillaryCents: 0,
+    surchargeCents: 0,
     totalCents: 0,
+    vatCents: 0,
+    totalInclVatCents: 0,
     details: [],
   };
 }
@@ -48,10 +51,46 @@ export function priceSegments(
   // period-level lines (from the segments they were taken from).
   const details: PricingBreakdown["details"] = [];
   for (const p of priced) {
-    details.push(...p.details.filter((d) => d.chargeType === "active_energy" || d.chargeType === "reactive_energy"));
+    details.push(
+      ...p.details.filter(
+        (d) => d.chargeType === "active_energy" || d.chargeType === "reactive_energy",
+      ),
+    );
   }
-  details.push(...last.details.filter((d) => d.chargeType === "fixed" || d.chargeType === "ancillary"));
+  details.push(
+    ...last.details.filter((d) => d.chargeType === "fixed" || d.chargeType === "ancillary"),
+  );
   details.push(...peakDemand.details.filter((d) => d.chargeType === "demand"));
+
+  // Percent-of-subtotal surcharge and VAT are PERIOD-level and depend on the
+  // combined components, so they are recomputed here under the period-end
+  // tariff's rules — summing per-segment surcharges would surcharge the fixed
+  // charges once per segment.
+  const rules = segments[segments.length - 1].profile.rules ?? {};
+  const surchargeBase = activeEnergyCents + demandCents + reactiveEnergyCents + fixedCents;
+  const surchargeCents = rules.surchargeFractionOfSubtotal
+    ? Math.round(surchargeBase * rules.surchargeFractionOfSubtotal)
+    : 0;
+  if (surchargeCents > 0) {
+    details.push({
+      chargeType: "surcharge",
+      rateValue: rules.surchargeFractionOfSubtotal ?? 0,
+      unit: "fraction_of_subtotal",
+      season: "all",
+      touPeriod: "all",
+      amountCents: surchargeCents,
+      quantity: surchargeBase / 100,
+      quantityUnit: "R",
+    });
+  }
+  const totalCents =
+    activeEnergyCents +
+    demandCents +
+    reactiveEnergyCents +
+    fixedCents +
+    ancillaryCents +
+    surchargeCents;
+  const vatCents = rules.vatFraction ? Math.round(totalCents * rules.vatFraction) : 0;
 
   return {
     activeEnergyCents,
@@ -59,7 +98,11 @@ export function priceSegments(
     reactiveEnergyCents,
     fixedCents,
     ancillaryCents,
-    totalCents: activeEnergyCents + demandCents + reactiveEnergyCents + fixedCents + ancillaryCents,
+    surchargeCents,
+    totalCents,
+    vatCents,
+    totalInclVatCents: totalCents + vatCents,
+    billedDemandKva: peakDemand.billedDemandKva,
     details,
   };
 }
@@ -117,8 +160,15 @@ export function buildComponentComparison(
       key: "fixed",
       label: "Fixed / service",
       charged: invoice.confirmedFixedCents ?? 0,
-      expL: landlord ? landlord.fixedCents + landlord.ancillaryCents : null,
-      expC: (ceiling?.fixedCents ?? 0) + (ceiling?.ancillaryCents ?? 0),
+      // Ancillary per-kWh riders and percent surcharges land in this row too —
+      // invoices lump them under service/other, so the comparison must as well.
+      expL: landlord
+        ? landlord.fixedCents + landlord.ancillaryCents + landlord.surchargeCents
+        : null,
+      expC:
+        (ceiling?.fixedCents ?? 0) +
+        (ceiling?.ancillaryCents ?? 0) +
+        (ceiling?.surchargeCents ?? 0),
     },
   ];
   return rows.map((r) => ({
@@ -222,15 +272,7 @@ export async function generateReconciliation(
       },
       ceiling: {
         usage,
-        pricing: ceilingPricing || {
-          activeEnergyCents: 0,
-          demandCents: 0,
-          reactiveEnergyCents: 0,
-          fixedCents: 0,
-          ancillaryCents: 0,
-          totalCents: 0,
-          details: [],
-        },
+        pricing: ceilingPricing || emptyBreakdown(),
       },
       invoice: invoiceData,
       components: buildComponentComparison(landlordPricing, ceilingPricing, invoiceData),

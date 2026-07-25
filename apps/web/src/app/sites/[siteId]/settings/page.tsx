@@ -14,7 +14,7 @@ import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { ArrowLeft, Building2, CalendarRange, Check, Gauge } from "lucide-react";
+import { ArrowLeft, Bell, Building2, CalendarRange, Check, Gauge } from "lucide-react";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -142,6 +142,39 @@ export default function SiteSettingsPage() {
     }
   };
 
+  // ── Bill alerts ───────────────────────────────────────────────
+  const [alertEnabled, setAlertEnabled] = useState(false);
+  const [alertThreshold, setAlertThreshold] = useState(0); // whole Rand
+  const [alertBasis, setAlertBasis] = useState<"actual" | "projected">("actual");
+  const [alertMsg, setAlertMsg] = useState<"idle" | "saving" | "saved">("idle");
+
+  useEffect(() => {
+    if (!site) return;
+    const cents = site.billAlertThresholdCents;
+    setAlertEnabled(cents != null);
+    setAlertThreshold(cents != null ? Math.round(cents / 100) : 0);
+    if (site.billAlertBasis === "projected" || site.billAlertBasis === "actual") {
+      setAlertBasis(site.billAlertBasis);
+    }
+  }, [site]);
+
+  const saveAlert = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAlertMsg("saving");
+    try {
+      await client.sites.setBillAlert({
+        siteId,
+        thresholdCents:
+          alertEnabled && alertThreshold > 0 ? Math.round(alertThreshold * 100) : null,
+        basis: alertBasis,
+      });
+      await refetch();
+      setAlertMsg("saved");
+    } catch {
+      setAlertMsg("idle");
+    }
+  };
+
   const update = (field: string, value: string) => {
     setDetails((d) => ({ ...d, [field]: value }));
     setDetailsMsg("idle");
@@ -255,8 +288,8 @@ export default function SiteSettingsPage() {
             <SectionTitle icon={<CalendarRange size={16} />}>Billing cycle</SectionTitle>
             {billingErr ? <Banner status="error" title={billingErr} /> : null}
             <Text type="supporting">
-              Tell us exactly when this site&apos;s billing period runs so invoices and
-              bill checks line up with the landlord&apos;s cycle.
+              Tell us exactly when this site&apos;s billing period runs so invoices and bill checks
+              line up with the landlord&apos;s cycle.
             </Text>
             <Selector
               label="Cycle"
@@ -304,6 +337,72 @@ export default function SiteSettingsPage() {
                 isLoading={billingMsg === "saving"}
               />
               {billingMsg === "saved" ? <Saved /> : null}
+            </Stack>
+          </Stack>
+        </form>
+      </Card>
+
+      {/* Bill alerts */}
+      <Card padding={5}>
+        <form onSubmit={saveAlert}>
+          <Stack gap={4}>
+            <SectionTitle icon={<Bell size={16} />}>Bill alerts</SectionTitle>
+            <Text type="supporting">
+              Get notified — in the Alerts inbox, by email and by SMS — when this site&apos;s live
+              current-bill estimate passes an amount you choose. You&apos;ll get at most one alert
+              per billing period.
+            </Text>
+            <Selector
+              label="Alert"
+              options={[
+                { value: "off", label: "Off" },
+                { value: "on", label: "On" },
+              ]}
+              value={alertEnabled ? "on" : "off"}
+              onChange={(v) => {
+                setAlertEnabled(v === "on");
+                setAlertMsg("idle");
+              }}
+              width={200}
+            />
+
+            {alertEnabled ? (
+              <>
+                <NumberInput
+                  label="Notify me when the bill passes (R)"
+                  min={0}
+                  value={alertThreshold}
+                  onChange={(v) => {
+                    setAlertThreshold(Math.max(0, v ?? 0));
+                    setAlertMsg("idle");
+                  }}
+                  width={280}
+                  isIntegerOnly
+                />
+                <Selector
+                  label="Watch"
+                  options={[
+                    { value: "actual", label: "Charges so far" },
+                    { value: "projected", label: "Projected total for the period" },
+                  ]}
+                  value={alertBasis}
+                  onChange={(v) => {
+                    setAlertBasis(v as "actual" | "projected");
+                    setAlertMsg("idle");
+                  }}
+                  width={340}
+                />
+              </>
+            ) : null}
+
+            <Stack direction="horizontal" align="center" gap={3}>
+              <Button
+                label={alertMsg === "saving" ? "Saving…" : "Save bill alert"}
+                type="submit"
+                variant="primary"
+                isLoading={alertMsg === "saving"}
+              />
+              {alertMsg === "saved" ? <Saved /> : null}
             </Stack>
           </Stack>
         </form>

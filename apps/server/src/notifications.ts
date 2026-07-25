@@ -1,13 +1,6 @@
+import { alertDeliveries, alerts, getDb, member, siteAccess, user } from "@sparks/db";
 import { and, eq, inArray } from "drizzle-orm";
-import {
-  alertDeliveries,
-  alerts,
-  getDb,
-  member,
-  siteAccess,
-  user,
-} from "@sparks/db";
-import { billReviewOutcomeEmail, meterDownEmail, sendEmail } from "./email";
+import { billReviewOutcomeEmail, billThresholdEmail, meterDownEmail, sendEmail } from "./email";
 import { sendSms } from "./sms";
 import { putObject } from "./storage";
 
@@ -28,9 +21,10 @@ async function resolveRecipients(organizationId: string, siteId: string) {
 
   const ids = [...new Set([...owners, ...grants].map((r) => r.userId))];
   if (ids.length === 0) return [];
-  return db.select({ id: user.id, email: user.email, phone: user.phone }).from(user).where(
-    inArray(user.id, ids),
-  );
+  return db
+    .select({ id: user.id, email: user.email, phone: user.phone })
+    .from(user)
+    .where(inArray(user.id, ids));
 }
 
 /** The web app base URL, for links in SMS/email nudges. */
@@ -195,6 +189,106 @@ export async function dispatchBillOutcome(params: {
 }
 
 /**
+ * Deliver a live current-bill threshold alert to a site's recipients across every
+ * channel (in-app inbox + email + SMS nudge), mirroring dispatchBillOutcome. Called
+ * by the bill-threshold sweep when the running estimate crosses the site's threshold.
+ * Per-recipient/channel failures are recorded but never abort the others.
+ */
+export async function dispatchBillThresholdCrossed(params: {
+  siteId: string;
+  organizationId: string;
+  siteName: string;
+  amountRand: string;
+  thresholdRand: string;
+  basisLabel: string;
+  periodLabel: string;
+}): Promise<{ alertId: string; recipientCount: number }> {
+  const db = getDb();
+  const recipients = await resolveRecipients(params.organizationId, params.siteId);
+  const link = `${webUrl()}/sites/${params.siteId}/current-bill`;
+
+  const [alert] = await db
+    .insert(alerts)
+    .values({
+      organizationId: params.organizationId,
+      siteId: params.siteId,
+      type: "bill_threshold",
+      severity: "warning",
+      title: `${params.siteName}: bill has passed ${params.thresholdRand}`,
+      message: `The ${params.basisLabel} for ${params.periodLabel} has reached ${params.amountRand}, passing your ${params.thresholdRand} alert.`,
+      payload: {
+        amountRand: params.amountRand,
+        thresholdRand: params.thresholdRand,
+        basisLabel: params.basisLabel,
+        periodLabel: params.periodLabel,
+      },
+      status: "open",
+    })
+    .returning();
+
+  const email = billThresholdEmail({
+    siteName: params.siteName,
+    amountRand: params.amountRand,
+    thresholdRand: params.thresholdRand,
+    basisLabel: params.basisLabel,
+    periodLabel: params.periodLabel,
+    link,
+  });
+
+  for (const r of recipients) {
+    await db.insert(alertDeliveries).values({
+      alertId: alert.id,
+      channel: "app",
+      recipientUserId: r.id,
+      status: "sent",
+      sentAt: new Date(),
+    });
+
+    if (r.email) {
+      try {
+        await sendEmail({ to: r.email, subject: email.subject, html: email.html });
+        await db.insert(alertDeliveries).values({
+          alertId: alert.id,
+          channel: "email",
+          recipientUserId: r.id,
+          status: "sent",
+          sentAt: new Date(),
+        });
+      } catch (err) {
+        console.error(`[notify] bill-alert email to ${r.email} failed:`, err);
+        await db
+          .insert(alertDeliveries)
+          .values({ alertId: alert.id, channel: "email", recipientUserId: r.id, status: "failed" });
+      }
+    }
+
+    if (r.phone) {
+      try {
+        const ref = await sendSms(
+          r.phone,
+          `Sparks: ${params.siteName} bill has reached ${params.amountRand} (alert set at ${params.thresholdRand}). ${link}`,
+        );
+        await db.insert(alertDeliveries).values({
+          alertId: alert.id,
+          channel: "sms",
+          recipientUserId: r.id,
+          status: "sent",
+          sentAt: new Date(),
+          providerRef: ref,
+        });
+      } catch (err) {
+        console.error(`[notify] bill-alert sms to ${r.phone} failed:`, err);
+        await db
+          .insert(alertDeliveries)
+          .values({ alertId: alert.id, channel: "sms", recipientUserId: r.id, status: "failed" });
+      }
+    }
+  }
+
+  return { alertId: alert.id, recipientCount: recipients.length };
+}
+
+/**
  * Notification that background parsing of an uploaded invoice has finished (or
  * failed). Lands in the in-app inbox AND texts the customer (if they've added a
  * number) so they know their invoice is ready to review / needs re-uploading.
@@ -324,9 +418,12 @@ export async function dispatchOperatorMeterDown(params: {
           });
         } catch (err) {
           console.error(`[notify] meter-down email to ${op.email} failed:`, err);
-          await db
-            .insert(alertDeliveries)
-            .values({ alertId: alert.id, channel: "email", recipientUserId: op.id, status: "failed" });
+          await db.insert(alertDeliveries).values({
+            alertId: alert.id,
+            channel: "email",
+            recipientUserId: op.id,
+            status: "failed",
+          });
         }
       }
     }

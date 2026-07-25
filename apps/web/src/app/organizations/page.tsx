@@ -11,7 +11,15 @@ import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Table } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
-import { Activity, Building, Building2, ChevronDown, ChevronRight, MapPin } from "lucide-react";
+import {
+  Activity,
+  Building,
+  Building2,
+  ChevronDown,
+  ChevronRight,
+  MapPin,
+  ReceiptText,
+} from "lucide-react";
 import { useState } from "react";
 
 const MUTED = "var(--color-text-secondary, hsl(215 16% 47%))";
@@ -67,13 +75,22 @@ function OrgSites({ organizationId }: { organizationId: string }) {
           key: "open",
           header: "",
           renderCell: (s) => (
-            <Button
-              label="Open dashboard"
-              variant="secondary"
-              size="sm"
-              icon={<Activity size={14} />}
-              href={`/sites/${s.id}`}
-            />
+            <span style={{ display: "inline-flex", gap: 8, justifyContent: "flex-end" }}>
+              <Button
+                label="Current bill"
+                variant="secondary"
+                size="sm"
+                icon={<ReceiptText size={14} />}
+                href={`/sites/${s.id}/current-bill`}
+              />
+              <Button
+                label="Open dashboard"
+                variant="secondary"
+                size="sm"
+                icon={<Activity size={14} />}
+                href={`/sites/${s.id}`}
+              />
+            </span>
           ),
         },
       ]}

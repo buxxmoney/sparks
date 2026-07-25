@@ -23,7 +23,29 @@ import {
   tariffRates,
   user,
 } from "@sparks/db";
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { auth } from "./auth";
+import {
+  elapsedFraction,
+  projectedTotalCents,
+  resolveEstimatePeriod,
+  usageFromIntervals,
+} from "./bill-estimate";
+import {
+  type BillingPeriodPolicy,
+  materializePeriods,
+  recentPeriods,
+  resolveCurrentPeriod,
+} from "./billing";
+import { TtlCache } from "./cache";
+import { billReviewRequestEmail, sendEmail, siteInviteEmail } from "./email";
+import {
+  type TariffAnalysis,
+  analyzeInvoiceTariffs,
+  deriveLineCategory,
+  parseInvoiceWithClaude,
+  persistParsedInvoice,
+} from "./invoices";
 import {
   type RawReadingRow,
   bucketEnergyByCalendar,
@@ -32,28 +54,13 @@ import {
   peakDemandKva,
   windowEnergy,
 } from "./live-readings";
-import { auth } from "./auth";
-import {
-  type BillingPeriodPolicy,
-  materializePeriods,
-  recentPeriods,
-  resolveCurrentPeriod,
-} from "./billing";
-import { billReviewRequestEmail, sendEmail, siteInviteEmail } from "./email";
-import {
-  analyzeInvoiceTariffs,
-  deriveLineCategory,
-  parseInvoiceWithClaude,
-  persistParsedInvoice,
-  type TariffAnalysis,
-} from "./invoices";
 import type { AuthContext } from "./middleware";
 import {
   ForbiddenError,
+  PreconditionError,
   invalidateMembershipCache,
   invalidateSiteAccessCache,
   invalidateSiteCache,
-  PreconditionError,
   requireOrg,
   requireOrgOwner,
   requirePlatformOperator,
@@ -62,18 +69,18 @@ import {
   requireSiteEditor,
 } from "./middleware";
 import {
+  dispatchBillThresholdCrossed,
+  dispatchInvoiceParsed,
+  dispatchOperatorBillSubmitted,
+  dispatchReviewSubmitted,
+} from "./notifications";
+import {
   buildComponentComparison,
   emptyBreakdown,
   generateReconciliation,
   priceSegments,
 } from "./reconciliation";
-import {
-  dispatchInvoiceParsed,
-  dispatchOperatorBillSubmitted,
-  dispatchReviewSubmitted,
-} from "./notifications";
 import { assertMeteredDataInPeriod } from "./report-guards";
-import { TtlCache } from "./cache";
 
 // Hot dashboard reads are recomputed from raw `readings` on every ~30s poll, per
 // viewer. Cache the RESULT (not the authz — that's per-user, cached separately) by
@@ -87,12 +94,20 @@ function cachedRead<T>(key: string, loader: () => Promise<T>): Promise<T> {
 }
 import { sendSms } from "./sms";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
-import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
+import type {
+  PricingBreakdown,
+  PricingRules,
+  TariffProfile,
+  TariffRate,
+  TariffSourceCitation,
+  UsageData,
+} from "./tariffs";
 import {
   adminAssignSiteTariffInput,
   adminSiteTariffGetInput,
   alertsAcknowledgeInput,
   alertsAttachmentUrlInput,
+  billingCurrentEstimateInput,
   billingPeriodsCloseInput,
   billingPeriodsListInput,
   billingPeriodsMaterializeInput,
@@ -122,14 +137,14 @@ import {
   metersCommissionInput,
   metersCreateInput,
   metersGetInput,
-  profileSetPhoneInput,
+  orgAccessOverviewInput,
   orgCreateInput,
   orgGetInput,
-  orgAccessOverviewInput,
   orgInviteInput,
   orgListMembersInput,
   orgRemoveMemberInput,
   orgSetMemberRoleInput,
+  profileSetPhoneInput,
   readingsEnergyByPeriodInput,
   readingsLatestInput,
   readingsMonthToDateInput,
@@ -151,6 +166,7 @@ import {
   sitesDeleteInput,
   sitesGetInput,
   sitesListInput,
+  sitesSetBillAlertInput,
   sitesSetDefaultDemandIntervalInput,
   sitesUpdateInput,
   tariffsAssignListInput,
@@ -466,6 +482,29 @@ export async function sitesSetDefaultDemandInterval(ctx: AuthContext, input: unk
   return { siteId: parsed.siteId, demandIntervalMinutes: parsed.demandIntervalMinutes };
 }
 
+export async function sitesSetBillAlert(ctx: AuthContext, input: unknown) {
+  const parsed = sitesSetBillAlertInput.parse(input);
+  await requireSiteEditor(ctx, parsed.siteId);
+
+  // Changing the threshold clears the last-fired marker so a freshly-set (or raised)
+  // threshold can alert again for the current period rather than being deduped away.
+  await db
+    .update(sites)
+    .set({
+      billAlertThresholdCents: parsed.thresholdCents ?? null,
+      billAlertBasis: parsed.basis,
+      billAlertLastFiredPeriodStart: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(sites.id, parsed.siteId));
+
+  return {
+    siteId: parsed.siteId,
+    billAlertThresholdCents: parsed.thresholdCents ?? null,
+    billAlertBasis: parsed.basis,
+  };
+}
+
 export async function sitesDelete(ctx: AuthContext, input: unknown) {
   const parsed = sitesDeleteInput.parse(input);
   // Sparks-operator only: Sparks controls how many sites an org has, so removing a
@@ -730,8 +769,18 @@ async function meterConnectivity(
     const seen = latest.get(m.id) ?? null;
     const age = seen ? now - seen.getTime() : Number.POSITIVE_INFINITY;
     const status =
-      age <= CONNECTIVITY_ONLINE_MS ? "online" : age <= CONNECTIVITY_DEGRADED_MS ? "degraded" : "offline";
-    return { id: m.id, serialNumber: m.serialNumber, connectivityMode: null, status, lastSeenAt: seen };
+      age <= CONNECTIVITY_ONLINE_MS
+        ? "online"
+        : age <= CONNECTIVITY_DEGRADED_MS
+          ? "degraded"
+          : "offline";
+    return {
+      id: m.id,
+      serialNumber: m.serialNumber,
+      connectivityMode: null,
+      status,
+      lastSeenAt: seen,
+    };
   });
 }
 
@@ -1245,6 +1294,8 @@ export async function tariffsProfilesCreate(ctx: AuthContext, input: unknown) {
     distributor: parsed.distributor,
     currency: parsed.currency,
     touSchedule: parsed.touSchedule,
+    pricingRules: parsed.pricingRules,
+    sources: parsed.sources,
     effectiveFrom: parsed.effectiveFrom,
     effectiveTo: parsed.effectiveTo,
     validatedByAttorney: parsed.validatedByAttorney,
@@ -1274,6 +1325,8 @@ export async function tariffsProfilesUpdate(ctx: AuthContext, input: unknown) {
   if (parsed.name !== undefined) updateData.name = parsed.name;
   if (parsed.distributor !== undefined) updateData.distributor = parsed.distributor;
   if (parsed.touSchedule !== undefined) updateData.touSchedule = parsed.touSchedule;
+  if (parsed.pricingRules !== undefined) updateData.pricingRules = parsed.pricingRules;
+  if (parsed.sources !== undefined) updateData.sources = parsed.sources;
   if (parsed.effectiveTo !== undefined) updateData.effectiveTo = parsed.effectiveTo;
   if (parsed.validatedByAttorney !== undefined)
     updateData.validatedByAttorney = parsed.validatedByAttorney;
@@ -1444,7 +1497,13 @@ export async function adminSiteTariffGet(ctx: AuthContext, input: unknown) {
   const assignment = open.sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
 
   if (!assignment) {
-    return { siteId: parsed.siteId, siteName: site.name, assignment: null, profile: null, rates: [] };
+    return {
+      siteId: parsed.siteId,
+      siteName: site.name,
+      assignment: null,
+      profile: null,
+      rates: [],
+    };
   }
 
   const profile = await db.query.tariffProfiles.findFirst({
@@ -1584,6 +1643,8 @@ async function buildTariffProfile(profileId: string): Promise<TariffProfile | nu
   return {
     rates: rates.map(mapTariffRate),
     touSchedule: (profile.touSchedule || {}) as Record<string, unknown>,
+    rules: (profile.pricingRules ?? undefined) as PricingRules | undefined,
+    sources: (profile.sources ?? undefined) as TariffSourceCitation[] | undefined,
   };
 }
 
@@ -1595,13 +1656,34 @@ async function buildTariffProfile(profileId: string): Promise<TariffProfile | nu
  * with per-interval energy + the site timezone). Returns the summed pricing plus
  * the profile effective at the period start (stored as the reconciliation's FK).
  */
+/** The interval fields the pricer reads — satisfied by `demand_intervals` rows and
+ * by live intervals bucketed straight from the raw `readings` table. */
+interface PricingInterval {
+  intervalStart: Date;
+  activeEnergyKwh: string | null;
+  avgDemandKva: string | null;
+  reactiveEnergyKvarh: string | null;
+}
+
 async function priceRoleOverPeriod(
   siteId: string,
   role: "landlord" | "legal_ceiling",
   period: { periodStart: Date; periodEnd: Date; boundaryInclusivity: string },
-  periodIntervals: Array<typeof demandIntervals.$inferSelect>,
+  periodIntervals: PricingInterval[],
   timezone: string,
-): Promise<{ pricing: PricingBreakdown; primaryProfileId: string } | null> {
+): Promise<{
+  pricing: PricingBreakdown;
+  primaryProfileId: string;
+  sources: TariffSourceCitation[];
+  tariff: {
+    name: string;
+    distributor: string | null;
+    effectiveFrom: string;
+    effectiveTo: string | null;
+  } | null;
+  measuredDemandKva: number;
+  usageBasedPricing: PricingBreakdown | null;
+} | null> {
   const allAssignments = await db.query.siteTariffAssignments.findMany({
     where: and(eq(siteTariffAssignments.siteId, siteId), eq(siteTariffAssignments.role, role)),
   });
@@ -1642,10 +1724,19 @@ async function priceRoleOverPeriod(
     groups.set(assignment.id, { assignment, intervals: [] });
   }
 
+  // Days in the whole billing period — r_per_day charges (Eskom service/
+  // capacity) accrue for the full period regardless of tariff-change splits.
+  const periodDays = Math.max(
+    1,
+    Math.round((period.periodEnd.getTime() - period.periodStart.getTime()) / 86_400_000),
+  );
+
   const segments: Array<{ usage: UsageData; profile: TariffProfile }> = [];
+  const profilesById = new Map<string, TariffProfile>();
   for (const { assignment, intervals } of groups.values()) {
     const profile = await buildTariffProfile(assignment.tariffProfileId);
     if (!profile) continue;
+    profilesById.set(assignment.tariffProfileId, profile);
     let activeKwh = 0;
     let maxDemandKva = 0;
     let reactiveKvarh = 0;
@@ -1667,14 +1758,52 @@ async function priceRoleOverPeriod(
         intervalStarts,
         intervalActiveKwh,
         timezone,
+        periodDays,
       },
       profile,
     });
   }
 
+  const primaryProfileId = pickAssignment(period.periodStart).tariffProfileId;
+  const pricing = segments.length > 0 ? priceSegments(segments) : emptyBreakdown();
+
+  // The named tariff behind the estimate, so the customer can see exactly which
+  // tariff they're being priced on (and whether it's the right one for them).
+  const meta = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, primaryProfileId),
+    columns: { name: true, distributor: true, effectiveFrom: true, effectiveTo: true },
+  });
+  const tariff = meta
+    ? {
+        name: meta.name,
+        distributor: meta.distributor ?? null,
+        effectiveFrom: meta.effectiveFrom.toISOString(),
+        effectiveTo: meta.effectiveTo ? meta.effectiveTo.toISOString() : null,
+      }
+    : null;
+
+  // The measured peak across the period (what the meter actually recorded), vs the
+  // billedDemandKva the tariff charged — which is higher when a minimum-demand floor
+  // (City Power's 70 kVA) bites. When it does, re-price the SAME usage with the floor
+  // removed so the UI can show "what it would be on your actual demand" and quantify
+  // exactly what the reserved-capacity minimum is costing.
+  const measuredDemandKva = segments.reduce((m, s) => Math.max(m, s.usage.maxDemandKva), 0);
+  let usageBasedPricing: PricingBreakdown | null = null;
+  if (pricing.billedDemandKva !== undefined && pricing.billedDemandKva > measuredDemandKva + 1e-6) {
+    const floorless = segments.map((s) => ({
+      usage: s.usage,
+      profile: { ...s.profile, rules: { ...(s.profile.rules ?? {}), minDemandKva: undefined } },
+    }));
+    usageBasedPricing = priceSegments(floorless);
+  }
+
   return {
-    pricing: segments.length > 0 ? priceSegments(segments) : emptyBreakdown(),
-    primaryProfileId: pickAssignment(period.periodStart).tariffProfileId,
+    pricing,
+    primaryProfileId,
+    sources: profilesById.get(primaryProfileId)?.sources ?? [],
+    tariff,
+    measuredDemandKva,
+    usageBasedPricing,
   };
 }
 
@@ -1684,9 +1813,12 @@ async function priceRoleOverPeriod(
 // aggregateDemandIntervals) and upsert them — idempotent, and a no-op when the site has no raw
 // samples in the window (e.g. tests that seed demand_intervals directly). This is the bridge
 // that lets billing read raw readings without changing the proven pricing code below.
-async function materializeDemandIntervalsFromRaw(
-  billingPeriod: { siteId: string; periodStart: Date; periodEnd: Date; demandIntervalMinutes: number },
-): Promise<void> {
+async function materializeDemandIntervalsFromRaw(billingPeriod: {
+  siteId: string;
+  periodStart: Date;
+  periodEnd: Date;
+  demandIntervalMinutes: number;
+}): Promise<void> {
   const meterRows = await db
     .select({ id: meters.id })
     .from(meters)
@@ -1722,7 +1854,11 @@ async function materializeDemandIntervalsFromRaw(
         })),
       )
       .onConflictDoUpdate({
-        target: [demandIntervals.meterId, demandIntervals.intervalStart, demandIntervals.intervalMinutes],
+        target: [
+          demandIntervals.meterId,
+          demandIntervals.intervalStart,
+          demandIntervals.intervalMinutes,
+        ],
         set: {
           activeEnergyKwh: sql`excluded.active_energy_kwh`,
           reactiveEnergyKvarh: sql`excluded.reactive_energy_kvarh`,
@@ -2755,7 +2891,10 @@ export async function invoicesConfirmReconcile(ctx: AuthContext, input: unknown)
     if (!byId.has(line.lineItemId)) {
       throw new PreconditionError(`Line item ${line.lineItemId} does not belong to this invoice`);
     }
-    const { category } = deriveLineCategory(line.component, byId.get(line.lineItemId)?.rawLabel ?? "");
+    const { category } = deriveLineCategory(
+      line.component,
+      byId.get(line.lineItemId)?.rawLabel ?? "",
+    );
     await db
       .update(invoiceLineItems)
       .set({
@@ -2937,7 +3076,8 @@ async function computeTariffAnalysis(
   const covers = (s: (typeof schedules)[number]) =>
     s.effectiveFrom.getTime() <= periodEnd.getTime() &&
     (!s.effectiveTo || s.effectiveTo.getTime() >= periodStart.getTime());
-  const providerNamed = (s: (typeof schedules)[number]) => labels.includes(s.provider.toLowerCase());
+  const providerNamed = (s: (typeof schedules)[number]) =>
+    labels.includes(s.provider.toLowerCase());
   const nearest = (list: typeof schedules) =>
     [...list].sort(
       (a, b) =>
@@ -3170,10 +3310,7 @@ export async function alertsMarkAllRead(ctx: AuthContext) {
   await db
     .delete(alertDeliveries)
     .where(
-      and(
-        eq(alertDeliveries.recipientUserId, ctx.userId),
-        eq(alertDeliveries.channel, "app"),
-      ),
+      and(eq(alertDeliveries.recipientUserId, ctx.userId), eq(alertDeliveries.channel, "app")),
     );
   return { ok: true };
 }
@@ -3201,9 +3338,10 @@ export async function alertsAttachmentUrl(ctx: AuthContext, input: unknown) {
   // An alert can carry several attachments. Collect the valid keys (new `attachments`
   // array + the legacy single `attachmentKey`); the requested key must be one of them so
   // a caller can't sign an arbitrary object.
-  const payload = row.payload as
-    | { attachments?: { key: string; name: string }[]; attachmentKey?: string | null }
-    | null;
+  const payload = row.payload as {
+    attachments?: { key: string; name: string }[];
+    attachmentKey?: string | null;
+  } | null;
   const validKeys = [
     ...(payload?.attachments ?? []).map((a) => a.key),
     ...(payload?.attachmentKey ? [payload.attachmentKey] : []),
@@ -3281,7 +3419,8 @@ async function fetchRawReadings(
   );
   const conds = [sql`meter_id IN (${idList})`];
   if (opts.from) conds.push(sql`measured_at >= ${opts.from}`);
-  if (opts.to) conds.push(opts.endExclusive ? sql`measured_at < ${opts.to}` : sql`measured_at <= ${opts.to}`);
+  if (opts.to)
+    conds.push(opts.endExclusive ? sql`measured_at < ${opts.to}` : sql`measured_at <= ${opts.to}`);
   const where = sql.join(conds, sql` AND `);
   const res = await db.execute(sql`
     SELECT meter_id, measured_at, energy_import_kwh, energy_import_kvarh, energy_kvah, power_total, va_total
@@ -3411,6 +3550,236 @@ export async function readingsMonthToDate(ctx: AuthContext, input: unknown) {
   });
 }
 
+// The LIVE bill: what the in-progress billing period costs SO FAR, priced from the
+// raw readings under the site's assigned tariffs — the same pricer reconciliation
+// uses, so this number and the eventual bill-check agree by construction. The
+// window follows the site's real billing cycle when known (materialized period >
+// saved policy > cycle inferred from the latest invoice) and falls back to the
+// calendar month. Returns both roles (landlord expected + legal ceiling), each
+// with a to-date breakdown and a period-end projection.
+export async function billingCurrentEstimate(ctx: AuthContext, input: unknown) {
+  const parsed = billingCurrentEstimateInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  const key = `bill-est:${parsed.siteId}:${parsed.asOf ? parsed.asOf.toISOString() : "live"}`;
+  return cachedRead(key, () => computeBillEstimate(parsed.siteId, parsed.asOf));
+}
+
+/**
+ * Compute the live current-bill estimate for a site — the pure business logic
+ * behind `billingCurrentEstimate`, with NO auth/cache. Exported so background
+ * jobs (the bill-threshold sweep) can price a site without an HTTP context.
+ */
+export async function computeBillEstimate(siteId: string, asOf?: Date) {
+  {
+    const now = asOf ?? new Date();
+
+    const [containingPeriod, policy, latestInvoicePeriod] = await Promise.all([
+      db.query.billingPeriods.findFirst({
+        where: and(
+          eq(billingPeriods.siteId, siteId),
+          lte(billingPeriods.periodStart, now),
+          gt(billingPeriods.periodEnd, now),
+        ),
+      }),
+      db.query.billingCyclePolicies.findFirst({
+        where: and(
+          eq(billingCyclePolicies.siteId, siteId),
+          isNull(billingCyclePolicies.effectiveTo),
+        ),
+      }),
+      // Only invoice/human-authored periods drive cycle inference; `generated`
+      // rows came from a policy, which the policy branch already covers.
+      db.query.billingPeriods.findFirst({
+        where: and(
+          eq(billingPeriods.siteId, siteId),
+          inArray(billingPeriods.source, ["invoice_derived", "manual"]),
+        ),
+        orderBy: [desc(billingPeriods.periodEnd)],
+      }),
+    ]);
+
+    const period = resolveEstimatePeriod(now, {
+      containingPeriod,
+      policy: policy
+        ? { recurrence: policy.recurrence, anchorDay: policy.anchorDay ?? undefined }
+        : null,
+      latestInvoicePeriodEnd: latestInvoicePeriod?.periodEnd ?? null,
+    });
+
+    const [meterIds, intervalMinutes, tz] = await Promise.all([
+      siteMeterIds(siteId),
+      siteDemandInterval(siteId),
+      siteTimezone(siteId),
+    ]);
+
+    const rows = await fetchRawReadings(meterIds, { from: period.periodStart, to: now });
+    // An incomplete interval (boundary swallowed by a dropout) has untrusted demand:
+    // its energy still counts, but it must never set the period peak.
+    const intervals = bucketIntervals(rows, intervalMinutes).map((iv) => ({
+      intervalStart: new Date(iv.intervalStart),
+      activeEnergyKwh: iv.activeEnergyKwh,
+      reactiveEnergyKvarh: iv.reactiveEnergyKvarh,
+      avgDemandKva: iv.isComplete ? iv.avgDemandKva : null,
+      isComplete: iv.isComplete,
+    }));
+
+    const periodShape = {
+      periodStart: period.periodStart,
+      periodEnd: period.periodEnd,
+      boundaryInclusivity: "half_open",
+    };
+    const [landlord, ceiling] = await Promise.all([
+      priceRoleOverPeriod(siteId, "landlord", periodShape, intervals, tz),
+      priceRoleOverPeriod(siteId, "legal_ceiling", periodShape, intervals, tz),
+    ]);
+
+    const fraction = elapsedFraction(period, now);
+    const roleOut = (
+      r: {
+        pricing: PricingBreakdown;
+        sources: TariffSourceCitation[];
+        tariff: {
+          name: string;
+          distributor: string | null;
+          effectiveFrom: string;
+          effectiveTo: string | null;
+        } | null;
+        measuredDemandKva: number;
+        usageBasedPricing: PricingBreakdown | null;
+      } | null,
+    ) => {
+      if (!r) return null;
+      const projected = projectedTotalCents(r.pricing, fraction);
+      // Re-apply the profile's VAT at the same ratio it holds in the to-date
+      // breakdown, so the projection matches what the tenant will actually pay.
+      const projectedInclVat =
+        projected != null && r.pricing.totalCents > 0 && r.pricing.vatCents > 0
+          ? projected + Math.round((projected * r.pricing.vatCents) / r.pricing.totalCents)
+          : projected;
+      // When a minimum-demand floor inflated the bill, expose what it would cost on
+      // the actual measured demand, and the excess the reserved-capacity minimum adds.
+      const demandFloor =
+        r.usageBasedPricing && r.pricing.billedDemandKva !== undefined
+          ? {
+              measuredDemandKva: r.measuredDemandKva,
+              billedDemandKva: r.pricing.billedDemandKva,
+              usageBasedTotalCents: r.usageBasedPricing.totalCents,
+              usageBasedTotalInclVatCents: r.usageBasedPricing.totalInclVatCents,
+              extraCents: r.pricing.totalCents - r.usageBasedPricing.totalCents,
+              extraInclVatCents:
+                r.pricing.totalInclVatCents - r.usageBasedPricing.totalInclVatCents,
+            }
+          : null;
+      return {
+        pricing: r.pricing,
+        projectedTotalCents: projected,
+        projectedTotalInclVatCents: projectedInclVat,
+        sources: r.sources,
+        tariff: r.tariff,
+        demandFloor,
+      };
+    };
+
+    return {
+      asOf: now.toISOString(),
+      period: {
+        periodStart: period.periodStart.toISOString(),
+        periodEnd: period.periodEnd.toISOString(),
+        basis: period.basis,
+      },
+      elapsedFraction: fraction,
+      usage: usageFromIntervals(intervals),
+      landlord: roleOut(landlord),
+      ceiling: roleOut(ceiling),
+    };
+  }
+}
+
+function fmtRandCents(cents: number): string {
+  return `R ${(cents / 100).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+/**
+ * Sweep every site that has a live bill-alert threshold set: price its current
+ * estimate and, if the chosen figure (charges-so-far or projected) has crossed the
+ * threshold, notify the site's recipients — ONCE per billing period (deduped via
+ * `billAlertLastFiredPeriodStart`). Runs on an interval from the server process
+ * (see index.ts). Each site is independent; one failure is logged, never aborts
+ * the rest. Returns how many were checked and how many alerts fired.
+ */
+export async function evaluateBillThresholds(now = new Date()): Promise<{
+  checked: number;
+  fired: number;
+}> {
+  const siteRows = await db.query.sites.findMany({
+    where: isNotNull(sites.billAlertThresholdCents),
+    columns: {
+      id: true,
+      name: true,
+      organizationId: true,
+      billAlertThresholdCents: true,
+      billAlertBasis: true,
+      billAlertLastFiredPeriodStart: true,
+    },
+  });
+
+  let fired = 0;
+  for (const site of siteRows) {
+    try {
+      const threshold = site.billAlertThresholdCents;
+      if (!threshold) continue;
+
+      const est = await computeBillEstimate(site.id, now);
+      const primary = est.landlord ?? est.ceiling;
+      if (!primary) continue; // no tariff assigned → nothing to price yet
+
+      const useProjected = site.billAlertBasis === "projected";
+      const amountCents = useProjected
+        ? (primary.projectedTotalInclVatCents ?? primary.pricing.totalInclVatCents)
+        : primary.pricing.totalInclVatCents;
+      if (amountCents < threshold) continue;
+
+      // One alert per billing period: skip if we already fired for this period start.
+      const periodStart = new Date(est.period.periodStart);
+      if (
+        site.billAlertLastFiredPeriodStart &&
+        site.billAlertLastFiredPeriodStart.getTime() === periodStart.getTime()
+      ) {
+        continue;
+      }
+
+      const periodEnd = new Date(est.period.periodEnd);
+      const periodLabel = `${periodStart.toLocaleDateString("en-ZA", {
+        day: "numeric",
+        month: "short",
+      })} – ${periodEnd.toLocaleDateString("en-ZA", { day: "numeric", month: "short" })}`;
+
+      await dispatchBillThresholdCrossed({
+        siteId: site.id,
+        organizationId: site.organizationId,
+        siteName: site.name,
+        amountRand: fmtRandCents(amountCents),
+        thresholdRand: fmtRandCents(threshold),
+        basisLabel: useProjected ? "projected total for the period" : "charges so far",
+        periodLabel,
+      });
+      await db
+        .update(sites)
+        .set({ billAlertLastFiredPeriodStart: periodStart })
+        .where(eq(sites.id, site.id));
+      fired++;
+    } catch (err) {
+      console.error(`[bill-alert] sweep failed for site ${site.id}:`, err);
+    }
+  }
+
+  return { checked: siteRows.length, fired };
+}
+
 // Total active energy (kWh) per billing period, for the "energy across billing
 // periods" bar chart. Buckets by the site's real billing periods when it has any;
 // otherwise falls back to calendar months. `basis` tells the UI which was used so
@@ -3485,10 +3854,7 @@ async function computeEnergyByPeriod(
   // cycle (custom anchor day etc.) immediately — before any invoice/materialization.
   const now = new Date();
   const policy = await db.query.billingCyclePolicies.findFirst({
-    where: and(
-      eq(billingCyclePolicies.siteId, siteId),
-      isNull(billingCyclePolicies.effectiveTo),
-    ),
+    where: and(eq(billingCyclePolicies.siteId, siteId), isNull(billingCyclePolicies.effectiveTo)),
   });
 
   if (policy) {

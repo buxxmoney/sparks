@@ -59,6 +59,7 @@ export const appRouter = {
       V.sitesSetDefaultDemandIntervalInput,
       R.sitesSetDefaultDemandInterval,
     ),
+    setBillAlert: proc(V.sitesSetBillAlertInput, R.sitesSetBillAlert),
     delete: proc(V.sitesDeleteInput, R.sitesDelete),
   },
   siteAccess: {
@@ -90,6 +91,7 @@ export const appRouter = {
       get: proc(V.billingPoliciesGetInput, R.billingPoliciesGet),
       set: proc(V.billingPoliciesSetInput, R.billingPoliciesSet),
     },
+    currentEstimate: proc(V.billingCurrentEstimateInput, R.billingCurrentEstimate),
     periods: {
       list: proc(V.billingPeriodsListInput, R.billingPeriodsList),
       materialize: proc(V.billingPeriodsMaterializeInput, R.billingPeriodsMaterialize),
