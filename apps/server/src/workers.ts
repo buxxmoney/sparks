@@ -14,9 +14,14 @@ import {
 } from "@sparks/db";
 import { and, asc, eq, isNotNull } from "drizzle-orm";
 import { parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
+import { bucketEnergyByCalendar, peakDemandKva } from "./live-readings";
 import { PreconditionError } from "./middleware";
 import { dispatchOperatorMeterDown } from "./notifications";
+import type { PeriodHistoryRow } from "./reports";
 import { hashBuffer, renderHtmlToPdf, renderReportHtml } from "./reports";
+// Cyclic (routers imports generateReportPdf): safe under ESM — both bindings are used
+// only at call time, never at module load.
+import { fetchRawReadings, siteMeterIds } from "./routers";
 import { putObject } from "./storage";
 
 /** Tolerance for snapping an interval boundary to its on-the-boundary sample — meters timestamp
@@ -538,6 +543,67 @@ export async function generateReportPdf(
     }
   }
 
+  // Build the chart data for the statement. Best-effort: a readings/query hiccup must
+  // not block the (already human-verified) report — each chart falls back to its own
+  // empty state, so a brand-new site with one period still produces a clean document.
+  let dailyUsage: { label: string; value: number }[] = [];
+  let dailyPeakDemand: { label: string; value: number }[] = [];
+  let periodHistory: PeriodHistoryRow[] = [];
+  try {
+    const tz = site.timezone || "Africa/Johannesburg";
+    const meterIds = await siteMeterIds(recon.siteId);
+    const rows = await fetchRawReadings(meterIds, {
+      from: recon.billingPeriodStart,
+      to: recon.billingPeriodEnd,
+      endExclusive: recon.boundaryInclusivity === "half_open",
+    });
+    const dayBuckets = bucketEnergyByCalendar(rows, "day", tz);
+    dailyUsage = dayBuckets.map((b) => ({ label: b.label, value: Number(b.activeEnergyKwh) }));
+    dailyPeakDemand = dayBuckets.map((b) => {
+      const from = new Date(b.periodStart).getTime();
+      const to = new Date(b.periodEnd).getTime();
+      const dayRows = rows.filter((r) => {
+        const t = r.measuredAt.getTime();
+        return t >= from && t < to;
+      });
+      return { label: b.label, value: Number(peakDemandKva(dayRows, recon.demandIntervalMinutes)) };
+    });
+
+    // Period-over-period: latest reconciliation per billing period for this site, oldest→
+    // newest, last six. Effective rate = total charged ÷ recorded kWh (cents per kWh).
+    const priorRecons = await db.query.reconciliations.findMany({
+      where: eq(reconciliations.siteId, recon.siteId),
+    });
+    const latestPerPeriod = new Map<number, (typeof priorRecons)[number]>();
+    for (const r of priorRecons) {
+      const key = new Date(r.billingPeriodStart).getTime();
+      const cur = latestPerPeriod.get(key);
+      if (!cur || (r.version ?? 1) >= (cur.version ?? 1)) latestPerPeriod.set(key, r);
+    }
+    periodHistory = [...latestPerPeriod.values()]
+      .sort(
+        (a, z) =>
+          new Date(a.billingPeriodStart).getTime() - new Date(z.billingPeriodStart).getTime(),
+      )
+      .slice(-6)
+      .map((r) => {
+        const usedKwh = Number(r.measuredActiveKwh ?? 0);
+        const cents = r.chargedTotalCents ?? 0;
+        return {
+          label: new Date(r.billingPeriodEnd).toLocaleDateString("en-ZA", {
+            month: "short",
+            timeZone: tz,
+          }),
+          usedKwh,
+          peakKva: Number(r.measuredMaxDemandKva ?? 0),
+          chargedRand: cents / 100,
+          effRateCents: usedKwh > 0 ? cents / usedKwh : 0,
+        };
+      });
+  } catch (err) {
+    console.error(`[report] chart data build failed for recon ${reconId}:`, err);
+  }
+
   // Render report HTML
   const html = renderReportHtml({
     reconciliation: recon,
@@ -546,6 +612,9 @@ export async function generateReportPdf(
     device,
     landlordTariffName,
     ceilingTariffName,
+    dailyUsage,
+    dailyPeakDemand,
+    periodHistory,
   });
 
   // Convert HTML to PDF

@@ -3443,14 +3443,14 @@ function toNum(v: unknown): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
-async function siteMeterIds(siteId: string): Promise<string[]> {
+export async function siteMeterIds(siteId: string): Promise<string[]> {
   const rows = await db.select({ id: meters.id }).from(meters).where(eq(meters.siteId, siteId));
   return rows.map((m) => m.id);
 }
 
 // Fetch raw samples for a site's meters within an optional window, oldest→newest. `to` is
 // inclusive by default; pass endExclusive for half-open period buckets [from, to).
-async function fetchRawReadings(
+export async function fetchRawReadings(
   meterIds: string[],
   opts: { from?: Date; to?: Date; endExclusive?: boolean } = {},
 ): Promise<RawReadingRow[]> {
@@ -3491,7 +3491,7 @@ async function siteDemandInterval(siteId: string): Promise<number> {
 
 // The site's IANA timezone — energy charts bucket calendar periods (day/week/month) in it so
 // a "daily" bar is local midnight→midnight, not a UTC day.
-async function siteTimezone(siteId: string): Promise<string> {
+export async function siteTimezone(siteId: string): Promise<string> {
   const site = await db.query.sites.findFirst({
     where: eq(sites.id, siteId),
     columns: { timezone: true },

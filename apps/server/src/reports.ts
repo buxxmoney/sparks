@@ -1,6 +1,24 @@
 import { createHash } from "node:crypto";
 import type { Device, Meter, Reconciliation, Site } from "@sparks/db";
 import { chromium } from "playwright";
+import {
+  type DailyPoint,
+  dailyUsageBars,
+  demandProfileLine,
+  periodTrendChart,
+  type ReconComponent,
+  reconComponentsBars,
+} from "./report-charts";
+
+/** One period in the period-over-period section — richer than the chart's PeriodPoint so
+ *  the comparison table can also show usage and peak columns. */
+export interface PeriodHistoryRow {
+  label: string;
+  usedKwh: number;
+  peakKva: number;
+  chargedRand: number;
+  effRateCents: number;
+}
 
 export interface ReportData {
   reconciliation: Reconciliation;
@@ -11,6 +29,12 @@ export interface ReportData {
   landlordTariffName: string;
   ceilingTariffName: string | null;
   generatedAt?: Date; // Optional for testing; defaults to now()
+  /** Recorded energy per calendar day over the period (drives the daily-usage bars). */
+  dailyUsage?: DailyPoint[];
+  /** Recorded peak demand (kVA) per calendar day (drives the demand-profile line). */
+  dailyPeakDemand?: DailyPoint[];
+  /** This period + prior periods, oldest→newest, for the period-over-period section. */
+  periodHistory?: PeriodHistoryRow[];
 }
 
 /**
@@ -82,36 +106,64 @@ export function buildClarificationPoints(
 }
 
 /**
- * Render the reconciliation report to HTML — a neutral, tenant-facing document that
- * lays your recorded meter usage alongside the charges you were quoted, and turns any
- * differences into gentle "things to ask your landlord" pointers (see
+ * Render the Sparks energy statement to HTML — a flagship, tenant-facing document that
+ * lays your independently recorded meter usage alongside the charges you were quoted,
+ * with real charts (daily usage, daily peak demand, period-over-period trend, and a
+ * recorded-vs-quoted breakdown) and gentle "things to ask your landlord" pointers (see
  * {@link buildClarificationPoints}). It suggests clarifications; it does not accuse.
- * Includes: site/meter provenance, billing window, recorded usage, a recorded-vs-quoted
- * comparison, data-integrity notes, and the clarification pointers.
+ * Charts are server-rendered SVG (see report-charts.ts) so they survive the PDF pipeline.
  */
 export function renderReportHtml(data: ReportData): string {
-  const {
-    reconciliation: recon,
-    site,
-    meter,
-    device,
-    landlordTariffName,
-    ceilingTariffName,
-  } = data;
+  const { reconciliation: recon, site, meter, device, landlordTariffName } = data;
+  const tz = site.timezone || "Africa/Johannesburg";
+  const dailyUsage = data.dailyUsage ?? [];
+  const dailyPeak = data.dailyPeakDemand ?? [];
+  const history = data.periodHistory ?? [];
 
-  const formatCents = (cents: number | null): string => {
-    if (cents === null) return "—";
-    return `R${(cents / 100).toFixed(2)}`;
-  };
+  const groupThousands = (n: number): string =>
+    Math.round(n)
+      .toString()
+      .replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  const formatCents = (cents: number | null): string =>
+    cents === null ? "—" : `R${(cents / 100).toFixed(2)}`;
+  const fmtRandBig = (cents: number | null): string =>
+    cents === null
+      ? "—"
+      : `R${groupThousands(Math.floor(cents / 100))}.${String(((cents % 100) + 100) % 100).padStart(2, "0")}`;
+  const diffLabel = (d: number): string =>
+    d > 0 ? `${formatCents(d)} higher` : d < 0 ? `${formatCents(-d)} lower` : "—";
+  const fmtDate = (x: Date | string, opts: Intl.DateTimeFormatOptions): string =>
+    new Date(x).toLocaleDateString("en-ZA", { timeZone: tz, ...opts });
 
-  const formatNumber = (val: string | number | null, decimals = 3): string => {
-    if (val === null) return "—";
-    return Number(val).toFixed(decimals);
-  };
+  // Billing window.
+  const periodStartStr = fmtDate(recon.billingPeriodStart, { day: "numeric", month: "short" });
+  const periodEndStr = fmtDate(recon.billingPeriodEnd, { day: "numeric", month: "short" });
+  const periodYear = fmtDate(recon.billingPeriodEnd, { year: "numeric" });
+  const periodDays = Math.max(
+    1,
+    Math.round(
+      (new Date(recon.billingPeriodEnd).getTime() - new Date(recon.billingPeriodStart).getTime()) /
+        86_400_000,
+    ),
+  );
+
+  // Summary "you were quoted" note — the one place the difference is called out.
+  const diff = recon.discrepancyVsLandlordCents;
+  let diffNote: string;
+  let diffAccent = false;
+  if (recon.expectedLandlordCents === null) {
+    diffNote = "no landlord tariff on file yet";
+  } else if (diff !== null && diff > 0) {
+    diffNote = `${formatCents(diff)} higher · worth a look`;
+    diffAccent = true;
+  } else if (diff !== null && diff < 0) {
+    diffNote = `${formatCents(-diff)} lower than expected`;
+  } else {
+    diffNote = "in line with your usage";
+  }
 
   // Line-by-line: what your meter's usage supports vs what you were quoted. We label
-  // the difference neutrally ("higher"/"lower") rather than as an over/undercharge —
-  // the report suggests questions, it doesn't return a verdict.
+  // the difference neutrally ("higher"/"lower") rather than as an over/undercharge.
   const components =
     (
       recon.breakdown as {
@@ -123,8 +175,6 @@ export function renderReportHtml(data: ReportData): string {
         }>;
       } | null
     )?.components ?? [];
-  const diffLabel = (d: number): string =>
-    d > 0 ? `${formatCents(d)} higher` : d < 0 ? `${formatCents(-d)} lower` : "—";
   const componentRows = components
     .map((c) => {
       const d = c.discrepancyVsLandlordCents;
@@ -137,346 +187,316 @@ export function renderReportHtml(data: ReportData): string {
       </tr>`;
     })
     .join("");
-  const componentSection = components.length
-    ? `<div class="section">
-      <h2>Line-by-line</h2>
-      <table class="pricing-table">
-        <thead><tr><th>Charge</th><th>Your usage supports</th><th>You were quoted</th><th>Difference</th></tr></thead>
-        <tbody>${componentRows}
-          <tr class="discrepancy">
-            <td>Total</td>
-            <td>${formatCents(recon.expectedLandlordCents)}</td>
-            <td>${formatCents(recon.chargedTotalCents)}</td>
-            <td class="${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "higher" : (recon.discrepancyVsLandlordCents ?? 0) < 0 ? "lower" : ""}">${diffLabel(recon.discrepancyVsLandlordCents ?? 0)}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p style="font-size:11px;color:#777;margin-top:8px;">"Your usage supports" prices the meter's recorded usage at the ${landlordTariffName} tariff. Where the quoted amount is higher, the "Points to raise" below suggest what to ask about.</p>
-    </div>`
-    : "";
 
-  const clarificationPoints = buildClarificationPoints(recon, landlordTariffName);
-  const clarificationItems = clarificationPoints.map((p) => `<li>${p}</li>`).join("");
+  const reconBars: ReconComponent[] = components.length
+    ? components.map((c) => ({
+        label: c.label,
+        supportsRand: c.expectedLandlordCents / 100,
+        quotedRand: c.chargedCents / 100,
+      }))
+    : recon.expectedLandlordCents !== null
+      ? [
+          {
+            label: "Total",
+            supportsRand: recon.expectedLandlordCents / 100,
+            quotedRand: (recon.chargedTotalCents ?? 0) / 100,
+          },
+        ]
+      : [];
+
+  // Period-over-period table rows, with a delta vs the previous period's quoted total.
+  const trendRows = history
+    .map((p, i) => {
+      const prev = i > 0 ? history[i - 1] : null;
+      const dPct = prev && prev.chargedRand > 0 ? ((p.chargedRand - prev.chargedRand) / prev.chargedRand) * 100 : null;
+      const deltaCell =
+        dPct === null
+          ? `<td class="muted">—</td>`
+          : `<td class="${dPct >= 0 ? "delta-up" : "delta-down"}">${dPct >= 0 ? "▲ " : "▼ "}${Math.abs(dPct).toFixed(1)}%</td>`;
+      const isLast = i === history.length - 1;
+      return `<tr>
+        <td>${p.label}${isLast ? ' <span class="tag">this period</span>' : ""}</td>
+        <td>${groupThousands(p.usedKwh)}</td>
+        <td>${p.peakKva.toFixed(1)}</td>
+        <td>${fmtRandBig(Math.round(p.chargedRand * 100))}</td>
+        <td>${p.effRateCents.toFixed(1)}c</td>
+        ${deltaCell}
+      </tr>`;
+    })
+    .join("");
+
+  const clarificationItems = buildClarificationPoints(recon, landlordTariffName)
+    .map((p) => `<li>${p}</li>`)
+    .join("");
 
   const gapsText =
     recon.dataIntegrityStatus === "gaps_present"
       ? `Your data contains ${recon.gapCount} short gap(s) totalling ${recon.gapMinutesTotal} minutes. Recorded usage may slightly understate actual usage over these windows.`
       : "No data gaps were detected during the billing period — your recorded usage covers the whole window.";
 
+  // Charts (server-rendered SVG).
+  const usageSvg = dailyUsageBars(dailyUsage);
+  const demandSvg = demandProfileLine(dailyPeak, Number(recon.measuredMaxDemandKva ?? 0));
+  const trendSvg = periodTrendChart(
+    history.map((p) => ({ label: p.label, chargedRand: p.chargedRand, effRateCents: p.effRateCents })),
+  );
+  const reconSvg = reconComponentsBars(reconBars);
+
+  const ceilingRef =
+    data.ceilingTariffName && recon.expectedCeilingCents !== null
+      ? `<p class="footnote">For reference, the legal maximum (${data.ceilingTariffName}) for this usage is ${formatCents(recon.expectedCeilingCents)}.</p>`
+      : "";
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Usage &amp; Billing Reconciliation</title>
+  <title>Sparks Energy Statement</title>
   <style>
+    :root {
+      --brand: #15803d; --brand-deep: #0b3d20; --brand-soft: #e7f4ec;
+      --ink: #14211a; --ink-2: #3b4640; --muted: #6b756f; --line: #e4ebe6;
+      --amber: #b45309; --slate: #59636e;
+    }
+    * { box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      line-height: 1.6;
-      color: #333;
-      margin: 0;
-      padding: 20px;
-      background: #fff;
+      color: var(--ink-2); line-height: 1.6; margin: 0; background: #fff;
+      -webkit-font-smoothing: antialiased;
     }
-    .container { max-width: 900px; margin: 0 auto; }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding-bottom: 16px;
-      margin-bottom: 20px;
-      border-bottom: 2px solid #15803d;
-    }
-    .brand .mark {
-      width: 40px;
-      height: 40px;
-      border-radius: 9px;
-      background: #ecfdf3;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .brand .wordmark { font-size: 20px; font-weight: 700; color: #0b3d20; letter-spacing: -0.01em; }
-    .brand .tagline { font-size: 11px; color: #888; margin-top: 1px; }
-    h1 { font-size: 24px; margin: 0 0 10px 0; color: #1a1a1a; }
-    .subtitle { color: #666; font-size: 14px; margin-bottom: 20px; }
-    .section {
-      margin-top: 30px;
-      padding: 15px;
-      background: #f9f9f9;
-      border-left: 4px solid #15803d;
-    }
-    .section h2 {
-      margin: 0 0 15px 0;
-      font-size: 16px;
-      color: #15803d;
-    }
-    .provenance-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 15px;
-      margin-bottom: 15px;
-    }
-    .provenance-item {
-      background: #fff;
-      padding: 10px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-    }
-    .provenance-item label {
-      display: block;
-      font-size: 12px;
-      color: #666;
-      margin-bottom: 4px;
-      font-weight: 500;
-    }
-    .provenance-item .value {
-      font-size: 14px;
-      color: #1a1a1a;
-      word-break: break-word;
-    }
-    .pricing-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 15px 0;
-      background: #fff;
-    }
-    .pricing-table th {
-      background: #f0f0f0;
-      border: 1px solid #ddd;
-      padding: 10px;
-      text-align: left;
-      font-weight: 600;
-      font-size: 13px;
-    }
-    .pricing-table td {
-      border: 1px solid #ddd;
-      padding: 10px;
-      font-size: 13px;
-    }
-    .pricing-table tr.discrepancy td {
-      background: #f4faf6;
-      font-weight: 600;
-    }
-    /* Neutral, not alarmist: "higher" is amber (worth a look), "lower" muted. */
-    .pricing-table .higher { color: #b45309; }
-    .pricing-table .lower { color: #557; }
-    .points {
-      margin: 6px 0 0 0;
-      padding-left: 20px;
-    }
-    .points li {
-      font-size: 13px;
-      color: #333;
-      margin-bottom: 10px;
-      line-height: 1.6;
-    }
-    .data-integrity {
-      padding: 10px;
-      border-radius: 4px;
-      margin: 15px 0;
-      font-size: 13px;
-    }
-    .data-integrity.clean {
-      background: #e8f5e9;
-      color: #2e7d32;
-      border-left: 4px solid #2e7d32;
-    }
-    .data-integrity.gaps {
-      background: #fff3e0;
-      color: #e65100;
-      border-left: 4px solid #e65100;
-    }
-    .note-section {
-      background: #f5f5f5;
-      padding: 15px;
-      border-radius: 4px;
-      font-size: 12px;
-      line-height: 1.7;
-      color: #555;
-    }
-    .timestamp {
-      text-align: right;
-      font-size: 11px;
-      color: #999;
-      margin-top: 30px;
-      padding-top: 15px;
-      border-top: 1px solid #ddd;
-    }
+    .container { max-width: 820px; margin: 0 auto; padding: 8px 10px 32px; }
+    .tnum { font-variant-numeric: tabular-nums; }
+
+    .masthead { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px;
+      padding-bottom: 20px; border-bottom: 2px solid var(--brand); flex-wrap: wrap; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand .mark { width: 42px; height: 42px; border-radius: 10px; background: var(--brand-soft);
+      display: flex; align-items: center; justify-content: center; flex: none; }
+    .wordmark { font-size: 19px; font-weight: 700; color: var(--brand-deep); letter-spacing: .14em; text-transform: uppercase; }
+    .tagline { font-size: 10.5px; color: var(--muted); letter-spacing: .16em; text-transform: uppercase; margin-top: 2px; }
+    .masthead .meta { text-align: right; font-size: 12px; color: var(--muted); line-height: 1.7; }
+    .masthead .meta b { color: var(--ink); font-weight: 600; }
+
+    h1 { font-size: 26px; line-height: 1.2; color: var(--ink); margin: 24px 0 4px; letter-spacing: -.01em; font-weight: 650; }
+    .subtitle { font-size: 14px; color: var(--muted); margin: 0; max-width: 60ch; }
+
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line);
+      border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-top: 24px; }
+    .summary .cell { background: #fff; padding: 15px 16px; }
+    .summary .k { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 7px; }
+    .summary .v { font-size: 22px; font-weight: 650; color: var(--ink); letter-spacing: -.01em; }
+    .summary .v.sm { font-size: 15px; line-height: 1.35; }
+    .summary .u { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 3px; }
+    .summary .cell.accent .v { color: var(--amber); }
+    .summary .sub { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+    .summary .sub.amber { color: var(--amber); }
+
+    section { margin-top: 34px; page-break-inside: avoid; }
+    .eyebrow { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .13em; color: var(--brand); margin-bottom: 6px; }
+    h2 { font-size: 18px; color: var(--ink); margin: 0 0 4px; font-weight: 600; letter-spacing: -.005em; }
+    .lede { font-size: 13.5px; color: var(--muted); margin: 0 0 16px; max-width: 66ch; }
+
+    .panel { border: 1px solid var(--line); border-radius: 8px; padding: 18px 18px 6px; }
+    .panel .callout { display: flex; gap: 10px; align-items: baseline; margin: 2px 4px 12px; padding: 10px 14px;
+      background: var(--brand-soft); border-radius: 6px; font-size: 12.5px; color: var(--brand-deep); }
+    .panel .callout b { font-weight: 650; }
+    figure { margin: 0; }
+    figcaption { font-size: 11.5px; color: var(--muted); margin: 6px 4px 10px; }
+    svg.chart { display: block; width: 100%; height: auto; }
+
+    .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin: 2px 4px 12px; }
+    .legend span { display: inline-flex; align-items: center; gap: 7px; }
+    .swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+
+    .scroll { overflow-x: auto; margin-top: 14px; }
+    table.data { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+    table.data th, table.data td { padding: 9px 12px; text-align: right; border-bottom: 1px solid var(--line); }
+    table.data th:first-child, table.data td:first-child { text-align: left; }
+    table.data thead th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; border-bottom: 1.5px solid var(--line); }
+    table.data tbody tr:last-child td { border-bottom: none; }
+    table.data tr.total td { font-weight: 650; color: var(--ink); background: #f6faf7; border-top: 1.5px solid var(--line); }
+    .delta-up { color: var(--amber); font-weight: 600; }
+    .delta-down { color: var(--brand); font-weight: 600; }
+    td.higher { color: var(--amber); }
+    td.lower { color: var(--slate); }
+    td.muted { color: var(--muted); }
+    .tag { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 20px; background: var(--brand-soft); color: var(--brand-deep); font-weight: 600; }
+    .footnote { font-size: 11px; color: var(--muted); margin: 8px 4px 0; }
+
+    ol.points { list-style: none; margin: 0; padding: 0; counter-reset: p; display: grid; gap: 13px; }
+    ol.points li { position: relative; padding-left: 40px; font-size: 13.5px; color: var(--ink-2); }
+    ol.points li::before { counter-increment: p; content: counter(p); position: absolute; left: 0; top: -1px;
+      width: 26px; height: 26px; border-radius: 50%; background: var(--brand-soft); color: var(--brand-deep);
+      font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+    ol.howto { display: grid; gap: 8px; margin: 0; padding-left: 20px; font-size: 13px; }
+    .disclaimer { font-size: 12px; color: var(--muted); line-height: 1.7; margin-top: 14px; }
+
+    .provenance { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px; }
+    .provenance .pi { font-size: 12px; }
+    .provenance .pi label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 2px; }
+    .provenance .pi .val { color: var(--ink); }
+
+    footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid var(--line);
+      display: flex; justify-content: space-between; gap: 16px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="brand">
-      <span class="mark">
-        <svg width="26" height="26" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M6 24 H15.5 C18.2 24 18.6 37 22 37 C25.4 37 25 11 28.5 11 C32 11 31.8 24 34.5 24 H42"
-            stroke="#15803d" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </span>
-      <span>
-        <div class="wordmark">Sparks</div>
-        <div class="tagline">Energy Reconciliation</div>
-      </span>
-    </div>
-    <h1>Usage &amp; Billing Reconciliation</h1>
-    <div class="subtitle">Your recorded meter usage, laid out next to the charges you were quoted — with a few things you may want to ask your landlord to clarify.</div>
 
-    <!-- Site & Meter Provenance -->
-    <div class="section">
-      <h2>Site & Meter Information</h2>
-      <div class="provenance-grid">
-        <div class="provenance-item">
-          <label>Site Name</label>
-          <div class="value">${site.name || "—"}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Address</label>
-          <div class="value">${[site.addressLine1, site.city, site.province].filter(Boolean).join(", ") || "—"}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Meter Serial Number</label>
-          <div class="value">${meter.serialNumber}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Device Serial Number</label>
-          <div class="value">${device?.serialNumber || "—"}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Meter Model</label>
-          <div class="value">${meter.model || "—"}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Installed Date</label>
-          <div class="value">${meter.installedAt ? new Date(meter.installedAt).toLocaleDateString("en-ZA") : "—"}</div>
-        </div>
+    <div class="masthead">
+      <div class="brand">
+        <span class="mark">
+          <svg width="28" height="28" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M6 24 H15.5 C18.2 24 18.6 37 22 37 C25.4 37 25 11 28.5 11 C32 11 31.8 24 34.5 24 H42"
+              stroke="#15803d" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <span>
+          <div class="wordmark">Sparks</div>
+          <div class="tagline">Energy Reconciliation</div>
+        </span>
+      </div>
+      <div class="meta">
+        <div><b>${site.name || "—"}</b></div>
+        <div>${[site.addressLine1, site.city, site.province].filter(Boolean).join(", ") || "—"}</div>
+        <div>Meter ${meter.serialNumber}${meter.model ? ` · ${meter.model}` : ""}</div>
+        <div>Statement ref ${recon.id.slice(0, 8).toUpperCase()}</div>
       </div>
     </div>
 
-    <!-- Billing Window -->
-    <div class="section">
-      <h2>Billing Window & Measurement Interval</h2>
-      <div class="provenance-grid">
-        <div class="provenance-item">
-          <label>Period Start</label>
-          <div class="value">${new Date(recon.billingPeriodStart).toLocaleDateString("en-ZA", { weekday: "short", year: "numeric", month: "short", day: "numeric" })}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Period End</label>
-          <div class="value">${new Date(recon.billingPeriodEnd).toLocaleDateString("en-ZA", { weekday: "short", year: "numeric", month: "short", day: "numeric" })}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Boundary Inclusivity</label>
-          <div class="value">${recon.boundaryInclusivity === "half_open" ? "Half-open (exclusive end)" : recon.boundaryInclusivity === "inclusive" ? "Inclusive" : recon.boundaryInclusivity}</div>
-        </div>
-        <div class="provenance-item">
-          <label>Demand Interval</label>
-          <div class="value">${recon.demandIntervalMinutes} minutes</div>
-        </div>
+    <h1>Energy Statement</h1>
+    <p class="subtitle">Your independently recorded electricity use for this billing period, set alongside the charges you were quoted.</p>
+
+    <div class="summary">
+      <div class="cell">
+        <div class="k">Billing period</div>
+        <div class="v sm">${periodStartStr} – ${periodEndStr}<div class="sub">${periodYear} · ${periodDays} days</div></div>
+      </div>
+      <div class="cell">
+        <div class="k">Electricity used</div>
+        <div class="v tnum">${groupThousands(Number(recon.measuredActiveKwh))}<span class="u">kWh</span></div>
+        <div class="sub">Peak demand ${Number(recon.measuredMaxDemandKva ?? 0).toFixed(1)} kVA</div>
+      </div>
+      <div class="cell">
+        <div class="k">Your usage supports</div>
+        <div class="v tnum">${fmtRandBig(recon.expectedLandlordCents)}</div>
+        <div class="sub">at the ${landlordTariffName} tariff</div>
+      </div>
+      <div class="cell${diffAccent ? " accent" : ""}">
+        <div class="k">You were quoted</div>
+        <div class="v tnum">${fmtRandBig(recon.chargedTotalCents)}</div>
+        <div class="sub${diffAccent ? " amber" : ""}">${diffNote}</div>
       </div>
     </div>
 
-    <!-- Recorded Usage -->
-    <div class="section">
-      <h2>What your meter recorded</h2>
-      <div class="provenance-grid">
-        <div class="provenance-item">
-          <label>Active Energy</label>
-          <div class="value">${formatNumber(recon.measuredActiveKwh)} kWh</div>
-        </div>
-        <div class="provenance-item">
-          <label>Maximum Demand</label>
-          <div class="value">${formatNumber(recon.measuredMaxDemandKva, 2)} kVA</div>
-        </div>
-        <div class="provenance-item">
-          <label>Reactive Energy</label>
-          <div class="value">${formatNumber(recon.measuredReactiveKvarh)} kVAr·h</div>
-        </div>
-        <div class="provenance-item">
-          <label>Status</label>
-          <div class="value">${recon.status === "final" ? "Final" : "Draft"}</div>
-        </div>
+    <section>
+      <div class="eyebrow">Consumption</div>
+      <h2>Electricity used, day by day</h2>
+      <p class="lede">How much your meter recorded each day of the period.</p>
+      <div class="panel">
+        <figure>
+          ${usageSvg}
+          <figcaption>Recorded active energy per calendar day (kWh), site timezone ${tz}.</figcaption>
+        </figure>
       </div>
-    </div>
+    </section>
 
-    <!-- Recorded usage vs quoted charges -->
-    <div class="section">
+    <section>
+      <div class="eyebrow">Demand</div>
+      <h2>Your daily peak demand</h2>
+      <p class="lede">Demand charges are set by your single highest half-hour of the month — not your total usage. This is the peak your meter recorded each day.</p>
+      <div class="panel">
+        <div class="callout"><b>Month peak: ${Number(recon.measuredMaxDemandKva ?? 0).toFixed(1)} kVA</b><span>your demand charge is based on the highest ${recon.demandIntervalMinutes}-minute average of the period, not your total usage.</span></div>
+        <figure>
+          ${demandSvg}
+          <figcaption>Highest ${recon.demandIntervalMinutes}-minute demand average per day (kVA).</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section>
+      <div class="eyebrow">Trend</div>
+      <h2>How this period compares</h2>
+      <p class="lede">Your recent billing periods side by side — usage, what you were quoted, peak demand, and the effective rate you paid per unit. This fills in as each period closes.</p>
+      <div class="panel">
+        <div class="legend">
+          <span><span class="swatch" style="background:var(--brand)"></span>Quoted total (R)</span>
+          <span><span class="swatch" style="background:var(--amber)"></span>Effective rate (c/kWh)</span>
+        </div>
+        <figure>${trendSvg}</figure>
+      </div>
+      <div class="scroll">
+        <table class="data">
+          <thead>
+            <tr><th>Period</th><th>Used (kWh)</th><th>Peak (kVA)</th><th>Quoted</th><th>Eff. rate</th><th>vs prev.</th></tr>
+          </thead>
+          <tbody>${trendRows || '<tr><td colspan="6" class="muted">No history yet — this fills in each period.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="eyebrow">Reconciliation</div>
       <h2>Recorded usage vs quoted charges</h2>
-      <table class="pricing-table">
-        <thead>
-          <tr>
-            <th>Basis</th>
-            <th>Amount</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>Your recorded usage, priced at the ${landlordTariffName} tariff</td>
-            <td>${formatCents(recon.expectedLandlordCents)}</td>
-          </tr>
-          <tr class="discrepancy">
-            <td>What you were quoted</td>
-            <td>${formatCents(recon.chargedTotalCents)}</td>
-          </tr>
-          <tr>
-            <td>Difference</td>
-            <td class="${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "higher" : (recon.discrepancyVsLandlordCents ?? 0) < 0 ? "lower" : ""}">${recon.discrepancyVsLandlordCents === null ? "—" : diffLabel(recon.discrepancyVsLandlordCents)}</td>
-          </tr>
-          ${
-            ceilingTariffName
-              ? `
-          <tr>
-            <td>Legal maximum for reference (${ceilingTariffName})</td>
-            <td>${formatCents(recon.expectedCeilingCents)}</td>
-          </tr>
-          `
-              : ""
-          }
-        </tbody>
-      </table>
-      ${
-        recon.expectedLandlordCents === null
-          ? `<p style="font-size:11px;color:#777;margin-top:8px;">We didn't have your landlord's tariff on file, so we couldn't price your recorded usage against a rate. See the points below for what to ask.</p>`
-          : ""
-      }
-    </div>
+      <p class="lede">Each charge on your bill, next to what your recorded usage supports at the tariff on file. Where the quote is higher, the points below suggest what to ask.</p>
+      <div class="panel">
+        <div class="legend">
+          <span><span class="swatch" style="background:var(--brand)"></span>Your usage supports</span>
+          <span><span class="swatch" style="background:var(--amber)"></span>You were quoted</span>
+        </div>
+        <figure>${reconSvg}</figure>
+      </div>
+      <div class="scroll">
+        <table class="data">
+          <thead>
+            <tr><th>Charge</th><th>Your usage supports</th><th>You were quoted</th><th>Difference</th></tr>
+          </thead>
+          <tbody>
+            ${componentRows}
+            <tr class="total">
+              <td>Total</td>
+              <td>${formatCents(recon.expectedLandlordCents)}</td>
+              <td>${formatCents(recon.chargedTotalCents)}</td>
+              <td class="${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "higher" : (recon.discrepancyVsLandlordCents ?? 0) < 0 ? "lower" : ""}">${recon.discrepancyVsLandlordCents === null ? "—" : diffLabel(recon.discrepancyVsLandlordCents)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      ${ceilingRef}
+    </section>
 
-    ${componentSection}
-
-    <!-- Points to raise with your landlord -->
-    <div class="section">
+    <section>
+      <div class="eyebrow">Next steps</div>
       <h2>Points to raise with your landlord</h2>
-      <p style="font-size:12px;color:#666;margin:0 0 6px 0;">These are suggestions, not accusations — a friendly starting point for a conversation about your bill.</p>
-      <ul class="points">${clarificationItems}</ul>
-    </div>
+      <p class="lede">Suggestions, not accusations — a friendly starting point for a conversation about your bill.</p>
+      <ol class="points">${clarificationItems}</ol>
+    </section>
 
-    <!-- Data note -->
-    <div class="section">
-      <h2>About your recorded data</h2>
-      <div class="data-integrity ${recon.dataIntegrityStatus === "gaps_present" ? "gaps" : "clean"}">
-        ${gapsText}
+    <section>
+      <div class="eyebrow">About this statement</div>
+      <h2>How to use it</h2>
+      <ol class="howto">
+        <li>Share it with your landlord and ask about any of the points above.</li>
+        <li>Ask for a detailed breakdown of the charges and the meter readings they used.</li>
+        <li>Keep it with your records in case you need to refer back to it.</li>
+      </ol>
+      <p class="disclaimer">${gapsText} The figures come from your sub-meter's recorded usage, priced at the tariff on file. This statement is intended to help you understand and discuss your bill — not to make a legal determination about it.</p>
+      <div class="provenance">
+        <div class="pi"><label>Meter</label><div class="val">${meter.serialNumber}${meter.model ? ` · ${meter.model}` : ""}</div></div>
+        <div class="pi"><label>Installed</label><div class="val">${meter.installedAt ? fmtDate(meter.installedAt, { year: "numeric", month: "short", day: "numeric" }) : "—"}</div></div>
+        <div class="pi"><label>Gateway</label><div class="val">${device?.serialNumber || "—"}</div></div>
+        <div class="pi"><label>Demand interval</label><div class="val">${recon.demandIntervalMinutes} minutes</div></div>
+        <div class="pi"><label>Period boundary</label><div class="val">${recon.boundaryInclusivity === "half_open" ? "Half-open (exclusive end)" : recon.boundaryInclusivity === "inclusive" ? "Inclusive" : recon.boundaryInclusivity}</div></div>
+        <div class="pi"><label>Data integrity</label><div class="val">${recon.dataIntegrityStatus === "gaps_present" ? "Verified, minor gaps" : "Verified, no gaps"}</div></div>
       </div>
-    </div>
+    </section>
 
-    <!-- How to use this report -->
-    <div class="section">
-      <h2>How to use this report</h2>
-      <div class="note-section">
-        <p>This report puts your independently recorded meter usage next to the charges you were quoted, so you can have an informed, good-faith conversation with your landlord.</p>
-        <ol style="margin: 10px 0; padding-left: 20px;">
-          <li>Share it with your landlord and ask about any of the points above.</li>
-          <li>Ask for a detailed breakdown of the charges and the meter readings they used.</li>
-          <li>Keep this report with your records in case you need to refer back to it.</li>
-        </ol>
-        <p style="margin-top: 15px; font-size: 11px; color: #777;">
-          The figures come from your sub-meter's recorded usage priced at the tariff on file. They're intended to help you understand and discuss your bill — not to make a legal determination about it.
-        </p>
-      </div>
-    </div>
+    <footer>
+      <span>Generated by Sparks · ${(data.generatedAt || new Date()).toLocaleString("en-ZA", { timeZone: tz })}</span>
+      <span>Meter ${meter.serialNumber} · ${recon.status === "final" ? "Final" : "Draft"}</span>
+    </footer>
 
-    <div class="timestamp">
-      Report generated: ${(data.generatedAt || new Date()).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" })}
-    </div>
   </div>
 </body>
 </html>`;
