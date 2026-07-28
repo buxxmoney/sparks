@@ -113,6 +113,7 @@ import {
   billingPeriodsMaterializeInput,
   billingPeriodsUpsertInput,
   billingPoliciesGetInput,
+  type BillingPoliciesSetInput,
   billingPoliciesSetInput,
   demandListIntervalsInput,
   devicesGetHealthInput,
@@ -1015,7 +1016,17 @@ export async function billingPoliciesGet(ctx: AuthContext, input: unknown) {
 export async function billingPoliciesSet(ctx: AuthContext, input: unknown) {
   const parsed = billingPoliciesSetInput.parse(input);
   await requireSiteEditor(ctx, parsed.siteId);
+  return writeBillingPolicy(parsed);
+}
 
+/**
+ * Close the site's active billing policy, insert a new versioned one, and
+ * best-effort materialize the concrete periods it implies. Shared by the
+ * site-editor endpoint (`billingPoliciesSet`) and the operator-admin endpoint
+ * (`adminBillingPolicySet`) so both write policies identically — the caller is
+ * responsible for authorization before calling this.
+ */
+async function writeBillingPolicy(parsed: BillingPoliciesSetInput) {
   const site = await db.query.sites.findFirst({
     where: eq(sites.id, parsed.siteId),
   });
@@ -1076,6 +1087,37 @@ export async function billingPoliciesSet(ctx: AuthContext, input: unknown) {
   }
 
   return { ...newPolicy, periodsCreated };
+}
+
+/**
+ * Operator-only: the site's active billing-cycle policy (or null). Mirrors
+ * `billingPoliciesGet` but gated on requirePlatformOperator, since operators
+ * aren't members of the customer's org — they manage the cycle from /admin.
+ */
+export async function adminBillingPolicyGet(ctx: AuthContext, input: unknown) {
+  const parsed = billingPoliciesGetInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+
+  const policy = await db.query.billingCyclePolicies.findFirst({
+    where: and(
+      eq(billingCyclePolicies.siteId, parsed.siteId),
+      isNull(billingCyclePolicies.effectiveTo),
+    ),
+  });
+
+  return policy || null;
+}
+
+/**
+ * Operator-only: set a site's billing-cycle policy from /admin — the same
+ * write as the customer's site-settings screen, but gated on
+ * requirePlatformOperator. Lets Sparks align a site's period (e.g. anchor day 24)
+ * so the dashboard and bill checks follow the landlord's real cycle.
+ */
+export async function adminBillingPolicySet(ctx: AuthContext, input: unknown) {
+  const parsed = billingPoliciesSetInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  return writeBillingPolicy(parsed);
 }
 
 export async function billingPeriodsList(ctx: AuthContext, input: unknown) {

@@ -19,6 +19,7 @@ import {
   Plus,
   Copy,
   Activity,
+  CalendarRange,
 } from "lucide-react";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Grid } from "@astryxdesign/core/Grid";
@@ -31,6 +32,7 @@ import { Banner } from "@astryxdesign/core/Banner";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Table } from "@astryxdesign/core/Table";
 import { Selector } from "@astryxdesign/core/Selector";
+import { NumberInput } from "@astryxdesign/core/NumberInput";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { useRPC } from "@/lib/useRPC";
@@ -174,6 +176,31 @@ export default function AdminPage() {
     [manageOrg?.id],
   );
   const orgSites = orgSitesData?.sites ?? [];
+
+  // Billing cycle for a chosen site — operators align a site's period (e.g. anchor
+  // day 24) so the dashboard and bill checks follow the landlord's real cycle.
+  const [billingSite, setBillingSite] = useState<{ id: string; name: string } | null>(null);
+  const { data: billingPolicy, refetch: refetchBillingPolicy } = useRPC(
+    billingSite ? () => client.admin.billingPolicyGet({ siteId: billingSite.id }) : null,
+    [billingSite?.id],
+  );
+  const [billingCycle, setBillingCycle] = useState<"calendar_month" | "day_of_month">(
+    "calendar_month",
+  );
+  const [billingAnchorDay, setBillingAnchorDay] = useState(1);
+  const [billingBusy, setBillingBusy] = useState(false);
+  const [billingMsg, setBillingMsg] = useState<{ kind: "success" | "error"; text: string } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (billingPolicy?.recurrence === "day_of_month") {
+      setBillingCycle("day_of_month");
+      setBillingAnchorDay(billingPolicy.anchorDay ?? 1);
+    } else {
+      setBillingCycle("calendar_month");
+      setBillingAnchorDay(1);
+    }
+  }, [billingPolicy]);
 
   // Meter registration for a chosen site (site DB role → meter → config onto the reader).
   const [manageSite, setManageSite] = useState<{ id: string; name: string } | null>(null);
@@ -614,6 +641,33 @@ export default function AdminPage() {
     setMeterSerial("");
     setMeterModel("SDM630MCT");
     setHwMsg(null);
+  };
+
+  const openBilling = (id: string, name: string) => {
+    setBillingMsg(null);
+    setBillingSite((cur) => (cur?.id === id ? null : { id, name }));
+  };
+
+  const saveBillingCycle = async () => {
+    if (!billingSite) return;
+    setBillingBusy(true);
+    setBillingMsg(null);
+    try {
+      await client.admin.billingPolicySet({
+        siteId: billingSite.id,
+        recurrence: billingCycle,
+        ...(billingCycle === "day_of_month" ? { anchorDay: billingAnchorDay } : {}),
+      });
+      await refetchBillingPolicy();
+      setBillingMsg({ kind: "success", text: "Billing cycle saved." });
+    } catch (err) {
+      setBillingMsg({
+        kind: "error",
+        text: err instanceof Error ? err.message : "Failed to save billing cycle",
+      });
+    } finally {
+      setBillingBusy(false);
+    }
   };
 
   // Step 1 of adding a meter: make sure the site's DB role exists. If this call
@@ -1504,6 +1558,19 @@ export default function AdminPage() {
                                 ),
                               },
                               {
+                                key: "billing",
+                                header: "",
+                                renderCell: (s) => (
+                                  <Button
+                                    label={billingSite?.id === s.id ? "Hide billing" : "Billing cycle"}
+                                    variant="secondary"
+                                    size="sm"
+                                    icon={<CalendarRange size={14} />}
+                                    onClick={() => openBilling(s.id, s.name)}
+                                  />
+                                ),
+                              },
+                              {
                                 key: "del",
                                 header: "",
                                 renderCell: (s) => (
@@ -1523,6 +1590,79 @@ export default function AdminPage() {
                           />
                         )}
                       </Stack>
+
+                      {/* Billing cycle for the selected site */}
+                      {billingSite ? (
+                        <Card padding={4}>
+                          <Stack gap={3}>
+                            <Text weight="semibold">Billing cycle — {billingSite.name}</Text>
+                            {billingMsg ? (
+                              <Banner
+                                status={billingMsg.kind === "success" ? "success" : "error"}
+                                title={billingMsg.text}
+                              />
+                            ) : null}
+                            <Text type="supporting">
+                              Set when this site&apos;s billing period runs so the dashboard, live
+                              bill and bill checks follow the landlord&apos;s real cycle.
+                            </Text>
+                            <Selector
+                              label="Cycle"
+                              options={[
+                                { value: "calendar_month", label: "Calendar month (1st → month end)" },
+                                { value: "day_of_month", label: "Custom day of month" },
+                              ]}
+                              value={billingCycle}
+                              onChange={(v) => {
+                                setBillingCycle(v as typeof billingCycle);
+                                setBillingMsg(null);
+                              }}
+                              width={320}
+                            />
+                            {billingCycle === "day_of_month" ? (
+                              <Stack gap={1}>
+                                <NumberInput
+                                  label="Billing day"
+                                  min={1}
+                                  max={31}
+                                  value={billingAnchorDay}
+                                  onChange={(v) => {
+                                    setBillingAnchorDay(Math.min(31, Math.max(1, v ?? 1)));
+                                    setBillingMsg(null);
+                                  }}
+                                  width={200}
+                                  isIntegerOnly
+                                />
+                                <Text type="supporting">
+                                  Each period runs from day {billingAnchorDay} to day{" "}
+                                  {billingAnchorDay === 1 ? 31 : billingAnchorDay - 1} of the next
+                                  month.
+                                  {billingAnchorDay >= 29
+                                    ? ` Shorter months without a day ${billingAnchorDay} (like February) use their last day instead.`
+                                    : ""}
+                                </Text>
+                              </Stack>
+                            ) : null}
+                            <Stack direction="horizontal" gap={3} align="center">
+                              <Button
+                                label={billingBusy ? "Saving…" : "Save billing cycle"}
+                                variant="primary"
+                                size="sm"
+                                isLoading={billingBusy}
+                                isDisabled={billingBusy}
+                                onClick={saveBillingCycle}
+                              />
+                              <Button
+                                label="Close"
+                                variant="ghost"
+                                size="sm"
+                                isDisabled={billingBusy}
+                                onClick={() => setBillingSite(null)}
+                              />
+                            </Stack>
+                          </Stack>
+                        </Card>
+                      ) : null}
 
                       {/* Hardware provisioning for the selected site */}
                       {manageSite ? (

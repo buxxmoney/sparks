@@ -14,10 +14,80 @@ export interface ReportData {
 }
 
 /**
- * Render reconciliation report to HTML.
- * Includes: site/meter provenance, billing window, measured data,
- * expected vs actual pricing, data-integrity status with gaps flagged,
- * and NERSA recourse path.
+ * Turn the reconciliation numbers into plain-language, non-accusatory pointers a
+ * tenant can raise with their landlord. Every item is framed as a question to ask
+ * or a thing to confirm — never an accusation — so the report suggests clarifications
+ * rather than pointing fingers. Ordered most-worth-asking first.
+ */
+export function buildClarificationPoints(
+  recon: Reconciliation,
+  landlordTariffName: string,
+): string[] {
+  const points: string[] = [];
+  const rand = (cents: number): string => `R${(Math.abs(cents) / 100).toFixed(2)}`;
+  // A difference only worth raising once it clears loose rounding noise (R10).
+  const MATERIAL_CENTS = 1000;
+
+  const components =
+    (
+      recon.breakdown as {
+        components?: Array<{
+          label: string;
+          chargedCents: number;
+          expectedLandlordCents: number;
+          discrepancyVsLandlordCents: number;
+        }>;
+      } | null
+    )?.components ?? [];
+
+  // No tariff on file — we couldn't price the recorded usage against a rate at all.
+  if (recon.expectedLandlordCents === null) {
+    points.push(
+      "We didn't have your landlord's tariff on file, so we couldn't line your recorded usage up against a rate. It's worth asking your landlord which tariff and unit rates they use to work out your bill.",
+    );
+  }
+
+  // Headline difference between the quoted total and what the meter supports.
+  const overall = recon.discrepancyVsLandlordCents;
+  if (overall !== null && overall > MATERIAL_CENTS) {
+    points.push(
+      `Your quoted charge is about ${rand(overall)} more than your recorded usage comes to at the ${landlordTariffName} tariff. You could ask your landlord to walk you through how the total was worked out.`,
+    );
+  }
+
+  // Line-by-line: flag any charge that sits materially above what the meter supports.
+  for (const c of components) {
+    if (c.discrepancyVsLandlordCents > MATERIAL_CENTS) {
+      points.push(
+        `The "${c.label}" line is about ${rand(c.discrepancyVsLandlordCents)} higher than your recorded usage supports — it's worth asking what rate or basis was applied to it.`,
+      );
+    }
+  }
+
+  // Data gaps: recorded usage may understate, so a high bill isn't necessarily wrong.
+  if (recon.dataIntegrityStatus === "gaps_present") {
+    points.push(
+      `Your meter data has ${recon.gapCount} short gap(s) (${recon.gapMinutesTotal} minutes in total) during this period, so your recorded usage may be slightly understated. If the bill still looks high, it's worth confirming the readings your landlord used.`,
+    );
+  }
+
+  // Nothing stood out — say so plainly rather than inventing a query.
+  if (points.length === 0) {
+    points.push(
+      "Your quoted charges line up closely with what your meter recorded — there's nothing that stands out to query. Keep this report with your records in case you need it later.",
+    );
+  }
+
+  return points;
+}
+
+/**
+ * Render the reconciliation report to HTML — a neutral, tenant-facing document that
+ * lays your recorded meter usage alongside the charges you were quoted, and turns any
+ * differences into gentle "things to ask your landlord" pointers (see
+ * {@link buildClarificationPoints}). It suggests clarifications; it does not accuse.
+ * Includes: site/meter provenance, billing window, recorded usage, a recorded-vs-quoted
+ * comparison, data-integrity notes, and the clarification pointers.
  */
 export function renderReportHtml(data: ReportData): string {
   const {
@@ -39,7 +109,9 @@ export function renderReportHtml(data: ReportData): string {
     return Number(val).toFixed(decimals);
   };
 
-  // Component-by-component comparison, persisted in the reconciliation breakdown.
+  // Line-by-line: what your meter's usage supports vs what you were quoted. We label
+  // the difference neutrally ("higher"/"lower") rather than as an over/undercharge —
+  // the report suggests questions, it doesn't return a verdict.
   const components =
     (
       recon.breakdown as {
@@ -51,47 +123,52 @@ export function renderReportHtml(data: ReportData): string {
         }>;
       } | null
     )?.components ?? [];
+  const diffLabel = (d: number): string =>
+    d > 0 ? `${formatCents(d)} higher` : d < 0 ? `${formatCents(-d)} lower` : "—";
   const componentRows = components
     .map((c) => {
       const d = c.discrepancyVsLandlordCents;
-      const cls = d > 0 ? "negative" : d < 0 ? "positive" : "";
+      const cls = d > 0 ? "higher" : d < 0 ? "lower" : "";
       return `<tr>
         <td>${c.label}</td>
-        <td>${formatCents(c.chargedCents)}</td>
         <td>${formatCents(c.expectedLandlordCents)}</td>
-        <td class="${cls}">${d > 0 ? "+" : ""}${formatCents(d)}</td>
+        <td>${formatCents(c.chargedCents)}</td>
+        <td class="${cls}">${diffLabel(d)}</td>
       </tr>`;
     })
     .join("");
   const componentSection = components.length
     ? `<div class="section">
-      <h2>Charge-by-charge comparison</h2>
+      <h2>Line-by-line</h2>
       <table class="pricing-table">
-        <thead><tr><th>Component</th><th>Charged</th><th>Expected (landlord tariff)</th><th>Discrepancy</th></tr></thead>
+        <thead><tr><th>Charge</th><th>Your usage supports</th><th>You were quoted</th><th>Difference</th></tr></thead>
         <tbody>${componentRows}
           <tr class="discrepancy">
             <td>Total</td>
-            <td>${formatCents(recon.chargedTotalCents)}</td>
             <td>${formatCents(recon.expectedLandlordCents)}</td>
-            <td class="${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "negative" : "positive"}">${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "+" : ""}${formatCents(recon.discrepancyVsLandlordCents)}</td>
+            <td>${formatCents(recon.chargedTotalCents)}</td>
+            <td class="${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "higher" : (recon.discrepancyVsLandlordCents ?? 0) < 0 ? "lower" : ""}">${diffLabel(recon.discrepancyVsLandlordCents ?? 0)}</td>
           </tr>
         </tbody>
       </table>
-      <p style="font-size:11px;color:#777;margin-top:8px;">A positive discrepancy indicates the amount charged exceeds what the meter reading priced at the landlord tariff supports.</p>
+      <p style="font-size:11px;color:#777;margin-top:8px;">"Your usage supports" prices the meter's recorded usage at the ${landlordTariffName} tariff. Where the quoted amount is higher, the "Points to raise" below suggest what to ask about.</p>
     </div>`
     : "";
 
+  const clarificationPoints = buildClarificationPoints(recon, landlordTariffName);
+  const clarificationItems = clarificationPoints.map((p) => `<li>${p}</li>`).join("");
+
   const gapsText =
     recon.dataIntegrityStatus === "gaps_present"
-      ? `⚠ Data contains ${recon.gapCount} gap(s) totaling ${recon.gapMinutesTotal} minutes. Measured data may understate actual usage.`
-      : "✓ No data gaps detected during billing period.";
+      ? `Your data contains ${recon.gapCount} short gap(s) totalling ${recon.gapMinutesTotal} minutes. Recorded usage may slightly understate actual usage over these windows.`
+      : "No data gaps were detected during the billing period — your recorded usage covers the whole window.";
 
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Electricity Reconciliation Report</title>
+  <title>Usage &amp; Billing Reconciliation</title>
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -108,18 +185,18 @@ export function renderReportHtml(data: ReportData): string {
       gap: 10px;
       padding-bottom: 16px;
       margin-bottom: 20px;
-      border-bottom: 2px solid #0b1220;
+      border-bottom: 2px solid #15803d;
     }
     .brand .mark {
       width: 40px;
       height: 40px;
       border-radius: 9px;
-      background: #0b1220;
+      background: #ecfdf3;
       display: flex;
       align-items: center;
       justify-content: center;
     }
-    .brand .wordmark { font-size: 20px; font-weight: 700; color: #0b1220; letter-spacing: -0.01em; }
+    .brand .wordmark { font-size: 20px; font-weight: 700; color: #0b3d20; letter-spacing: -0.01em; }
     .brand .tagline { font-size: 11px; color: #888; margin-top: 1px; }
     h1 { font-size: 24px; margin: 0 0 10px 0; color: #1a1a1a; }
     .subtitle { color: #666; font-size: 14px; margin-bottom: 20px; }
@@ -127,12 +204,12 @@ export function renderReportHtml(data: ReportData): string {
       margin-top: 30px;
       padding: 15px;
       background: #f9f9f9;
-      border-left: 4px solid #0066cc;
+      border-left: 4px solid #15803d;
     }
     .section h2 {
       margin: 0 0 15px 0;
       font-size: 16px;
-      color: #0066cc;
+      color: #15803d;
     }
     .provenance-grid {
       display: grid;
@@ -178,11 +255,22 @@ export function renderReportHtml(data: ReportData): string {
       font-size: 13px;
     }
     .pricing-table tr.discrepancy td {
-      background: #fff8e6;
+      background: #f4faf6;
       font-weight: 600;
     }
-    .pricing-table .negative { color: #d9534f; }
-    .pricing-table .positive { color: #5cb85c; }
+    /* Neutral, not alarmist: "higher" is amber (worth a look), "lower" muted. */
+    .pricing-table .higher { color: #b45309; }
+    .pricing-table .lower { color: #557; }
+    .points {
+      margin: 6px 0 0 0;
+      padding-left: 20px;
+    }
+    .points li {
+      font-size: 13px;
+      color: #333;
+      margin-bottom: 10px;
+      line-height: 1.6;
+    }
     .data-integrity {
       padding: 10px;
       border-radius: 4px;
@@ -199,7 +287,7 @@ export function renderReportHtml(data: ReportData): string {
       color: #e65100;
       border-left: 4px solid #e65100;
     }
-    .nersa-section {
+    .note-section {
       background: #f5f5f5;
       padding: 15px;
       border-radius: 4px;
@@ -223,7 +311,7 @@ export function renderReportHtml(data: ReportData): string {
       <span class="mark">
         <svg width="26" height="26" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M6 24 H15.5 C18.2 24 18.6 37 22 37 C25.4 37 25 11 28.5 11 C32 11 31.8 24 34.5 24 H42"
-            stroke="#3b82f6" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+            stroke="#15803d" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </span>
       <span>
@@ -231,8 +319,8 @@ export function renderReportHtml(data: ReportData): string {
         <div class="tagline">Energy Reconciliation</div>
       </span>
     </div>
-    <h1>Meter-Verified Bill Check</h1>
-    <div class="subtitle">Your metered usage checked against the billed amount</div>
+    <h1>Usage &amp; Billing Reconciliation</h1>
+    <div class="subtitle">Your recorded meter usage, laid out next to the charges you were quoted — with a few things you may want to ask your landlord to clarify.</div>
 
     <!-- Site & Meter Provenance -->
     <div class="section">
@@ -288,9 +376,9 @@ export function renderReportHtml(data: ReportData): string {
       </div>
     </div>
 
-    <!-- Measured Data -->
+    <!-- Recorded Usage -->
     <div class="section">
-      <h2>Measured Usage Data</h2>
+      <h2>What your meter recorded</h2>
       <div class="provenance-grid">
         <div class="provenance-item">
           <label>Active Energy</label>
@@ -311,70 +399,77 @@ export function renderReportHtml(data: ReportData): string {
       </div>
     </div>
 
-    <!-- Pricing Comparison -->
+    <!-- Recorded usage vs quoted charges -->
     <div class="section">
-      <h2>Pricing Comparison: Expected vs. Charged</h2>
+      <h2>Recorded usage vs quoted charges</h2>
       <table class="pricing-table">
         <thead>
           <tr>
-            <th>Tariff</th>
-            <th>Expected Charge</th>
-            <th>Actual Charge</th>
-            <th>Discrepancy</th>
+            <th>Basis</th>
+            <th>Amount</th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td>Landlord Stated (${landlordTariffName})</td>
+            <td>Your recorded usage, priced at the ${landlordTariffName} tariff</td>
             <td>${formatCents(recon.expectedLandlordCents)}</td>
+          </tr>
+          <tr class="discrepancy">
+            <td>What you were quoted</td>
             <td>${formatCents(recon.chargedTotalCents)}</td>
-            <td class="${recon.discrepancyVsLandlordCents && recon.discrepancyVsLandlordCents < 0 ? "negative" : "positive"}">
-              ${recon.discrepancyVsLandlordCents ? (recon.discrepancyVsLandlordCents < 0 ? "−" : "+") : ""}${formatCents(Math.abs(recon.discrepancyVsLandlordCents || 0))}
-            </td>
+          </tr>
+          <tr>
+            <td>Difference</td>
+            <td class="${(recon.discrepancyVsLandlordCents ?? 0) > 0 ? "higher" : (recon.discrepancyVsLandlordCents ?? 0) < 0 ? "lower" : ""}">${recon.discrepancyVsLandlordCents === null ? "—" : diffLabel(recon.discrepancyVsLandlordCents)}</td>
           </tr>
           ${
             ceilingTariffName
               ? `
           <tr>
-            <td>Legal Ceiling (${ceilingTariffName})</td>
+            <td>Legal maximum for reference (${ceilingTariffName})</td>
             <td>${formatCents(recon.expectedCeilingCents)}</td>
-            <td>${formatCents(recon.chargedTotalCents)}</td>
-            <td class="${recon.discrepancyVsCeilingCents && recon.discrepancyVsCeilingCents < 0 ? "negative" : "positive"}">
-              ${recon.discrepancyVsCeilingCents ? (recon.discrepancyVsCeilingCents < 0 ? "−" : "+") : ""}${formatCents(Math.abs(recon.discrepancyVsCeilingCents || 0))}
-            </td>
           </tr>
           `
               : ""
           }
         </tbody>
       </table>
+      ${
+        recon.expectedLandlordCents === null
+          ? `<p style="font-size:11px;color:#777;margin-top:8px;">We didn't have your landlord's tariff on file, so we couldn't price your recorded usage against a rate. See the points below for what to ask.</p>`
+          : ""
+      }
     </div>
 
     ${componentSection}
 
-    <!-- Data Integrity -->
+    <!-- Points to raise with your landlord -->
     <div class="section">
-      <h2>Data Integrity Status</h2>
+      <h2>Points to raise with your landlord</h2>
+      <p style="font-size:12px;color:#666;margin:0 0 6px 0;">These are suggestions, not accusations — a friendly starting point for a conversation about your bill.</p>
+      <ul class="points">${clarificationItems}</ul>
+    </div>
+
+    <!-- Data note -->
+    <div class="section">
+      <h2>About your recorded data</h2>
       <div class="data-integrity ${recon.dataIntegrityStatus === "gaps_present" ? "gaps" : "clean"}">
         ${gapsText}
       </div>
     </div>
 
-    <!-- NERSA Recourse -->
+    <!-- How to use this report -->
     <div class="section">
-      <h2>Consumer Recourse &amp; Regulatory Framework</h2>
-      <div class="nersa-section">
-        <p><strong>If this reconciliation indicates overcharging:</strong></p>
+      <h2>How to use this report</h2>
+      <div class="note-section">
+        <p>This report puts your independently recorded meter usage next to the charges you were quoted, so you can have an informed, good-faith conversation with your landlord.</p>
         <ol style="margin: 10px 0; padding-left: 20px;">
-          <li>Report discrepancies to your electricity provider within 30 days of invoice receipt.</li>
-          <li>Request a detailed breakdown of charges and meter readings.</li>
-          <li>If unresolved, escalate to your provincial Energy Regulator (NERSA) or local authority.</li>
-          <li>Preserve this report as evidence of measured vs. billed discrepancies.</li>
+          <li>Share it with your landlord and ask about any of the points above.</li>
+          <li>Ask for a detailed breakdown of the charges and the meter readings they used.</li>
+          <li>Keep this report with your records in case you need to refer back to it.</li>
         </ol>
         <p style="margin-top: 15px; font-size: 11px; color: #777;">
-          This report reconciles measured electrical consumption against landlord and legal ceiling tariffs.
-          It provides supporting evidence for any dispute regarding billing accuracy.
-          Legal ceiling tariffs are set under NERSA regulations; landlord tariffs reflect contractual arrangements.
+          The figures come from your sub-meter's recorded usage priced at the tariff on file. They're intended to help you understand and discuss your bill — not to make a legal determination about it.
         </p>
       </div>
     </div>

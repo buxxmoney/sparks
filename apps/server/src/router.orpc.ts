@@ -35,6 +35,9 @@ export const appRouter = {
     // Assign a landlord tariff to a site + recompute its pending reconciliation.
     siteTariffGet: proc(V.adminSiteTariffGetInput, R.adminSiteTariffGet),
     assignSiteTariff: proc(V.adminAssignSiteTariffInput, R.adminAssignSiteTariff),
+    // Operator-set the site's billing cycle (anchor day) from /admin.
+    billingPolicyGet: proc(V.billingPoliciesGetInput, R.adminBillingPolicyGet),
+    billingPolicySet: proc(V.billingPoliciesSetInput, R.adminBillingPolicySet),
   },
   session: {
     me: procNoInput(sessionMe),

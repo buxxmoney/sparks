@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { Zap } from "lucide-react";
 import { Text } from "@astryxdesign/core/Text";
+import sparksMark from "@/assets/sparks-icon.png";
 import { useSession } from "@/lib/useSession";
 
 export default function Home() {
@@ -28,20 +29,7 @@ export default function Home() {
         textAlign: "center",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          width: 48,
-          height: 48,
-          alignItems: "center",
-          justifyContent: "center",
-          borderRadius: 12,
-          background: "hsl(221 83% 53%)",
-          color: "white",
-        }}
-      >
-        <Zap size={24} />
-      </div>
+      <Image src={sparksMark} alt="Sparks" priority style={{ height: 48, width: "auto" }} />
       <Text type="supporting">Loading Sparks…</Text>
     </div>
   );
