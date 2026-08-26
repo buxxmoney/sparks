@@ -67,6 +67,7 @@ import {
   generateReconciliation,
   priceSegments,
 } from "./reconciliation";
+import { meterStatusFromAge } from "./meter-cadence";
 import {
   dispatchInvoiceParsed,
   dispatchOperatorBillSubmitted,
@@ -693,8 +694,9 @@ export async function siteInvitesAccept(ctx: AuthContext, input: unknown) {
 /* ─────────────── Devices Router ─────────────── */
 
 // A meter's live connectivity, derived from its ingestion — the current hardware model is
-// meter-centric (the Pi ingests per-meter JWTs via /ingest/raw and never writes a `devices`
-// row), so "Devices & Connectivity" reflects each meter and how recently it last reported.
+// meter-centric (the Pi pushes readings straight to Postgres under a per-site role and never
+// writes a `devices` row), so "Devices & Connectivity" reflects each meter and how recently
+// it last reported.
 export type DeviceConnectivity = {
   id: string;
   serialNumber: string;
@@ -702,10 +704,6 @@ export type DeviceConnectivity = {
   status: "online" | "degraded" | "offline";
   lastSeenAt: Date | null;
 };
-
-// The meter reports ~once a minute, so a gap of minutes means it stopped talking.
-const CONNECTIVITY_ONLINE_MS = 10 * 60 * 1000; // ≤10 min since last sample ⇒ online
-const CONNECTIVITY_DEGRADED_MS = 60 * 60 * 1000; // ≤60 min ⇒ degraded; older ⇒ offline
 
 // Map a set of meters to connectivity entries: last-seen = the meter's newest reading, status
 // from its staleness. One grouped query for the whole set.
@@ -731,8 +729,10 @@ async function meterConnectivity(
   return meterRows.map((m) => {
     const seen = latest.get(m.id) ?? null;
     const age = seen ? now - seen.getTime() : Number.POSITIVE_INFINITY;
-    const status =
-      age <= CONNECTIVITY_ONLINE_MS ? "online" : age <= CONNECTIVITY_DEGRADED_MS ? "degraded" : "offline";
+    // Staleness is judged against the gateway's UPLOAD cadence, not its 60s sampling
+    // tick (see meter-cadence.ts): readings arrive in batches, so a healthy meter's
+    // newest row ages up to a full upload period before the next batch lands.
+    const status = meterStatusFromAge(age);
     return { id: m.id, serialNumber: m.serialNumber, connectivityMode: null, status, lastSeenAt: seen };
   });
 }

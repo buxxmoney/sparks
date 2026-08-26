@@ -14,6 +14,7 @@ import {
 } from "@sparks/db";
 import { and, asc, eq, isNotNull } from "drizzle-orm";
 import { parseInvoiceWithClaude, persistParsedInvoice } from "./invoices";
+import { METER_DEGRADED_WITHIN_MINUTES } from "./meter-cadence";
 import { PreconditionError } from "./middleware";
 import { dispatchOperatorMeterDown } from "./notifications";
 import { hashBuffer, renderHtmlToPdf, renderReportHtml } from "./reports";
@@ -309,10 +310,14 @@ export async function detectDataGaps(meterId: string): Promise<void> {
 
 /**
  * Evaluate device offline status and create alerts.
+ *
+ * The default threshold is the same boundary the dashboard calls "offline"
+ * (see meter-cadence.ts) so a meter never shows as reporting normally while
+ * operators are being emailed that it's down, or vice versa.
  */
 export async function evaluateDeviceOffline(
   deviceId: string,
-  thresholdMinutes = 15,
+  thresholdMinutes = METER_DEGRADED_WITHIN_MINUTES,
 ): Promise<void> {
   const deviceList = await db.select().from(devices).where(eq(devices.id, deviceId)).limit(1);
 
@@ -410,7 +415,9 @@ export async function evaluateDeviceOffline(
  * rest. Returns how many devices were checked. Safe to run concurrently-guarded
  * by the caller (a slow sweep shouldn't overlap the next tick).
  */
-export async function monitorDeviceHealth(thresholdMinutes = 15): Promise<{ checked: number }> {
+export async function monitorDeviceHealth(
+  thresholdMinutes = METER_DEGRADED_WITHIN_MINUTES,
+): Promise<{ checked: number }> {
   const deviceRows = await db
     .select({ id: devices.id })
     .from(devices)

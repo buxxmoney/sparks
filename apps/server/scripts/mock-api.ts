@@ -135,29 +135,30 @@ function mockPeriodStart(now = new Date()): Date {
   return new Date(now.getFullYear(), now.getMonth(), 1);
 }
 
+// Mirrors the server's meter-cadence.ts. Gateways batch their 60s samples and upload
+// every 30 min, so "last seen 22 minutes ago" is a perfectly healthy meter — the mock
+// derives status from staleness (rather than hardcoding it) so the dashboard shows what
+// the real fleet shows.
+const REPORT_INTERVAL_MIN = 30;
+const meterStatus = (minutesAgo: number) =>
+  minutesAgo <= REPORT_INTERVAL_MIN + 5
+    ? "online"
+    : minutesAgo <= 2 * REPORT_INTERVAL_MIN + 5
+      ? "degraded"
+      : "offline";
+
 const devices = [
-  {
-    id: "dev_1",
-    serialNumber: "SPK-4411-0092",
-    status: "online",
-    connectivityMode: "lte",
-    lastSeenAt: new Date(Date.now() - 90_000).toISOString(),
-  },
-  {
-    id: "dev_2",
-    serialNumber: "SPK-4411-0117",
-    status: "online",
-    connectivityMode: "ethernet",
-    lastSeenAt: new Date(Date.now() - 45_000).toISOString(),
-  },
-  {
-    id: "dev_3",
-    serialNumber: "SPK-3302-0061",
-    status: "degraded",
-    connectivityMode: "lte",
-    lastSeenAt: new Date(Date.now() - 42 * 60_000).toISOString(),
-  },
-];
+  // Mid-cycle: sampled a minute ago, but the batch carrying it hasn't uploaded yet.
+  { id: "dev_1", serialNumber: "SPK-4411-0092", connectivityMode: "lte", minutesAgo: 22 },
+  // Just after an upload landed.
+  { id: "dev_2", serialNumber: "SPK-4411-0117", connectivityMode: "ethernet", minutesAgo: 2 },
+  // Missed a whole upload window — genuinely degraded.
+  { id: "dev_3", serialNumber: "SPK-3302-0061", connectivityMode: "lte", minutesAgo: 51 },
+].map(({ minutesAgo, ...d }) => ({
+  ...d,
+  status: meterStatus(minutesAgo),
+  lastSeenAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+}));
 
 const router = {
   session: {
