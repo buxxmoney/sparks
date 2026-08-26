@@ -13,7 +13,7 @@ import { CalendarRange, Check } from "lucide-react";
 import { useEffect, useState } from "react";
 
 /**
- * Operator-side billing-cycle editor, opened from the site dashboard.
+ * Operator-side billing-cycle editor, opened from the site dashboard's settings drawer.
  *
  * Deliberately mirrors the customer's "Billing cycle" card in site settings — same
  * two cycle shapes, same copy — because an operator adjusting the cycle to check a
@@ -102,7 +102,10 @@ export function OperatorBillingCycle({
               setCycle(v as typeof cycle);
               setMsg("idle");
             }}
-            width={320}
+            // Fills the drawer rather than the settings page's fixed 320px: the
+            // longest option ("Calendar month (1st → month end)") has to fit at
+            // phone width, where the drawer is only as wide as the viewport.
+            width="100%"
           />
 
           {cycle === "day_of_month" ? (
