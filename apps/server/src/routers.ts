@@ -90,6 +90,7 @@ import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
 import {
   adminAssignSiteTariffInput,
+  adminSetSiteBillingCycleInput,
   adminSiteTariffGetInput,
   alertsAcknowledgeInput,
   alertsAttachmentUrlInput,
@@ -99,6 +100,7 @@ import {
   billingPeriodsUpsertInput,
   billingPoliciesGetInput,
   billingPoliciesSetInput,
+  type BillingPoliciesSetInput,
   demandListIntervalsInput,
   devicesGetHealthInput,
   devicesGetInput,
@@ -963,10 +965,16 @@ export async function billingPoliciesGet(ctx: AuthContext, input: unknown) {
   return policy || null;
 }
 
-export async function billingPoliciesSet(ctx: AuthContext, input: unknown) {
-  const parsed = billingPoliciesSetInput.parse(input);
-  await requireSiteEditor(ctx, parsed.siteId);
-
+/**
+ * Write a site's billing cycle: close the active policy, insert the next version,
+ * and lay down the billing periods it implies.
+ *
+ * Split out of `billingPoliciesSet` because two callers reach it through DIFFERENT
+ * gates — the site's own editor (customer settings) and a Sparks platform operator
+ * (`adminSetSiteBillingCycle`). Authorization is the caller's job; this function
+ * assumes it has already happened.
+ */
+async function applyBillingCyclePolicy(parsed: BillingPoliciesSetInput) {
   const site = await db.query.sites.findFirst({
     where: eq(sites.id, parsed.siteId),
   });
@@ -1026,7 +1034,33 @@ export async function billingPoliciesSet(ctx: AuthContext, input: unknown) {
     console.error(`[billing] materialize periods failed for site ${parsed.siteId}:`, err);
   }
 
+  // The dashboard's "billing period to date" and energy-by-period reads are cached
+  // by site for READ_TTL. The whole point of changing the cycle is to watch those
+  // numbers move, so drop them now rather than serving up to 20s of the old window.
+  readCache.deletePrefix(`mtd:${parsed.siteId}:`);
+  readCache.deletePrefix(`ebp:${parsed.siteId}:`);
+
   return { ...newPolicy, periodsCreated };
+}
+
+export async function billingPoliciesSet(ctx: AuthContext, input: unknown) {
+  const parsed = billingPoliciesSetInput.parse(input);
+  await requireSiteEditor(ctx, parsed.siteId);
+  return applyBillingCyclePolicy(parsed);
+}
+
+/**
+ * Operator-side twin of `billingPoliciesSet`. Sparks operators are read-only on
+ * customer sites (the "operator" level ranks below editor), so they can't go
+ * through the customer endpoint — they mutate only via operator-gated endpoints,
+ * and this is the one for the billing cycle. Same effect as the customer saving
+ * it in site settings: the customer's dashboard and future invoices/bill checks
+ * follow the new cycle.
+ */
+export async function adminSetSiteBillingCycle(ctx: AuthContext, input: unknown) {
+  const parsed = adminSetSiteBillingCycleInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  return applyBillingCyclePolicy(parsed);
 }
 
 export async function billingPeriodsList(ctx: AuthContext, input: unknown) {

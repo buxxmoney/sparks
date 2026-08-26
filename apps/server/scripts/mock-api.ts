@@ -101,12 +101,39 @@ const energyPeriods = MONTHS.map((label, i) => ({
   reactiveEnergyKvarh: (68_000 + Math.cos(i * 0.9) * 9_000).toFixed(0),
 }));
 
+// The dashboard branches on `myLevel === "operator"` to render the operator view
+// (read-only banner, inline billing-cycle panel). Run with MOCK_LEVEL=operator to
+// work on that view; unset it and the mock behaves as the customer, as before.
+const MOCK_LEVEL = process.env.MOCK_LEVEL ?? "org_owner";
+
 const siteDetail = {
   ...sites[0],
   timezone: "Africa/Johannesburg",
   supplyZone: "City Power JHB",
   demandIntervalMinutes: 30,
+  myLevel: MOCK_LEVEL,
 };
+
+// The site's billing cycle, mutated by the settings panel so the whole loop —
+// save → periodStart moves → energy-to-date recomputes — is exercisable offline.
+const mockPolicy: { recurrence: "calendar_month" | "day_of_month"; anchorDay: number | null } = {
+  recurrence: "calendar_month",
+  anchorDay: null,
+};
+
+// Start of the current period under `mockPolicy`: the 1st, or the most recent
+// occurrence of the anchor day (previous month when today is before it).
+function mockPeriodStart(now = new Date()): Date {
+  if (mockPolicy.recurrence === "day_of_month" && mockPolicy.anchorDay) {
+    const day = mockPolicy.anchorDay;
+    const monthOffset = now.getDate() >= day ? 0 : -1;
+    // Day 0 of the next month = last day of this one, so an anchor past a short
+    // month's end clamps instead of rolling over.
+    const lastDay = new Date(now.getFullYear(), now.getMonth() + monthOffset + 1, 0).getDate();
+    return new Date(now.getFullYear(), now.getMonth() + monthOffset, Math.min(day, lastDay));
+  }
+  return new Date(now.getFullYear(), now.getMonth(), 1);
+}
 
 const devices = [
   {
@@ -162,12 +189,19 @@ const router = {
         totalApparentKva: "531.75",
       },
     })),
-    monthToDate: os.handler(async () => ({
-      periodStart: new Date(2026, 6, 1).toISOString(),
-      activeEnergyKwh: "61240.50",
-      peakDemandKva: "612.40",
-      reactiveEnergyKvarh: "18320.75",
-    })),
+    monthToDate: os.handler(async () => {
+      // Scale the accumulating registers by how far into the period we are, so
+      // changing the cycle visibly moves the numbers (peak demand doesn't
+      // accumulate, so it only drops when a shorter window excludes the peak).
+      const start = mockPeriodStart();
+      const days = Math.max(1, (Date.now() - start.getTime()) / 86_400_000);
+      return {
+        periodStart: start.toISOString(),
+        activeEnergyKwh: (days * 2_040).toFixed(2),
+        peakDemandKva: (days < 3 ? 498.6 : 612.4).toFixed(2),
+        reactiveEnergyKvarh: (days * 610).toFixed(2),
+      };
+    }),
     energyByPeriod: os.handler(async () => ({
       basis: "billing_period",
       periods: energyPeriods,
@@ -176,10 +210,28 @@ const router = {
   devices: {
     list: os.handler(async () => ({ devices })),
   },
+  billing: {
+    policies: {
+      get: os.handler(async () => ({
+        recurrence: mockPolicy.recurrence,
+        anchorDay: mockPolicy.anchorDay,
+        effectiveTo: null,
+      })),
+    },
+  },
   demand: {
     listIntervals: os.handler(async () => ({ intervals: makeIntervals() })),
   },
   admin: {
+    setSiteBillingCycle: os.handler(async ({ input }) => {
+      const { recurrence, anchorDay } = input as {
+        recurrence: "calendar_month" | "day_of_month";
+        anchorDay?: number;
+      };
+      mockPolicy.recurrence = recurrence;
+      mockPolicy.anchorDay = recurrence === "day_of_month" ? (anchorDay ?? 1) : null;
+      return { ...mockPolicy, version: 1, periodsCreated: 0 };
+    }),
     listOrganizations: os.handler(async () => ({
       organizations: [
         {

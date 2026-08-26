@@ -471,6 +471,11 @@ export const adminSiteTariffGetInput = z.object({
   siteId: z.string().uuid(),
 });
 
+// Operator-side billing-cycle edit. Deliberately the SAME shape as the customer's
+// billing.policies.set — an operator adjusting a site's cycle is doing exactly what
+// the customer can do in site settings, just through the operator-gated endpoint.
+export const adminSetSiteBillingCycleInput = billingPoliciesSetInput;
+
 // Operator Reviewed-history search + pagination.
 export const adminListReviewedBillsInput = z.object({
   query: z.string().max(200).optional(),

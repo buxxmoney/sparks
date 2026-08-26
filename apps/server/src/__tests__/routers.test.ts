@@ -19,6 +19,7 @@ import {
   metersGet,
   metersCreate,
   metersCommission,
+  adminSetSiteBillingCycle,
   billingPoliciesGet,
   billingPoliciesSet,
   billingPeriodsList,
@@ -475,6 +476,91 @@ describe("oRPC Routers", () => {
     it("should deny set policy without site access", async () => {
       try {
         await billingPoliciesSet(otherCtx, {
+          siteId,
+          recurrence: "calendar_month",
+          boundaryInclusivity: "half_open",
+        });
+        expect.unreachable();
+      } catch (e) {
+        expect(e instanceof ForbiddenError || e instanceof UnauthorizedError).toBe(true);
+      }
+    });
+
+    /* ── Operator-side billing-cycle edit (admin.setSiteBillingCycle) ── */
+    // Operators adjust a customer's cycle from the site dashboard to verify how the
+    // "billing period to date" figures are computed. They can't use the customer
+    // endpoint (read-only cross-tenant), so they get an operator-gated twin.
+
+    // A Sparks operator signed into their OWN org, reaching a customer's site.
+    const crossTenantOperatorCtx: AuthContext = {
+      userId: operatorUserId,
+      sessionId: "session-op-cross",
+      organizationId: "sparks-internal",
+    };
+
+    it("lets a platform operator set a customer site's cycle cross-tenant", async () => {
+      const result = await adminSetSiteBillingCycle(crossTenantOperatorCtx, {
+        siteId,
+        recurrence: "day_of_month",
+        anchorDay: 15,
+        boundaryInclusivity: "half_open",
+      });
+
+      expect(result.recurrence).toBe("day_of_month");
+      expect(result.anchorDay).toBe(15);
+      expect(result.version).toBe(1);
+
+      // It's the same write the customer would make — one active policy, readable
+      // back through the customer's own endpoint.
+      const active = await billingPoliciesGet(ownerCtx, { siteId });
+      expect(active?.recurrence).toBe("day_of_month");
+      expect(active?.anchorDay).toBe(15);
+      expect(active?.effectiveTo).toBeNull();
+    });
+
+    it("closes the previous policy and bumps the version, whoever wrote it", async () => {
+      await billingPoliciesSet(ownerCtx, {
+        siteId,
+        recurrence: "calendar_month",
+        boundaryInclusivity: "half_open",
+      });
+
+      const result = await adminSetSiteBillingCycle(crossTenantOperatorCtx, {
+        siteId,
+        recurrence: "day_of_month",
+        anchorDay: 7,
+        boundaryInclusivity: "half_open",
+      });
+      expect(result.version).toBe(2);
+
+      // Exactly one policy is left open — the operator's.
+      const open = await db.query.billingCyclePolicies.findMany({
+        where: eq(billingCyclePolicies.siteId, siteId),
+      });
+      const stillActive = open.filter((p) => p.effectiveTo === null);
+      expect(stillActive).toHaveLength(1);
+      expect(stillActive[0].anchorDay).toBe(7);
+    });
+
+    it("rejects a non-operator, even one with full access to the site", async () => {
+      // The org owner has site_admin-equivalent rights and can use the CUSTOMER
+      // endpoint — but the operator endpoint is gated on the platform flag alone.
+      try {
+        await adminSetSiteBillingCycle(ownerCtx, {
+          siteId,
+          recurrence: "calendar_month",
+          boundaryInclusivity: "half_open",
+        });
+        expect.unreachable();
+      } catch (e) {
+        expect(e instanceof ForbiddenError || e instanceof UnauthorizedError).toBe(true);
+      }
+    });
+
+    it("still refuses an operator on the customer's own set-policy endpoint", async () => {
+      // The read-only invariant holds: operators mutate only via admin endpoints.
+      try {
+        await billingPoliciesSet(crossTenantOperatorCtx, {
           siteId,
           recurrence: "calendar_month",
           boundaryInclusivity: "half_open",

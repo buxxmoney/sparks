@@ -13,6 +13,8 @@ import {
   MapPin,
   Clock,
   Settings,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Grid } from "@astryxdesign/core/Grid";
@@ -31,6 +33,7 @@ import { useMediaQuery } from "@/lib/useMediaQuery";
 import { client } from "@/lib/client";
 import { MetricStat, METRIC_HINTS, formatReading } from "@/components/metric";
 import { ConsumptionChart } from "@/components/charts/ConsumptionChart";
+import { OperatorBillingCycle } from "@/components/operator-billing-cycle";
 
 type BadgeVariant = "success" | "warning" | "error" | "neutral";
 
@@ -107,6 +110,12 @@ export default function SiteDetailsPage() {
     return () => clearInterval(id);
   }, []);
 
+  // Operators can open an inline settings panel to adjust this site's billing
+  // cycle — the window the "billing period to date" and peak-demand cards below
+  // are computed over. Saving bumps `tick`, so those cards refetch against the
+  // new window without a reload.
+  const [showOperatorSettings, setShowOperatorSettings] = useState(false);
+
   const { data: site, loading, error } = useRPC(() => client.sites.get({ siteId }), [siteId]);
   const { data: latest } = useRPC(() => client.readings.latest({ siteId }), [siteId, tick]);
   const { data: mtd } = useRPC(() => client.readings.monthToDate({ siteId }), [siteId, tick]);
@@ -166,7 +175,7 @@ export default function SiteDetailsPage() {
         <Banner
           status="info"
           title="Operator view — read-only"
-          description="You're viewing this customer site as a Sparks operator. Changes are made from the operator console."
+          description="You're viewing this customer site as a Sparks operator. Changes are made from the operator console, apart from the billing cycle below."
         />
       ) : null}
       {/* Header */}
@@ -197,7 +206,15 @@ export default function SiteDetailsPage() {
         {/* Invoices / bill checks / settings are the customer's workflow — an
             operator only monitors the live dashboard, so hide the whole action
             group for them (the server rejects these writes regardless). */}
-        {isOperator ? null : (
+        {isOperator ? (
+          <Button
+            label="Site settings"
+            variant="secondary"
+            size={btnSize}
+            icon={showOperatorSettings ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            onClick={() => setShowOperatorSettings((v) => !v)}
+          />
+        ) : (
           <Stack direction="horizontal" gap={2} wrap="wrap">
             <Button label="Bill checks" variant="primary" size={btnSize} icon={<Scale size={16} />} href={`/sites/${siteId}/bill-check`} />
             <Button label="Invoices" variant="secondary" size={btnSize} icon={<FileText size={16} />} href={`/sites/${siteId}/invoices`} />
@@ -212,6 +229,10 @@ export default function SiteDetailsPage() {
           block. Grid (not row-flex) so each card stretches to fill its column —
           row-flex wrappers let the cards shrink-wrap and left the tiles ragged.
           On narrow viewports the columns stack: load → energy → max demand. */}
+      {isOperator && showOperatorSettings ? (
+        <OperatorBillingCycle siteId={siteId} onSaved={() => setTick((t) => t + 1)} />
+      ) : null}
+
       <Grid columns={{ minWidth: 340, repeat: "fill" }} gap={4}>
         <Card padding={5} height="100%">
           <Stack gap={4} height="100%">
