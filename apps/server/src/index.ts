@@ -143,12 +143,15 @@ if (typeof Bun === "undefined") {
     },
   );
 
-  // Device-health monitor: sweep every few minutes so a meter that stops
-  // reporting raises an operator alert + email (operators don't watch the customer
-  // dashboards). Re-entrancy-guarded so a slow sweep can't overlap the next tick;
-  // disable with DEVICE_MONITOR_DISABLED=1.
+  // Device-health monitor: sweep at :00/:30 each hour, aligned with gateway
+  // upload cadence, so a meter that stops reporting raises an operator alert +
+  // email (operators don't watch the customer dashboards). Aligning to the
+  // upload schedule (rather than a fixed-period interval) means the DB only
+  // gets touched right after fresh readings land, letting Neon compute
+  // autosuspend the rest of the time. Re-entrancy-guarded so a slow sweep
+  // can't overlap the next tick; disable with DEVICE_MONITOR_DISABLED=1.
   if (process.env.DEVICE_MONITOR_DISABLED !== "1") {
-    const intervalMs = Number.parseInt(process.env.DEVICE_MONITOR_INTERVAL_MS || "300000"); // 5 min
+    const halfHourMs = 30 * 60 * 1000;
     let sweeping = false;
     const sweep = async () => {
       if (sweeping) return;
@@ -161,10 +164,22 @@ if (typeof Bun === "undefined") {
         sweeping = false;
       }
     };
-    const timer = setInterval(sweep, intervalMs);
-    // Don't let the monitor keep the process alive on shutdown.
-    if (typeof timer.unref === "function") timer.unref();
-    console.log(`Device-health monitor running every ${Math.round(intervalMs / 1000)}s`);
+    // Recomputed from the wall clock on every tick (rather than a plain
+    // setInterval) so drift from a slow sweep or a delayed timer never pushes
+    // later ticks off the :00/:30 mark.
+    const scheduleNextSweep = () => {
+      const now = new Date();
+      const msPastHalfHour =
+        (now.getMinutes() % 30) * 60_000 + now.getSeconds() * 1000 + now.getMilliseconds();
+      const msUntilNext = halfHourMs - msPastHalfHour;
+      const timer = setTimeout(() => {
+        void sweep().finally(scheduleNextSweep);
+      }, msUntilNext);
+      // Don't let the monitor keep the process alive on shutdown.
+      if (typeof timer.unref === "function") timer.unref();
+    };
+    scheduleNextSweep();
+    console.log("Device-health monitor aligned to :00/:30 each hour");
   }
 }
 
