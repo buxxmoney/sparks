@@ -35,6 +35,9 @@ export const appRouter = {
     // Assign a landlord tariff to a site + recompute its pending reconciliation.
     siteTariffGet: proc(V.adminSiteTariffGetInput, R.adminSiteTariffGet),
     assignSiteTariff: proc(V.adminAssignSiteTariffInput, R.adminAssignSiteTariff),
+    // Move a site onto a tariff picked from the published schedule catalogue.
+    tariffCatalogue: procNoInput(R.adminTariffCatalogue),
+    switchSiteTariff: proc(V.adminSwitchSiteTariffInput, R.adminSwitchSiteTariff),
     // Adjust a customer site's billing cycle from the operator side (same write
     // the customer makes in site settings; operators can't use that endpoint).
     setSiteBillingCycle: proc(V.adminSetSiteBillingCycleInput, R.adminSetSiteBillingCycle),
@@ -155,6 +158,10 @@ export const appRouter = {
   readings: {
     latest: proc(V.readingsLatestInput, R.readingsLatest),
     monthToDate: proc(V.readingsMonthToDateInput, R.readingsMonthToDate),
+    // Cost accrued so far this billing period, priced against the site's tariff.
+    billToDate: proc(V.readingsBillToDateInput, R.readingsBillToDate),
+    tariffSheet: proc(V.readingsTariffSheetInput, R.readingsTariffSheet),
+    billPeriods: proc(V.readingsBillPeriodsInput, R.readingsBillPeriods),
     energyByPeriod: proc(V.readingsEnergyByPeriodInput, R.readingsEnergyByPeriod),
   },
   demand: {

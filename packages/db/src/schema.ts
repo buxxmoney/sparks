@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -528,6 +529,13 @@ export const tariffProfiles = pgTable(
     distributor: text("distributor"),
     currency: text("currency").notNull().default("ZAR"),
     touSchedule: jsonb("tou_schedule"),
+    // Calculation rules a flat rate row cannot express: the percentage surcharge
+    // fraction, the minimum-demand floor, the reactive free allowance, VAT. Shaped
+    // { surchargeFractionOfSubtotal, minDemandKva, reactiveAllowanceFactorOfKwh,
+    // vatFraction } — all optional.
+    pricingRules: jsonb("pricing_rules"),
+    // Per-rule citations: [{ title, page, quote, appliesTo[], tariffScheduleId }].
+    sources: jsonb("sources"),
     effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
     effectiveTo: timestamp("effective_to", { withTimezone: true }),
     version: integer("version").notNull().default(1),
@@ -555,6 +563,12 @@ export const tariffRates = pgTable(
       precision: 12,
       scale: 2,
     }),
+    // Provenance for the customer-facing bill breakdown: `label` is the name the
+    // published schedule gives this rate, `source` cites the document it came from.
+    // Nullable — rates predating the tariff importer carry neither, and the API
+    // derives a fallback label from charge type + season + TOU period.
+    label: text("label"),
+    source: text("source"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -577,9 +591,23 @@ export const siteTariffAssignments = pgTable(
     role: siteTariffRole("role").notNull(),
     effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
     effectiveTo: timestamp("effective_to", { withTimezone: true }),
+    // Provenance for the assignment itself: when the decision was taken and by
+    // whom. `effective_from` is business time (when the tariff applies);
+    // `created_at` is record time (when someone entered it) — a correction keyed
+    // to a past date needs both.
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdByUserId: text("created_by_user_id"),
+    /** Free-text reason, e.g. "moved to Business — supply is under 100 kVA". */
+    note: text("note"),
   },
   (t) => ({
     siteIdx: index("site_tariff_idx").on(t.siteId, t.role),
+    // At most ONE open-ended assignment per (site, role): "currently activated"
+    // becomes a database fact instead of a convention. Without it two open rows
+    // can coexist and pricing silently picks one by sort order.
+    oneActive: uniqueIndex("site_tariff_one_active")
+      .on(t.siteId, t.role)
+      .where(sql`${t.effectiveTo} is null`),
   }),
 );
 

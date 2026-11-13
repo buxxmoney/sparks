@@ -6,9 +6,7 @@ import {
   ArrowLeft,
   FileText,
   Scale,
-  Activity,
   CalendarRange,
-  Gauge,
   Radio,
   MapPin,
   Clock,
@@ -22,7 +20,6 @@ import { Text } from "@astryxdesign/core/Text";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
-import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { Table, proportional } from "@astryxdesign/core/Table";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Link } from "@astryxdesign/core/Link";
@@ -31,7 +28,10 @@ import { useMediaQuery } from "@/lib/useMediaQuery";
 import { client } from "@/lib/client";
 import { MetricStat, METRIC_HINTS, formatReading } from "@/components/metric";
 import { ConsumptionChart } from "@/components/charts/ConsumptionChart";
+import { type BillPeriodView, BillToDate } from "@/components/bill-to-date";
+import { LoadingVeil } from "@/components/loading-veil";
 import { OperatorBillingCycle } from "@/components/operator-billing-cycle";
+import { OperatorTariff } from "@/components/operator-tariff";
 import { SettingsDrawer } from "@/components/settings-drawer";
 
 type BadgeVariant = "success" | "warning" | "error" | "neutral";
@@ -59,10 +59,6 @@ function timeAgo(at: string | Date): string {
   const hours = Math.floor(min / 60);
   if (hours < 24) return `${hours} h ago`;
   return d.toLocaleDateString([], { day: "numeric", month: "short" });
-}
-
-function shortTime(at: string | Date): string {
-  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 // Section header: a quiet icon + title, with optional right-aligned content.
@@ -116,13 +112,28 @@ export default function SiteDetailsPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const { data: site, loading, error } = useRPC(() => client.sites.get({ siteId }), [siteId]);
-  const { data: latest } = useRPC(() => client.readings.latest({ siteId }), [siteId, tick]);
-  const { data: mtd } = useRPC(() => client.readings.monthToDate({ siteId }), [siteId, tick]);
+  // Energy only: peak demand is no longer shown, and skipping it spares the
+  // per-interval scan it needs.
+  const { data: mtd } = useRPC(
+    () => client.readings.monthToDate({ siteId, includePeak: false }),
+    [siteId, tick],
+  );
+  // The period the cost card is showing. The energy card mirrors it; until the
+  // cost card reports (or when the site has no tariff) it falls back to the
+  // current period's month-to-date figure.
+  const [billPeriod, setBillPeriod] = useState<BillPeriodView | null>(null);
+  const followBill =
+    billPeriod !== null && (billPeriod.activeEnergyKwh !== null || billPeriod.isClosed);
+  const energyKwh = followBill ? billPeriod.activeEnergyKwh : mtd?.activeEnergyKwh;
+  const energyPeriodStart = followBill ? billPeriod.periodStart : mtd?.periodStart;
+  const energyPeriodEnd = followBill ? billPeriod.periodEnd : null;
+  const energyClosed = followBill && billPeriod.isClosed;
+  const shortDay = (iso: string) =>
+    new Date(iso).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
   const { data: devicesData } = useRPC(() => client.devices.list({ siteId }), [siteId, tick]);
   // The history chart owns its own data fetching (it varies by the day / period the user
   // picks in its controls), so the page no longer fetches intervals or energy-by-period.
 
-  const reading = latest?.reading;
   const devices = devicesData?.devices ?? [];
   // Below this width the devices table's minimum column widths exceed the
   // viewport and it spills; re-arrange each row into a stacked card instead.
@@ -131,16 +142,6 @@ export default function SiteDetailsPage() {
   const isNarrow = useMediaQuery("(max-width: 640px)");
   const btnSize = isNarrow ? "sm" : "md";
 
-  // Reactive power isn't stored on the instantaneous reading, but it's the third
-  // side of the power triangle: Q = √(S² − P²), with S = apparent (kVA), P = active
-  // (kW). Guard the root against tiny negatives from rounding.
-  const activeKw = reading?.totalPowerKw != null ? Number.parseFloat(reading.totalPowerKw) : null;
-  const apparentKva =
-    reading?.totalApparentKva != null ? Number.parseFloat(reading.totalApparentKva) : null;
-  const reactiveKvar =
-    activeKw != null && apparentKva != null && !Number.isNaN(activeKw) && !Number.isNaN(apparentKva)
-      ? Math.sqrt(Math.max(0, apparentKva * apparentKva - activeKw * activeKw))
-      : null;
   if (loading) {
     return (
       <Stack gap={6}>
@@ -222,100 +223,59 @@ export default function SiteDetailsPage() {
         )}
       </Stack>
 
-      {/* Live overview — Current load (power) leads on the left with apparent
-          power as the hero figure and active/reactive beneath it. On the right,
-          energy used this billing period sits directly above the peak-demand
-          block. Grid (not row-flex) so each card stretches to fill its column —
-          row-flex wrappers let the cards shrink-wrap and left the tiles ragged.
-          On narrow viewports the columns stack: load → energy → max demand. */}
-      <Grid columns={{ minWidth: 340, repeat: "fill" }} gap={4}>
+      {/* Overview — energy used this billing period on the left, what it is
+          estimated to cost on the right. Energy is the figure a customer actually
+          tracks; the instantaneous-load, reactive-energy and peak-demand tiles
+          that used to sit here were removed as noise. The energy card follows the
+          period selected on the cost card, so the two never describe different
+          periods. Stacks to one column on a phone. */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: isNarrow ? "1fr" : "minmax(260px, 1fr) minmax(0, 2fr)",
+          gap: 16,
+          alignItems: "stretch",
+        }}
+      >
         <Card padding={5} height="100%">
           <Stack gap={4} height="100%">
             <CardHead
-              icon={<Activity size={16} />}
-              title="Current load"
+              icon={<CalendarRange size={16} />}
+              title="Energy used"
               right={
-                reading?.time ? (
-                  <Stack direction="horizontal" gap={2} align="center">
-                    <StatusDot variant="success" label="Live" isPulsing />
-                    <Text type="supporting" size="sm">Updated {shortTime(reading.time)}</Text>
-                  </Stack>
+                energyPeriodStart ? (
+                  <Text type="supporting" size="sm">
+                    {energyClosed && energyPeriodEnd
+                      ? `${shortDay(energyPeriodStart)} – ${shortDay(energyPeriodEnd)}`
+                      : `since ${shortDay(energyPeriodStart)}`}
+                  </Text>
                 ) : null
               }
             />
-            {reading ? (
-              <>
+            <LoadingVeil active={billPeriod?.pending === true} label="Loading…">
+              <Stack gap={2}>
                 <MetricStat
-                  label="Apparent Power"
-                  hint={METRIC_HINTS.apparentPower}
-                  value={formatReading(apparentKva, 1)}
-                  unit="kVA"
-                  size="lg"
-                />
-                <div style={{ borderTop: "1px solid var(--color-border, #ebebeb)" }} />
-                <Grid columns={{ minWidth: 130, repeat: "fill" }} gap={4}>
-                  <MetricStat label="Active Power" hint={METRIC_HINTS.activePower} value={formatReading(activeKw, 1)} unit="kW" size="sm" />
-                  <MetricStat label="Reactive Power" hint={METRIC_HINTS.reactivePower} value={formatReading(reactiveKvar, 1)} unit="kVAr" size="sm" />
-                </Grid>
-              </>
-            ) : (
-              <Text type="supporting">No live readings yet for this site.</Text>
-            )}
-          </Stack>
-        </Card>
-
-        {/* Right column: energy-to-date above maximum demand; the demand card
-            grows to keep the column bottom-aligned with the load card. */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
-          <Card padding={5}>
-            <Stack gap={4}>
-              <CardHead
-                icon={<CalendarRange size={16} />}
-                title="Billing period to date"
-                right={
-                  mtd?.periodStart ? (
-                    <Text type="supporting" size="sm">
-                      since {new Date(mtd.periodStart).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })}
-                    </Text>
-                  ) : null
-                }
-              />
-              <Grid columns={{ minWidth: 140, repeat: "fill" }} gap={5}>
-                <MetricStat label="Active Energy" hint={METRIC_HINTS.activeEnergy} value={formatReading(mtd?.activeEnergyKwh, 0)} unit="kWh" />
-                <MetricStat label="Reactive Energy" hint={METRIC_HINTS.reactiveEnergy} value={formatReading(mtd?.reactiveEnergyKvarh, 0)} unit="kVArh" />
-              </Grid>
-            </Stack>
-          </Card>
-
-          <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-            <Card padding={5} height="100%">
-              <Stack gap={4} height="100%">
-                <CardHead
-                  icon={<Gauge size={16} />}
-                  title="Maximum demand"
-                  right={
-                    mtd?.periodStart ? (
-                      <Text type="supporting" size="sm">
-                        since {new Date(mtd.periodStart).toLocaleDateString([], { day: "numeric", month: "short" })}
-                      </Text>
-                    ) : null
-                  }
-                />
-                <MetricStat
-                  label="Peak Network Demand"
-                  hint={METRIC_HINTS.peakDemand}
-                  value={formatReading(mtd?.peakDemandKva, 1)}
-                  unit="kVA"
+                  label="Active Energy"
+                  hint={METRIC_HINTS.activeEnergy}
+                  value={formatReading(energyKwh, 0)}
+                  unit="kWh"
                   size="lg"
                 />
                 <Text type="supporting" size="sm">
-                  Highest {site.demandIntervalMinutes}-minute interval average this billing period.
+                  {energyClosed
+                    ? "Consumed over the full billing period."
+                    : "Consumed so far this billing period."}
                 </Text>
               </Stack>
-            </Card>
-          </div>
-        </div>
-      </Grid>
+            </LoadingVeil>
+          </Stack>
+        </Card>
+
+        {/* Estimated cost — priced from the same register readings as the energy
+            figure beside it. Renders nothing for customers whose site has no
+            tariff assigned, in which case the energy card stands alone. */}
+        <BillToDate siteId={siteId} isOperator={isOperator} tick={tick} onPeriod={setBillPeriod} />
+      </div>
 
       {/* Historical — 24h power series + energy across billing periods (switchable).
           The chart owns its header row (title + metric selector). */}
@@ -424,12 +384,13 @@ export default function SiteDetailsPage() {
         </Stack>
       </Card>
 
-      {/* Operator settings, as a right-hand drawer over the dashboard. Only the
-          billing cycle lives here for now — everything else an operator could
-          change is still done from the operator console. */}
+      {/* Operator settings, as a right-hand drawer over the dashboard: the billing
+          cycle and the tariff. Everything else an operator could change is still
+          done from the operator console. */}
       {isOperator ? (
         <SettingsDrawer isOpen={settingsOpen} onOpenChange={setSettingsOpen} title="Site settings">
           <OperatorBillingCycle siteId={siteId} onSaved={() => setTick((t) => t + 1)} />
+          <OperatorTariff siteId={siteId} onSaved={() => setTick((t) => t + 1)} />
         </SettingsDrawer>
       ) : null}
     </Stack>

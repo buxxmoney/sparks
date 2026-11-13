@@ -471,6 +471,16 @@ export const adminSiteTariffGetInput = z.object({
   siteId: z.string().uuid(),
 });
 
+// Put a site on a tariff from the published schedule catalogue. Unlike
+// adminAssignSiteTariffInput (hand-typed rates), the rates come from the schedule,
+// so the operator only picks a tariff. A site has one tariff for all periods, so
+// there is no effective date to choose.
+export const adminSwitchSiteTariffInput = z.object({
+  siteId: z.string().uuid(),
+  tariffId: z.string().min(1).max(100),
+  note: z.string().max(500).optional(),
+});
+
 // Operator-side billing-cycle edit. Deliberately the SAME shape as the customer's
 // billing.policies.set — an operator adjusting a site's cycle is doing exactly what
 // the customer can do in site settings, just through the operator-gated endpoint.
@@ -569,6 +579,9 @@ export const readingsMonthToDateInput = z.object({
   // Optional reference instant; defaults to server "now". Used to derive the
   // start-of-month boundary for the month-to-date window.
   asOf: z.coerce.date().optional(),
+  // Peak demand needs every interval of the period scanned; energy needs two
+  // readings. Callers that only show energy pass false to skip the scan.
+  includePeak: z.boolean().optional(),
 });
 
 // Total active energy (kWh) bucketed per billing period, for the "energy across
@@ -582,6 +595,30 @@ export const readingsEnergyByPeriodInput = z.object({
   // day/week/month; "billing_period" (default) uses the site's real billing periods,
   // falling back to calendar months when the site has none.
   granularity: z.enum(["day", "week", "month", "billing_period"]).optional(),
+});
+
+// Cost accrued so far in the site's current billing period, priced against its
+// assigned landlord tariff. Deliberately has no "projection" knob — see
+// .claude/decisions.md on why the live estimate is cost-to-date only.
+export const readingsBillToDateInput = z.object({
+  siteId: z.string().uuid(),
+  // Optional reference instant; defaults to server "now". The window priced is
+  // [periodStart, asOf), so this makes the estimate reproducible in tests.
+  asOf: z.coerce.date().optional(),
+});
+
+// The billing periods a customer can pick between on the cost card. Returns the
+// trailing `limit` periods under the site's own cycle, newest first.
+export const readingsBillPeriodsInput = z.object({
+  siteId: z.string().uuid(),
+  limit: z.number().int().min(1).max(24).default(6).optional(),
+});
+
+// The complete published rate card for a site's assigned tariff — every line item
+// the tariff can charge, not only the ones that cost something this period — plus a
+// download link for the approved schedule document it was taken from.
+export const readingsTariffSheetInput = z.object({
+  siteId: z.string().uuid(),
 });
 
 // Time-series demand intervals for charting a site's load over a window (docs/02 §4.1
@@ -691,5 +728,8 @@ export type InvoicesLockInput = z.infer<typeof invoicesLockInput>;
 
 export type ReadingsLatestInput = z.infer<typeof readingsLatestInput>;
 export type ReadingsMonthToDateInput = z.infer<typeof readingsMonthToDateInput>;
+export type ReadingsBillToDateInput = z.infer<typeof readingsBillToDateInput>;
+export type ReadingsTariffSheetInput = z.infer<typeof readingsTariffSheetInput>;
+export type ReadingsBillPeriodsInput = z.infer<typeof readingsBillPeriodsInput>;
 export type ReadingsEnergyByPeriodInput = z.infer<typeof readingsEnergyByPeriodInput>;
 export type DemandListIntervalsInput = z.infer<typeof demandListIntervalsInput>;

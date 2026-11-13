@@ -1,0 +1,1192 @@
+{
+  "meta": {
+    "schema_version": "1.2",
+    "issuer": "City Power Johannesburg",
+    "title": "Schedule of Approved Tariffs for FY26/27",
+    "financial_year": "2026/27",
+    "document_date": "2026-07-01",
+    "currency": "ZAR",
+    "vat_inclusive": false,
+    "sources": {
+      "rates": "City Power 'Schedule of Approved Tariffs for FY26/27' (8 pp, dated 01 July 2026). The source PDF is stored alongside this file as 2027-COJ.pdf (sha256 82ae90273dd458a8cf6aad6f5d806641789c3c0d0bf24cf5bcd12ba42301697a), so every rate here can be checked against the document it was transcribed from.",
+      "rules": "CoJ Council Annexure 4, 'Amendment of Tariff of Charges for Electricity Services 1 July 2025 - 30 June 2026' (electricity pp. 40-53 of the 259-page CoJ budget document, PDF dated June 2025). Rules are FY25/26 text and are ASSUMED unchanged for FY26/27 unless the FY26/27 schedule says otherwise. The 259-page file contains no FY26/27 tariffs."
+    },
+    "units": {
+      "energy_rate": "cents per kWh (c/kWh), excl. VAT",
+      "service_and_capacity_charges": "Rand per month (R/month), excl. VAT",
+      "demand_charge": "Rand per kVA (R/kVA), excl. VAT",
+      "reactive_energy_charge": "cents per kVArh (c/kVArh), excl. VAT"
+    },
+    "schema_notes": [
+      "energy_charges is a flat list of rate rows. season: all|summer|winter. period: all|peak|standard|off_peak. block/up_to_kwh are null for non-block rows.",
+      "Block tariffs: up_to_kwh is the inclusive upper bound of the block (null = unbounded). Blocks are consecutive. Thresholds are per calendar month (confirmed: FY25/26 table header 'Consumption block kWh/month').",
+      "null in fixed_charges / demand_charges / reactive_energy_charge means the source lists no such charge for that tariff.",
+      "capacity_charge_r_per_month is what the FY25/26 annexure calls the 'Network charge'. Same charge, renamed in the FY26/27 schedule (60A single-phase R694.58 appears under both names).",
+      "Season month ranges are in the top-level 'seasons' object.",
+      "Calculation rules that a rate row alone does not capture (reactive energy, minimum demand, surcharges, prepaid reset, reseller treatment) are in 'billing_rules' and 'surcharges'. Do not compute reactive or demand charges from the rate fields alone."
+    ],
+    "source_corrections": [
+      "'>500Wh' in the source (Prepaid Low/High, Reseller Conventional) read as '>500kWh'.",
+      "Weekday off-peak printed as '12h00-06h00'; interpreted as 22h00-06h00 (only reading that covers the 24h day without overlap).",
+      "Saturday/public-holiday standard period printed as '18h00-20h0'; interpreted as 18h00-20h00.",
+      "Both TOU typos are also in the FY25/26 council annexure (5.4.7), so they are errors in the source, not transcription errors. The interpretations above are still inferences."
+    ],
+    "data_flags": [
+      "Cross-check vs FY25/26 annexure (electricity, incl. TOU tariffs): 100 of 105 comparable rates rose by 9.0% (+/-0.15%), which corroborates the transcription. Reactive energy rose 9.0% (42.43 -> 46.25 c/kVArh). Exceptions: Prepaid Low block 3 (+11.5%), Prepaid High capacity charge (R130 -> R140, +7.7%), Prepaid High service charge (unchanged R70), Single Phase 60A service and capacity charges (both unchanged from FY25/26). Stored as printed in the FY26/27 schedule; may be deliberate policy.",
+      "Industrial LV (TOU) demand charge R461.28/kVA vs R461.22 for non-TOU LV is correct: FY25/26 was R423.15 (TOU) vs R423.10 (non-TOU), and both scale by 9.0%.",
+      "Embedded generator rates are exactly +15.0% on the FY25/26 annexure values (108.35 and 89.79). The FY25/26 budget schedule elsewhere in the same document shows slightly different values (108.67 and 90.05); FY26/27 matches the annexure figures.",
+      "FY25/26 prepaid rule 1.7.17 says customers 'buy the initial 500 kWh in the month at the first block tariff', which conflicts with the 0-350 / 351-500 / >500 prepaid block tables in both years. Data follows the tables.",
+      "FY25/26 also had an Industrial HV (TOU) tariff, a 'Robot Intersections' rate (R491.72) and a 'Streetlights & Billboard' rate (R551.23). None appear in the FY26/27 schedule, so they are not in this file."
+    ]
+  },
+  "seasons": {
+    "summer": {
+      "months": [
+        9,
+        10,
+        11,
+        12,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "label": "September - May (9 months)"
+    },
+    "winter": {
+      "months": [
+        6,
+        7,
+        8
+      ],
+      "label": "June - August (3 months)"
+    },
+    "source": "FY25/26 annexure rules 1.7.15-1.7.16, 2.4.2-2.4.3, 3.x.2-3.x.3, 4.4.5-4.4.6. Applies to seasonal, business, agricultural and LPU tariffs.",
+    "confirmed_for_industrial_tou": "FY25/26 annexure Section 5 labels TOU rates 'Summer: September - May' / 'Winter: June - August'.",
+    "unconfirmed": [
+      "Residential TOU labels rates 'Summer'/'Winter' without stating months; assumed to follow the same ranges.",
+      "Wheeling discount uses 'High Season'/'Low Season'; not defined in either source. Presumed high = winter, low = summer."
+    ]
+  },
+  "network_surcharge": {
+    "rate_c_per_kwh": 6.0,
+    "applies_to": "all customers, in addition to tariff charges",
+    "residential_exemption": {
+      "exempt_first_kwh_per_month": 500
+    },
+    "interpretation": "Marginal: only kWh above 500 in the month attract the surcharge for residential customers. Consistent with FY25/26 wording ('residential consumption beyond 500kWh per month will be subject to this levy') and the FY26/27 wording ('exempt for the first 500kWh')."
+  },
+  "surcharges": [
+    {
+      "id": "business_lpu_2pct_surcharge",
+      "rate_percent": 2.0,
+      "applies_to_categories": [
+        "business",
+        "industrial"
+      ],
+      "applies_to_note": "Source says 'business and large power user customers'. Agriculture and residential are not mentioned (treated as not applicable).",
+      "additional_to_tariff_charges": true,
+      "source": "FY25/26 annexure (in force since 1 July 2020). The FY25/26 tariff schedule in the same document is stated to be 'exclusive of the 6c/kWh Network Surcharge, 2% Surcharge on Business and Large Power Users and VAT'.",
+      "status": "IN_FORCE__CONFIRMED_AGAINST_LANDLORD_BILL",
+      "default_apply": true,
+      "basis": "all_tariff_charges",
+      "note": "Confirmed against a real business-tariff bill: every Metronomic reading return for unit F112 carries 'JHB E LVD NON-TOU BUSINESS SURCH Basic @ R0.0200' levied on the energy + demand + reactive + service + network lines, with the 6c/kWh network surcharge excluded from the base. The FY26/27 City Power schedule does not restate the surcharge, but it remains in force.",
+      "basis_definition": "Sum of the ROUNDED line items for energy, demand, reactive energy, service charge and capacity (network) charge. EXCLUDES the 6c/kWh network surcharge, any landlord/generation or other non-municipal charges, and VAT. Applied BEFORE the network surcharge is added."
+    }
+  ],
+  "billing_rules": {
+    "reactive_energy": {
+      "applies_to": [
+        "industrial_lv",
+        "industrial_mv",
+        "industrial_lv_tou",
+        "industrial_mv_tou"
+      ],
+      "pf_threshold": 0.96,
+      "free_allowance_fraction_of_kwh": 0.3,
+      "period": "entire billing period (totals, not per interval or per TOU period)",
+      "formula": "chargeable_kvarh = max(0, total_kvarh_supplied - 0.30 * total_kwh); charge_rand = chargeable_kvarh * rate_c_per_kvarh / 100",
+      "notes": [
+        "Source (4.4.1): customers with PF below 0.96 are billed for reactive energy supplied in excess of 30% (0.96 PF) of total kWh for the billing period. The rate is NOT applied to total kVArh.",
+        "Only the 30% test is needed; the PF check is the same condition (30% kVArh:kWh ~ PF 0.958, rounded to 0.96 in the source).",
+        "Stated identically for the LPU tariffs (4.4.1) and the Industrial TOU tariffs (5.4.1) in the FY25/26 annexure, so it applies to all four."
+      ]
+    },
+    "minimum_demand": {
+      "applies_to_confirmed": [
+        "industrial_lv",
+        "industrial_mv",
+        "industrial_lv_tou",
+        "industrial_mv_tou"
+      ],
+      "applies_to_presumed": [],
+      "rule": "billed_demand_kva = max(measured_demand_kva, 70, 0.80 * average(three highest demands in the preceding 12 months))",
+      "components_kva": [
+        {
+          "type": "actual_measured_demand"
+        },
+        {
+          "type": "fixed",
+          "kva": 70
+        },
+        {
+          "type": "preceding_12m_top3_average_fraction",
+          "fraction": 0.8
+        }
+      ],
+      "charge": "demand_charge_rand = billed_demand_kva * demand_r_per_kva",
+      "notes": [
+        "Stated identically under Large Consumers (4.3.1) and Industrial TOU (5.3.1) in the FY25/26 annexure.",
+        "The 80% look-back component has applied since 1 July 2021. The source does not say whether 'three highest demands' means monthly billed maxima; the standard reading is the three highest monthly maximum demands.",
+        "The demand charge is the same in summer and winter (R423.10 both seasons in FY25/26), so a single all-season rate is stored."
+      ]
+    },
+    "prepaid": {
+      "meter_reset": "monthly",
+      "note": "Prepaid meters reset at the start of each month; blocks restart. See meta.data_flags on the conflicting '500 kWh at first block' wording."
+    },
+    "eligibility": {
+      "business_max_kva": 100,
+      "business_over_100kva": "automatically converted to Large Consumers unless a special concession is granted",
+      "large_consumer_min_kva": 100,
+      "voltage_categories": {
+        "low": {
+          "max_v": 1000
+        },
+        "medium": {
+          "min_v_exclusive": 1000,
+          "max_v": 33000
+        },
+        "high": {
+          "min_v_exclusive": 33000
+        }
+      },
+      "residential_tou_requires": "automated meter reading (AMR) capable meter",
+      "agriculture_max_demand_kva": 40,
+      "residential_over_100kva": "may, on application, be charged under Large Consumers",
+      "conflict_note": "FY25/26 annexure puts the Large Consumer threshold at >100 kVA. The FY26/27 City Power schedule puts LPU LV at 70-1000 kVA and LPU MV at >=800 kVA (see large_power_user.qualification). The two are inconsistent; the FY26/27 schedule is stored as the primary qualification below."
+    },
+    "resellers": {
+      "residential_reseller_tariff_requires": [
+        "application to City Power",
+        "affidavit declaring number of units in use"
+      ],
+      "mixed_use": "no residential reseller tariff unless split metering isolates supply to residential living units",
+      "per_unit_treatment": "Source 1.7.13 / 3.x.6: 'normal consumption tariffs will apply, as per unit in the complex, rather than the tariff that would be deemed appropriate for the complex as an aggregate.'",
+      "note": "Ambiguous whether block thresholds are applied per declared unit. Not encoded as a calculation; confirm with City Power before relying on it in the tenant reconciliation logic."
+    },
+    "extended_social_package": {
+      "applies_to": "residential customers approved by CoJ Social Development",
+      "max_free_kwh_per_month": 150,
+      "limited_to_actual_consumption": true,
+      "carry_over_unused": false,
+      "cash_redeemable": false,
+      "billed_customers": "applied as a bill credit equal to the monetary value of the allocated free bundle"
+    },
+    "tariff_change": {
+      "min_months_on_new_tariff": 12,
+      "note": "Source states this for business tariff changes and residential flat-to-seasonal changes."
+    }
+  },
+  "tou_periods": {
+    "applies_to_confirmed": [
+      "industrial_lv_tou",
+      "industrial_mv_tou"
+    ],
+    "applies_to_presumed": [
+      "residential_tou_le_80a"
+    ],
+    "source_note": "The annexure defines these periods once, in the Industrial TOU section (5.4.7). The FY26/27 City Power schedule lists them once at the end without tying them to a tariff. Applying them to residential TOU is an assumption.",
+    "interval_convention": "start inclusive, end exclusive, 24-hour HH:MM local time; '24:00' = end of day. Intervals crossing midnight in the source are split at midnight.",
+    "precedence": "public_holiday overrides the weekday/saturday/sunday schedule (assumed - not stated explicitly in source).",
+    "day_types": {
+      "weekday": {
+        "source_text": "Peak: 07h00-10h00 and 18h00-20h00; Standard: 06h00-7h00, 10h00-18h00 and 20h00-22h00; Off-Peak: 12h00-06h00",
+        "peak": [
+          {
+            "start": "07:00",
+            "end": "10:00"
+          },
+          {
+            "start": "18:00",
+            "end": "20:00"
+          }
+        ],
+        "standard": [
+          {
+            "start": "06:00",
+            "end": "07:00"
+          },
+          {
+            "start": "10:00",
+            "end": "18:00"
+          },
+          {
+            "start": "20:00",
+            "end": "22:00"
+          }
+        ],
+        "off_peak": [
+          {
+            "start": "00:00",
+            "end": "06:00"
+          },
+          {
+            "start": "22:00",
+            "end": "24:00"
+          }
+        ]
+      },
+      "saturday": {
+        "source_text": "Peak: None; Standard: 07h00-12h00 and 18h00-20h0; Off-Peak: 12h00-18h00 and 20h00-07h00",
+        "peak": [],
+        "standard": [
+          {
+            "start": "07:00",
+            "end": "12:00"
+          },
+          {
+            "start": "18:00",
+            "end": "20:00"
+          }
+        ],
+        "off_peak": [
+          {
+            "start": "00:00",
+            "end": "07:00"
+          },
+          {
+            "start": "12:00",
+            "end": "18:00"
+          },
+          {
+            "start": "20:00",
+            "end": "24:00"
+          }
+        ]
+      },
+      "sunday": {
+        "source_text": "Standard: 17h00-19h00; Off-Peak: 19h00-17h00",
+        "peak": [],
+        "standard": [
+          {
+            "start": "17:00",
+            "end": "19:00"
+          }
+        ],
+        "off_peak": [
+          {
+            "start": "00:00",
+            "end": "17:00"
+          },
+          {
+            "start": "19:00",
+            "end": "24:00"
+          }
+        ]
+      },
+      "public_holiday": {
+        "source_text": "Peak: None; Standard: 07h00-12h00 and 18h00-20h00; Off-Peak: 12h00-18h00 and 20h00-07h00",
+        "peak": [],
+        "standard": [
+          {
+            "start": "07:00",
+            "end": "12:00"
+          },
+          {
+            "start": "18:00",
+            "end": "20:00"
+          }
+        ],
+        "off_peak": [
+          {
+            "start": "00:00",
+            "end": "07:00"
+          },
+          {
+            "start": "12:00",
+            "end": "18:00"
+          },
+          {
+            "start": "20:00",
+            "end": "24:00"
+          }
+        ]
+      }
+    }
+  },
+  "tariffs": [
+    {
+      "id": "residential_prepaid_low",
+      "category": "residential",
+      "name": "Residential Prepaid Low",
+      "energy_structure": "block",
+      "energy_charges": [
+        {
+          "season": "all",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 350,
+          "rate_c_per_kwh": 272.37
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 333.18
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 413.06
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": null,
+        "capacity_charge_r_per_month": null
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "residential_prepaid_high",
+      "category": "residential",
+      "name": "Residential Prepaid High",
+      "energy_structure": "block",
+      "energy_charges": [
+        {
+          "season": "all",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 350,
+          "rate_c_per_kwh": 290.46
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 333.18
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 379.64
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 70.0,
+        "capacity_charge_r_per_month": 140.0
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "residential_single_phase_60a",
+      "category": "residential",
+      "name": "Residential Single Phase 60A",
+      "energy_structure": "block",
+      "energy_charges": [
+        {
+          "season": "all",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 288.27
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 330.82
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 355.23
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 374.79
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 393.19
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 235.79,
+        "capacity_charge_r_per_month": 694.58
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "residential_single_phase_80a",
+      "category": "residential",
+      "name": "Residential Single Phase 80A",
+      "energy_structure": "block",
+      "energy_charges": [
+        {
+          "season": "all",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 288.27
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 330.82
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 355.23
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 374.79
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 393.19
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 304.12,
+        "capacity_charge_r_per_month": 985.11
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "residential_three_phase_le_80a",
+      "category": "residential",
+      "name": "Residential Three Phase (<= 80A)",
+      "energy_structure": "block",
+      "energy_charges": [
+        {
+          "season": "all",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 280.76
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 322.21
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 345.98
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 365.03
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 382.94
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 304.12,
+        "capacity_charge_r_per_month": 1227.18
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "residential_reseller_conventional_le_80a",
+      "category": "residential",
+      "name": "Residential Reseller Conventional (<=80A)",
+      "energy_structure": "block",
+      "energy_charges": [
+        {
+          "season": "all",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 350,
+          "rate_c_per_kwh": 261.41
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 299.86
+        },
+        {
+          "season": "all",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 341.68
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 305.56,
+        "capacity_charge_r_per_month": 1232.94
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "residential_seasonal_le_80a",
+      "category": "residential",
+      "name": "Residential Seasonal (<=80A)",
+      "energy_structure": "seasonal_block",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 267.03
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 308.48
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 332.26
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 351.3
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 369.22
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 318.57
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 360.03
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 383.79
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 395.06
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 420.77
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 304.12,
+        "capacity_charge_r_per_month": 1227.18
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "residential_tou_le_80a",
+      "category": "residential",
+      "name": "Residential Time of Use (<=80A)",
+      "energy_structure": "tou",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 340.42
+        },
+        {
+          "season": "summer",
+          "period": "standard",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 269.3
+        },
+        {
+          "season": "summer",
+          "period": "off_peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 211.86
+        },
+        {
+          "season": "winter",
+          "period": "peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 783.2
+        },
+        {
+          "season": "winter",
+          "period": "standard",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 320.83
+        },
+        {
+          "season": "winter",
+          "period": "off_peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 226.39
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 304.12,
+        "capacity_charge_r_per_month": 1227.18
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "business_conventional_prepaid",
+      "category": "business",
+      "name": "Business Conventional/Prepaid",
+      "energy_structure": "seasonal_block",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 380.52
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 417.67
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 437.99
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 453.96
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 468.69
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 398.37
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 433.7
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 453.06
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 468.71
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 482.28
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 890.45,
+        "capacity_charge_r_per_month": 853.72
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "business_conventional_reseller",
+      "category": "business",
+      "name": "Business Conventional Reseller",
+      "energy_structure": "seasonal_block",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 342.47
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 375.9
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 394.19
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 408.56
+        },
+        {
+          "season": "summer",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 421.82
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 1,
+          "up_to_kwh": 500,
+          "rate_c_per_kwh": 358.53
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 2,
+          "up_to_kwh": 1000,
+          "rate_c_per_kwh": 390.33
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 3,
+          "up_to_kwh": 2000,
+          "rate_c_per_kwh": 407.75
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 4,
+          "up_to_kwh": 3000,
+          "rate_c_per_kwh": 421.84
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": 5,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 434.05
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 916.63,
+        "capacity_charge_r_per_month": 878.85
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "agriculture",
+      "category": "agriculture",
+      "name": "Agriculture",
+      "energy_structure": "seasonal_flat",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "all",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 328.07
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 379.66
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 916.63,
+        "capacity_charge_r_per_month": 1232.94
+      },
+      "demand_charges": {
+        "demand_r_per_kva": null
+      },
+      "reactive_energy_charge": null,
+      "notes": []
+    },
+    {
+      "id": "industrial_lv",
+      "category": "industrial",
+      "name": "Industrial LV",
+      "energy_structure": "seasonal_flat",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "all",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 284.96
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 333.79
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 1527.71,
+        "capacity_charge_r_per_month": 2332.96
+      },
+      "demand_charges": {
+        "demand_r_per_kva": 461.22
+      },
+      "reactive_energy_charge": {
+        "rate_c_per_kvarh": 46.25,
+        "rule_ref": "billing_rules.reactive_energy"
+      },
+      "notes": []
+    },
+    {
+      "id": "industrial_mv",
+      "category": "industrial",
+      "name": "Industrial MV",
+      "energy_structure": "seasonal_flat",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "all",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 266.01
+        },
+        {
+          "season": "winter",
+          "period": "all",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 314.85
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 1833.23,
+        "capacity_charge_r_per_month": 9899.66
+      },
+      "demand_charges": {
+        "demand_r_per_kva": 431.11
+      },
+      "reactive_energy_charge": {
+        "rate_c_per_kvarh": 46.25,
+        "rule_ref": "billing_rules.reactive_energy"
+      },
+      "notes": []
+    },
+    {
+      "id": "industrial_lv_tou",
+      "category": "industrial",
+      "name": "Industrial LV (TOU)",
+      "energy_structure": "tou",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 322.0
+        },
+        {
+          "season": "summer",
+          "period": "standard",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 242.42
+        },
+        {
+          "season": "summer",
+          "period": "off_peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 186.35
+        },
+        {
+          "season": "winter",
+          "period": "peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 766.24
+        },
+        {
+          "season": "winter",
+          "period": "standard",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 292.56
+        },
+        {
+          "season": "winter",
+          "period": "off_peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 200.44
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 2444.32,
+        "capacity_charge_r_per_month": 2185.32
+      },
+      "demand_charges": {
+        "demand_r_per_kva": 461.28
+      },
+      "reactive_energy_charge": {
+        "rate_c_per_kvarh": 46.25,
+        "rule_ref": "billing_rules.reactive_energy"
+      },
+      "notes": [
+        "Demand charge printed as R461.28/kVA, vs R461.22/kVA on Industrial LV (non-TOU). Stored as printed; possible typo in source."
+      ]
+    },
+    {
+      "id": "industrial_mv_tou",
+      "category": "industrial",
+      "name": "Industrial MV (TOU)",
+      "energy_structure": "tou",
+      "energy_charges": [
+        {
+          "season": "summer",
+          "period": "peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 322.0
+        },
+        {
+          "season": "summer",
+          "period": "standard",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 242.42
+        },
+        {
+          "season": "summer",
+          "period": "off_peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 186.35
+        },
+        {
+          "season": "winter",
+          "period": "peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 766.24
+        },
+        {
+          "season": "winter",
+          "period": "standard",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 292.56
+        },
+        {
+          "season": "winter",
+          "period": "off_peak",
+          "block": null,
+          "up_to_kwh": null,
+          "rate_c_per_kwh": 200.44
+        }
+      ],
+      "fixed_charges": {
+        "service_charge_r_per_month": 3360.96,
+        "capacity_charge_r_per_month": 9347.51
+      },
+      "demand_charges": {
+        "demand_r_per_kva": 431.11
+      },
+      "reactive_energy_charge": {
+        "rate_c_per_kvarh": 46.25,
+        "rule_ref": "billing_rules.reactive_energy"
+      },
+      "notes": []
+    }
+  ],
+  "alternative_supply": {
+    "embedded_generators": [
+      {
+        "id": "residential_embedded_generator",
+        "name": "Residential Embedded Generator",
+        "rate_c_per_kwh": 124.6
+      },
+      {
+        "id": "business_lpu_embedded_generator_le_1mw",
+        "name": "Business & LPU Embedded Generators (<=1MW)",
+        "rate_c_per_kwh": 103.26
+      }
+    ],
+    "embedded_generators_note": "Neither document says 'credit' or 'buy-back'. Context (bidirectional meter requirement, feed-in-only generators treated as a separate supplier under a PPA) indicates this is the rate for energy fed back to the grid, but that is an inference.",
+    "embedded_generators_conditions": {
+      "source": "FY25/26 annexure Section 6 'Embedded Generator Minimum Conditions'",
+      "max_generation_capacity_mw": 1,
+      "customer_must_be": "net consumer at City Power, grid-tied, registered with City Power",
+      "metering": "bidirectional meter required if the generator can ever feed back into the grid",
+      "required_tariff_structure": {
+        "residential": "time-of-use conventional (prepaid customers must migrate)",
+        "business_and_lpu": "conventional (prepaid customers must migrate)"
+      },
+      "feed_in_only_generators": "treated as an additional supplier under a negotiated power purchase agreement, not this tariff",
+      "status": "approved tariffs are interim/pilot pending licensing under the Electricity Regulation Act"
+    },
+    "wheeling_discount_rates_c_per_kwh": {
+      "high_season": {
+        "peak": 597.44,
+        "standard": 149.35,
+        "off_peak": 99.58
+      },
+      "low_season": {
+        "peak": 247.93,
+        "standard": 139.4,
+        "off_peak": 99.58
+      }
+    }
+  },
+  "large_power_user": {
+    "qualification": {
+      "lv": {
+        "min_kva": 70,
+        "max_kva": 1000,
+        "voltage": "400V AC"
+      },
+      "mv": {
+        "min_kva": 800,
+        "voltage": [
+          "11000V AC",
+          "6600V AC"
+        ]
+      },
+      "source": "City Power FY26/27 schedule, p.8. Conflicts with FY25/26 annexure threshold of >100 kVA; see billing_rules.eligibility.conflict_note."
+    }
+  }
+}

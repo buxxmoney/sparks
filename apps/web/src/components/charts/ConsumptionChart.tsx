@@ -18,6 +18,7 @@ import { Selector } from "@astryxdesign/core/Selector";
 import { Text } from "@astryxdesign/core/Text";
 import { InfoLabel, METRIC_HINTS } from "@/components/metric";
 import { useRPC } from "@/lib/useRPC";
+import { LoadingVeil } from "@/components/loading-veil";
 import { client } from "@/lib/client";
 
 // One interval row as returned by demand.listIntervals (numeric fields are strings).
@@ -252,15 +253,27 @@ export function ConsumptionChart({
   const { from, to } = useMemo(() => zonedDayRange(day, timezone), [day, timezone]);
 
   // Power series for the chosen day; energy buckets for the chosen granularity.
-  const { data: demand } = useRPC(
+  const { data: demand, loading: demandLoading } = useRPC(
     () => client.demand.listIntervals({ siteId, from, to }),
     [siteId, from.getTime(), to.getTime(), tick],
   );
-  const { data: energyByPeriod } = useRPC(
+  const { data: energyByPeriod, loading: energyLoading } = useRPC(
     () => client.readings.energyByPeriod({ siteId, granularity }),
     [siteId, granularity],
   );
   const intervals: IntervalRow[] = demand?.intervals ?? [];
+
+  // Is the chart still showing the PREVIOUS choice while the new one loads? Judged
+  // from what the data says it is for, so the silent 30-second refresh of the
+  // same day does not flash a spinner. With no data at all yet, any load counts.
+  const energyBasis = energyByPeriod?.basis;
+  const energyPending =
+    energyByPeriod == null
+      ? energyLoading
+      : energyBasis !== granularity &&
+        !(granularity === "billing_period" && energyBasis === "calendar_month");
+  const demandPending =
+    demand == null ? demandLoading : demand.from !== from.toISOString();
 
   // Single header row: static title + metric selector + the metric-specific control
   // (period selector for energy, day picker for power).
@@ -327,8 +340,15 @@ export function ConsumptionChart({
           {caption}
         </Text>
 
+        <LoadingVeil active={energyPending} label="Loading chart…">
         {data.length === 0 ? (
-          <EmptyChart message="No energy data yet — bars appear once metering readings accumulate over a period." />
+          <EmptyChart
+            message={
+              energyPending
+                ? ""
+                : "No energy data yet — bars appear once metering readings accumulate over a period."
+            }
+          />
         ) : (
           <div style={{ height: 256, width: "100%" }}>
             <ResponsiveContainer width="100%" height="100%">
@@ -342,6 +362,7 @@ export function ConsumptionChart({
             </ResponsiveContainer>
           </div>
         )}
+        </LoadingVeil>
       </Stack>
     );
   }
@@ -389,8 +410,9 @@ export function ConsumptionChart({
         {day === today ? " (today)" : ""}.
       </Text>
 
+      <LoadingVeil active={demandPending} label="Loading chart…">
       {data.length === 0 ? (
-        <EmptyChart message="No interval data for this day." />
+        <EmptyChart message={demandPending ? "" : "No interval data for this day."} />
       ) : (
         <div style={{ height: 256, width: "100%" }}>
           <ResponsiveContainer width="100%" height="100%">
@@ -415,6 +437,7 @@ export function ConsumptionChart({
           </ResponsiveContainer>
         </div>
       )}
+      </LoadingVeil>
     </Stack>
   );
 }

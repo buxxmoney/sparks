@@ -10,6 +10,8 @@ export function emptyBreakdown(): PricingBreakdown {
     fixedCents: 0,
     ancillaryCents: 0,
     totalCents: 0,
+    vatCents: 0,
+    totalInclVatCents: 0,
     details: [],
   };
 }
@@ -53,13 +55,22 @@ export function priceSegments(
   details.push(...last.details.filter((d) => d.chargeType === "fixed" || d.chargeType === "ancillary"));
   details.push(...peakDemand.details.filter((d) => d.chargeType === "demand"));
 
+  const totalCents =
+    activeEnergyCents + demandCents + reactiveEnergyCents + fixedCents + ancillaryCents;
+  // Summed from the per-period figures rather than re-derived: each period may
+  // sit under a different tariff (and so a different VAT treatment), so there is
+  // no single rate to apply to the combined total.
+  const vatCents = priced.reduce((sum, p) => sum + p.vatCents, 0);
+
   return {
     activeEnergyCents,
     demandCents,
     reactiveEnergyCents,
     fixedCents,
     ancillaryCents,
-    totalCents: activeEnergyCents + demandCents + reactiveEnergyCents + fixedCents + ancillaryCents,
+    totalCents,
+    vatCents,
+    totalInclVatCents: totalCents + vatCents,
     details,
   };
 }
@@ -222,15 +233,7 @@ export async function generateReconciliation(
       },
       ceiling: {
         usage,
-        pricing: ceilingPricing || {
-          activeEnergyCents: 0,
-          demandCents: 0,
-          reactiveEnergyCents: 0,
-          fixedCents: 0,
-          ancillaryCents: 0,
-          totalCents: 0,
-          details: [],
-        },
+        pricing: ceilingPricing || emptyBreakdown(),
       },
       invoice: invoiceData,
       components: buildComponentComparison(landlordPricing, ceilingPricing, invoiceData),

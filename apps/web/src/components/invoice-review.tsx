@@ -59,11 +59,17 @@ function componentBucket(component: string): "active" | "demand" | "reactive" | 
   }
 }
 
+/**
+ * Rand for display: thin-space thousands groups and a DOT decimal — "R 369 238.90".
+ *
+ * Deliberately NOT en-ZA, which renders "369 238,90": that comma reads as a
+ * thousands separator to most viewers, and it contradicts the dot-decimal energy
+ * figures on the same screen. One page must not use two decimal conventions.
+ */
 function rand(cents: number) {
-  const v = (cents / 100).toLocaleString("en-ZA", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  const v = (cents / 100)
+    .toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    .replace(/,/g, "\u202f");
   return cents < 0 ? `-R ${v.replace("-", "")}` : `R ${v}`;
 }
 

@@ -36,6 +36,8 @@ describe("Component comparison (charged vs expected per component)", () => {
     fixedCents: 0,
     ancillaryCents: 0,
     totalCents: 850000,
+    vatCents: 0,
+    totalInclVatCents: 850000,
     details: [],
   };
 

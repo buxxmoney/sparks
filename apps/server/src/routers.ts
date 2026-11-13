@@ -26,11 +26,16 @@ import {
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   type RawReadingRow,
-  bucketEnergyByCalendar,
+  type SiteIntervalRow,
   bucketIntervals,
   deriveMeterIntervals,
-  peakDemandKva,
-  windowEnergy,
+  type WindowEnergyRow,
+  boundaryEnergyQuery,
+  calendarWindows,
+  siteIntervalsQuery,
+  sitePeakDemandQuery,
+  windowEnergyQuery,
+  usageFromIntervalRows,
 } from "./live-readings";
 import { auth } from "./auth";
 import {
@@ -75,6 +80,7 @@ import {
 } from "./notifications";
 import { assertMeteredDataInPeriod } from "./report-guards";
 import { TtlCache } from "./cache";
+import { catalogueProfileRows, listCatalogue, loadSchedules } from "./tariff-catalogue";
 
 // Hot dashboard reads are recomputed from raw `readings` on every ~30s poll, per
 // viewer. Cache the RESULT (not the authz — that's per-user, cached separately) by
@@ -82,17 +88,21 @@ import { TtlCache } from "./cache";
 // and single-flight collapses a page's parallel burst to one computation. New data
 // arrives via ingestion (a different path), so no explicit invalidation is needed.
 const READ_TTL = 20_000;
+// Closed billing periods cannot change, so their priced result is kept much longer.
+const CLOSED_PERIOD_TTL = 10 * 60_000;
 const readCache = new TtlCache<unknown>();
 function cachedRead<T>(key: string, loader: () => Promise<T>): Promise<T> {
   return readCache.memo(key, READ_TTL, loader as () => Promise<unknown>) as Promise<T>;
 }
 import { sendSms } from "./sms";
 import { getObject, objectExists, putObject, signObjectUrl } from "./storage";
+import { type BillLine, billLines, rateDisplayFor, tariffNeedsDemand, tariffNeedsIntervals } from "./tariffs";
 import type { PricingBreakdown, TariffProfile, TariffRate, UsageData } from "./tariffs";
 import {
   adminAssignSiteTariffInput,
   adminSetSiteBillingCycleInput,
   adminSiteTariffGetInput,
+  adminSwitchSiteTariffInput,
   alertsAcknowledgeInput,
   alertsAttachmentUrlInput,
   billingPeriodsCloseInput,
@@ -133,6 +143,9 @@ import {
   orgListMembersInput,
   orgRemoveMemberInput,
   orgSetMemberRoleInput,
+  readingsBillPeriodsInput,
+  readingsBillToDateInput,
+  readingsTariffSheetInput,
   readingsEnergyByPeriodInput,
   readingsLatestInput,
   readingsMonthToDateInput,
@@ -1039,6 +1052,8 @@ async function applyBillingCyclePolicy(parsed: BillingPoliciesSetInput) {
   // numbers move, so drop them now rather than serving up to 20s of the old window.
   readCache.deletePrefix(`mtd:${parsed.siteId}:`);
   readCache.deletePrefix(`ebp:${parsed.siteId}:`);
+  readCache.deletePrefix(`btd:${parsed.siteId}:`);
+  readCache.deletePrefix(`bp:${parsed.siteId}:`);
 
   return { ...newPolicy, periodsCreated };
 }
@@ -1581,6 +1596,112 @@ export async function adminAssignSiteTariff(ctx: AuthContext, input: unknown) {
   return { profileId, assignmentId, regenerated, regenerateError };
 }
 
+/** Operator-only: the published tariffs a site can be moved onto. */
+export async function adminTariffCatalogue(ctx: AuthContext) {
+  await requirePlatformOperator(ctx.userId);
+  return { tariffs: listCatalogue(loadSchedules()) };
+}
+
+/**
+ * Put a site on a tariff from the published schedule. Not gated — callers must
+ * authorise first ({@link adminSwitchSiteTariff} does).
+ *
+ * A site has ONE landlord tariff, and every estimate shown for it — the current
+ * period and every historical one — is priced under it. So a switch REPLACES the
+ * site's landlord assignments rather than adding a dated one beside them: the
+ * new assignment is effective from the beginning of time, and the old ones are
+ * removed. Leaving them would price older periods under a tariff the site is no
+ * longer on.
+ *
+ * The profile is a shared LIBRARY profile (no organisation), created the first
+ * time a tariff is used and reused after that, so two sites on "Business
+ * Conventional/Prepaid" are priced from one set of rate rows rather than two
+ * copies that can drift.
+ *
+ * Remove-then-insert runs in ONE transaction, so a failure cannot leave the site
+ * with no tariff.
+ */
+export async function switchSiteTariff(args: {
+  siteId: string;
+  tariffId: string;
+  note?: string;
+  userId: string | null;
+}) {
+  const site = await db.query.sites.findFirst({ where: eq(sites.id, args.siteId) });
+  if (!site) throw new PreconditionError("Site not found");
+
+  let rows: ReturnType<typeof catalogueProfileRows>;
+  try {
+    rows = catalogueProfileRows(loadSchedules(), args.tariffId);
+  } catch {
+    throw new PreconditionError("That tariff is not in the published schedule.");
+  }
+
+  const result = await db.transaction(async (tx) => {
+    const existing = await tx.query.tariffProfiles.findFirst({
+      where: and(
+        eq(tariffProfiles.name, rows.profile.name),
+        eq(tariffProfiles.source, "library"),
+        isNull(tariffProfiles.organizationId),
+        eq(tariffProfiles.effectiveFrom, rows.profile.effectiveFrom),
+      ),
+    });
+
+    let profileId = existing?.id;
+    if (!profileId) {
+      profileId = randomUUID();
+      await tx.insert(tariffProfiles).values({ id: profileId, ...rows.profile });
+      await tx
+        .insert(tariffRates)
+        .values(rows.rates.map((r) => ({ id: randomUUID(), tariffProfileId: profileId as string, ...r })));
+    }
+
+    const current = await tx.query.siteTariffAssignments.findMany({
+      where: and(
+        eq(siteTariffAssignments.siteId, args.siteId),
+        eq(siteTariffAssignments.role, "landlord"),
+      ),
+    });
+    if (current.length === 1 && current[0].tariffProfileId === profileId) {
+      throw new PreconditionError(`This site is already on ${rows.profile.name}.`);
+    }
+    await tx
+      .delete(siteTariffAssignments)
+      .where(
+        and(
+          eq(siteTariffAssignments.siteId, args.siteId),
+          eq(siteTariffAssignments.role, "landlord"),
+        ),
+      );
+
+    const assignmentId = randomUUID();
+    await tx.insert(siteTariffAssignments).values({
+      id: assignmentId,
+      siteId: args.siteId,
+      tariffProfileId: profileId,
+      role: "landlord",
+      // The site's single tariff: in force for every period, past and future.
+      effectiveFrom: new Date(0),
+      createdByUserId: args.userId,
+      note: args.note?.trim() || null,
+    });
+
+    return { profileId, assignmentId, createdProfile: !existing, replaced: current.length };
+  });
+
+  // The cached bills for this site were priced under the old tariff.
+  readCache.deletePrefix(`btd:${args.siteId}:`);
+
+  return { ...result, tariffName: rows.profile.name, notApplied: rows.notApplied };
+}
+
+/** Operator-only wrapper around {@link switchSiteTariff}. */
+export async function adminSwitchSiteTariff(ctx: AuthContext, input: unknown) {
+  const parsed = adminSwitchSiteTariffInput.parse(input);
+  await requirePlatformOperator(ctx.userId);
+  return switchSiteTariff({ ...parsed, userId: ctx.userId });
+}
+
 /* ─────────────── Reconciliation Router ─────────────── */
 
 /** True if an instant falls inside a billing period, honoring boundary inclusivity. */
@@ -1596,6 +1717,45 @@ function instantInPeriod(
   return ts >= start && ts < end;
 }
 
+/**
+ * Name a rate that carries no stored `label` — i.e. one loaded before tariff
+ * provenance existed. Built from what the row does have (charge type, season, TOU
+ * period, block bound) so the bill breakdown can still name every line rather than
+ * printing an unattributable amount.
+ */
+function fallbackRateLabel(r: typeof tariffRates.$inferSelect): string {
+  const rate = Number(r.rateValue);
+
+  // A per-kWh ancillary on a municipal tariff is the network surcharge; naming it
+  // "Other charge" tells the customer nothing about a line they are paying for.
+  if (r.chargeType === "ancillary") {
+    return r.unit === "c_per_kwh" ? "Network surcharge" : "Other charge";
+  }
+
+  // Two fixed rows on one profile are the service and capacity ("network")
+  // charges. Nothing on the row says which is which, so the rate is appended to
+  // keep them distinguishable rather than showing "Fixed charge" twice. Rates
+  // loaded by the importer carry their real names and never reach this.
+  if (r.chargeType === "fixed") {
+    return `Fixed charge (R ${rate.toFixed(2)}/month)`;
+  }
+
+  const base: Record<string, string> = {
+    active_energy: "Energy",
+    demand: "Demand charge",
+    reactive_energy: "Reactive energy",
+  };
+  const parts: string[] = [];
+  if (r.season === "high") parts.push("Winter");
+  else if (r.season === "low") parts.push("Summer");
+  if (r.touPeriod === "peak") parts.push("Peak");
+  else if (r.touPeriod === "standard") parts.push("Standard");
+  else if (r.touPeriod === "offpeak") parts.push("Off-peak");
+  parts.push(base[r.chargeType] ?? "Charge");
+  if (r.blockThresholdKwh) parts.push(`up to ${Number(r.blockThresholdKwh)} kWh`);
+  return parts.join(" · ");
+}
+
 function mapTariffRate(r: typeof tariffRates.$inferSelect): TariffRate {
   return {
     chargeType: r.chargeType as TariffRate["chargeType"],
@@ -1604,6 +1764,14 @@ function mapTariffRate(r: typeof tariffRates.$inferSelect): TariffRate {
     season: r.season as TariffRate["season"],
     touPeriod: r.touPeriod as TariffRate["touPeriod"],
     blockThresholdKwh: r.blockThresholdKwh ? Number(r.blockThresholdKwh) : undefined,
+    label: r.label ?? fallbackRateLabel(r),
+    ...(r.source ? { source: r.source } : {}),
+    // Per-kWh ancillaries are levies riding on top of the tariff (the 6 c/kWh
+    // network surcharge), not tariff charges — so they are excluded from any
+    // percentage-surcharge base. Flat ancillaries stay in it.
+    ...(r.chargeType === "ancillary" && r.unit === "c_per_kwh"
+      ? { inSurchargeBase: false }
+      : {}),
   };
 }
 
@@ -1615,9 +1783,43 @@ async function buildTariffProfile(profileId: string): Promise<TariffProfile | nu
   const rates = await db.query.tariffRates.findMany({
     where: eq(tariffRates.tariffProfileId, profileId),
   });
+  // `pricing_rules.surchargeFractionOfSubtotal` is how a stored profile expresses
+  // City Power's 2% business/LPU surcharge. It is levied on the tariff's own
+  // charges — the per-kWh network surcharge is explicitly excluded from the base
+  // by `mapTariffRate` — and the pricer computes it from the rounded line items.
+  const pricingRules = (profile.pricingRules ?? {}) as {
+    surchargeFractionOfSubtotal?: number;
+    /** Stored key for the minimum-demand floor; already present on production profiles. */
+    minDemandKva?: number;
+    /** VAT rate as a fraction (0.15 = 15%), stored per profile. */
+    vatFraction?: number;
+  };
+  const fraction = pricingRules.surchargeFractionOfSubtotal;
+  const surcharges =
+    typeof fraction === "number" && fraction > 0
+      ? [
+          {
+            id: "percentage_surcharge",
+            ratePercent: fraction * 100,
+            enabled: true,
+            basis: "all_tariff_charges" as const,
+            label: `${(fraction * 100).toFixed(fraction * 100 % 1 === 0 ? 0 : 2)}% surcharge`,
+          },
+        ]
+      : undefined;
+
   return {
     rates: rates.map(mapTariffRate),
     touSchedule: (profile.touSchedule || {}) as Record<string, unknown>,
+    ...(surcharges ? { surcharges } : {}),
+    // Industrial tariffs bill the greater of measured demand and a floor. Stored
+    // per profile so it travels with the tariff rather than being assumed here.
+    ...(typeof pricingRules.minDemandKva === "number"
+      ? { minimumDemandKva: pricingRules.minDemandKva }
+      : {}),
+    ...(typeof pricingRules.vatFraction === "number"
+      ? { vatFraction: pricingRules.vatFraction }
+      : {}),
   };
 }
 
@@ -3334,6 +3536,70 @@ async function fetchRawReadings(
   }));
 }
 
+/**
+ * A site's per-interval usage over a window, derived inside Postgres (see
+ * `siteIntervalsQuery`). Same result as `usageFromRawReadings(await
+ * fetchRawReadings(...))`, at one row per interval instead of one per sample.
+ */
+async function fetchIntervalUsage(
+  meterIds: string[],
+  window: { from: Date; to: Date },
+  intervalMinutes: number,
+) {
+  if (meterIds.length === 0) return usageFromIntervalRows([]);
+  const res = await db.execute(siteIntervalsQuery(meterIds, window, intervalMinutes));
+  return usageFromIntervalRows(res.rows as unknown as SiteIntervalRow[]);
+}
+
+/** Endpoint-only energy for each window (see `windowEnergyQuery`). */
+async function fetchWindowEnergy(
+  meterIds: string[],
+  windows: Array<{ from: Date; to: Date }>,
+  opts: { endExclusive?: boolean } = {},
+): Promise<WindowEnergyRow[]> {
+  if (meterIds.length === 0 || windows.length === 0) return [];
+  const res = await db.execute(windowEnergyQuery(meterIds, windows, opts));
+  return res.rows as unknown as WindowEnergyRow[];
+}
+
+/**
+ * A period's usage from register ENDPOINTS, for tariffs that price totals rather
+ * than time of day. Returns the same shape as `fetchIntervalUsage`, with one
+ * "interval" per piece of the period between `cuts` (the instants where the rate
+ * can change), so the pricer attributes each piece to its season exactly as it
+ * would attribute the half-hours inside it. Peak demand is fetched only when the
+ * tariff bills on it.
+ */
+async function fetchEndpointUsage(
+  meterIds: string[],
+  window: { from: Date; to: Date },
+  cuts: Date[],
+  demandIntervalMinutes: number | null,
+) {
+  const inside = [...new Set(cuts.map((c) => c.getTime()))]
+    .filter((t) => t > window.from.getTime() && t < window.to.getTime())
+    .sort((a, b) => a - b);
+  const boundaries = [window.from, ...inside.map((t) => new Date(t)), window.to];
+
+  const [pieces, peakRes] = await Promise.all([
+    db.execute(boundaryEnergyQuery(meterIds, window, boundaries)),
+    demandIntervalMinutes === null
+      ? null
+      : db.execute(sitePeakDemandQuery(meterIds, window, demandIntervalMinutes)),
+  ]);
+  const rows = pieces.rows as unknown as WindowEnergyRow[];
+  const hasData = rows.some((r) => r.has_data);
+  const intervalActiveKwh = rows.map((r) => Number(r.active_kwh));
+  return {
+    activeKwh: intervalActiveKwh.reduce((a, b) => a + b, 0),
+    reactiveKvarh: rows.reduce((a, r) => a + Number(r.reactive_kvarh), 0),
+    maxDemandKva: Number((peakRes?.rows[0] as Record<string, unknown> | undefined)?.peak_kva ?? 0),
+    intervalStarts: rows.map((r) => boundaries[Number(r.i)]),
+    intervalActiveKwh,
+    intervalCount: hasData ? rows.length : 0,
+  };
+}
+
 async function siteDemandInterval(siteId: string): Promise<number> {
   const site = await db.query.sites.findFirst({
     where: eq(sites.id, siteId),
@@ -3398,7 +3664,8 @@ export async function readingsMonthToDate(ctx: AuthContext, input: unknown) {
   await requireSiteAccess(ctx, parsed.siteId);
 
   // Cache the live case by site; an explicit asOf gets its own key.
-  const key = `mtd:${parsed.siteId}:${parsed.asOf ? parsed.asOf.toISOString() : "live"}`;
+  const includePeak = parsed.includePeak !== false;
+  const key = `mtd:${parsed.siteId}:${parsed.asOf ? parsed.asOf.toISOString() : "live"}:${includePeak ? "peak" : "energy"}`;
   return cachedRead(key, async () => {
     const now = parsed.asOf ?? new Date();
 
@@ -3432,17 +3699,476 @@ export async function readingsMonthToDate(ctx: AuthContext, input: unknown) {
     }
 
     const intervalMinutes = await siteDemandInterval(parsed.siteId);
-    const rows = await fetchRawReadings(meterIds, { from: periodStart, to: now });
-    const energy = windowEnergy(rows);
-
+    // Energy is two register readings per meter; peak demand is reduced to one
+    // row inside Postgres. This used to pull the whole period's raw samples into
+    // the app on every dashboard poll.
+    const window = { from: periodStart, to: now };
+    const [energyRows, peakRes] = await Promise.all([
+      fetchWindowEnergy(meterIds, [window]),
+      includePeak ? db.execute(sitePeakDemandQuery(meterIds, window, intervalMinutes)) : null,
+    ]);
+    const peak = (peakRes?.rows[0] ?? {}) as Record<string, unknown>;
+    const energy = {
+      activeEnergyKwh: Number(energyRows[0]?.active_kwh ?? 0).toFixed(3),
+      reactiveEnergyKvarh: Number(energyRows[0]?.reactive_kvarh ?? 0).toFixed(3),
+    };
     return {
       periodStart: periodStart.toISOString(),
       activeEnergyKwh: energy.activeEnergyKwh,
       reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
-      peakDemandKva: peakDemandKva(rows, intervalMinutes),
-      intervalCount: rows.length,
+      peakDemandKva: Number(peak.peak_kva ?? 0).toFixed(3),
+      intervalCount: Number(peak.interval_count ?? 0),
     };
   });
+}
+
+
+/**
+ * Cost accrued so far in the site's CURRENT billing period, priced against the
+ * landlord tariff assigned to the site.
+ *
+ * This is the live dashboard's bill estimate. It reports what has actually been
+ * incurred — it deliberately does NOT project a period-end total, because two
+ * charge kinds can't be honestly extrapolated mid-period: demand bills the single
+ * highest interval in the period (today's peak is a floor, not the final figure),
+ * and fixed/ancillary charges apply in full regardless of elapsed time. See
+ * `.claude/decisions.md`.
+ *
+ * The pricing path is the SAME one the bill check uses — raw readings →
+ * `deriveMeterIntervals` → `priceUsage` — so the live figure and the eventual bill
+ * check agree instead of diverging on exactly the tariffs where it matters (TOU,
+ * seasonal, inclining block). Tariff assignments are effective-dated, so a period
+ * that crosses a tariff change is split and each slice priced under its own profile.
+ *
+ * `status` tells the UI why a total may be absent, so it can render the right empty
+ * state rather than a misleading R0.00:
+ *   - "priced"     — a real estimate.
+ *   - "no_tariff"  — no landlord tariff assigned to this site (a provisioning gap;
+ *                    shown to operators only).
+ *   - "no_data"    — tariff assigned, but no metered intervals in the period yet.
+ */
+export async function readingsBillToDate(ctx: AuthContext, input: unknown) {
+  const parsed = readingsBillToDateInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  const key = `btd:${parsed.siteId}:${parsed.asOf ? parsed.asOf.toISOString() : "live"}`;
+  const result = await cachedRead(key, async () => {
+    const now = parsed.asOf ?? new Date();
+
+    // Independent lookups, issued together: each is a database round trip, and
+    // run one after another they cost more than the pricing itself.
+    const [policy, allAssignments, meterIds, intervalMinutes, timezone] = await Promise.all([
+      // Same window the energy + peak-demand cards use, so every "to date" figure
+      // on the dashboard covers an identical period.
+      db.query.billingCyclePolicies.findFirst({
+        where: and(
+          eq(billingCyclePolicies.siteId, parsed.siteId),
+          isNull(billingCyclePolicies.effectiveTo),
+        ),
+      }),
+      db.query.siteTariffAssignments.findMany({
+        where: and(
+          eq(siteTariffAssignments.siteId, parsed.siteId),
+          eq(siteTariffAssignments.role, "landlord"),
+        ),
+      }),
+      siteMeterIds(parsed.siteId),
+      siteDemandInterval(parsed.siteId),
+      siteTimezone(parsed.siteId),
+    ]);
+    const { periodStart, periodEnd } = resolveCurrentPeriod(
+      {
+        recurrence: policy?.recurrence ?? "calendar_month",
+        anchorDay: policy?.anchorDay ?? undefined,
+      },
+      now,
+    );
+
+
+
+    // How far into the period to price. For the CURRENT period that is "now" —
+    // the estimate is cost-to-date, never a projection. For a period that has
+    // already CLOSED it is the period end: asking for July should give July's
+    // whole bill, not the slice up to whatever instant was passed in.
+    const pricedTo = periodEnd.getTime() <= Date.now() ? periodEnd : now;
+
+    const empty = (status: "no_tariff" | "no_data") => ({
+      status,
+      periodStart: periodStart.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+      asOf: pricedTo.toISOString(),
+      // A closed period is a final total; the current one is cost-to-date.
+      isClosed: periodEnd.getTime() <= Date.now(),
+      currency: "ZAR",
+      tariffName: null as string | null,
+      totalCents: null as number | null,
+      vatCents: null as number | null,
+      totalInclVatCents: null as number | null,
+      breakdown: null as null | {
+        activeEnergyCents: number;
+        demandCents: number;
+        reactiveEnergyCents: number;
+        fixedCents: number;
+        ancillaryCents: number;
+      },
+      usage: null as null | {
+        activeEnergyKwh: string;
+        reactiveEnergyKvarh: string;
+        peakDemandKva: string;
+      },
+      lines: [] as BillLine[],
+      notApplied: [] as Array<{ rule: string; effect: string }>,
+      intervalCount: 0,
+    });
+
+    // Landlord tariff assignments overlapping the period, oldest→newest. A tariff
+    // change mid-period yields more than one.
+    const assignments = allAssignments
+      .filter(
+        (a) =>
+          a.effectiveFrom.getTime() < periodEnd.getTime() &&
+          (!a.effectiveTo || a.effectiveTo.getTime() > periodStart.getTime()),
+      )
+      .sort((a, b) => a.effectiveFrom.getTime() - b.effectiveFrom.getTime());
+
+    if (assignments.length === 0) return empty("no_tariff");
+
+    if (meterIds.length === 0) return empty("no_data");
+
+    // Price [periodStart, pricedTo) — the elapsed part of the period only.
+    //
+    // The tariff decides how much has to be read. A meter's energy registers are
+    // accumulators, so for a tariff that prices totals (flat, seasonal, block)
+    // the period's energy is the register at its end minus the register at its
+    // start: two readings, cut only where the rate can change. Per-interval data
+    // is fetched only for a time-of-use tariff, and peak demand only for a tariff
+    // that bills on it. Both paths read boundary registers the way
+    // `deriveMeterIntervals` does, so the figure matches the bill check.
+    const profiles = new Map<string, TariffProfile>();
+    await Promise.all(
+      [...new Set(assignments.map((a) => a.tariffProfileId))].map(async (id) => {
+        const built = await buildTariffProfile(id);
+        if (built) profiles.set(id, built);
+      }),
+    );
+    if (profiles.size === 0) return empty("no_tariff");
+
+    const window = { from: periodStart, to: pricedTo };
+    const priced = [...profiles.values()];
+    let usage: Awaited<ReturnType<typeof fetchIntervalUsage>>;
+    if (priced.some(tariffNeedsIntervals)) {
+      // Only COMPLETE intervals count toward the peak: an interval straddling a
+      // meter outage carries the whole outage's register growth, and billing that
+      // as one interval's demand turned an 8-day gap into a ~7 000 kVA "peak" on
+      // a ~30 kVA site.
+      usage = await fetchIntervalUsage(meterIds, window, intervalMinutes);
+    } else {
+      // Rates can change at a season boundary (always a month start) or where a
+      // different tariff takes over, so those are the only cuts needed.
+      const cuts = [
+        ...calendarWindows(periodStart, pricedTo, "month", timezone).map((w) => w.periodEnd),
+        ...assignments.map((a) => a.effectiveFrom),
+      ];
+      usage = await fetchEndpointUsage(
+        meterIds,
+        window,
+        cuts,
+        priced.some(tariffNeedsDemand) ? intervalMinutes : null,
+      );
+    }
+    if (usage.intervalCount === 0) return empty("no_data");
+
+    // The assignment effective at instant t = the latest one starting at or before
+    // it; intervals before the earliest overlapping assignment fall to that one.
+    const pickAssignment = (t: Date) => {
+      let chosen = assignments[0];
+      for (const a of assignments) {
+        if (a.effectiveFrom.getTime() <= t.getTime()) chosen = a;
+        else break;
+      }
+      return chosen;
+    };
+
+    // Group intervals by the assignment in force, then price each group under its
+    // own profile and sum. Single-assignment periods (the common case) collapse to
+    // one plain priceUsage call.
+    const groups = new Map<string, { assignmentId: string; starts: Date[]; kwh: number[] }>();
+    usage.intervalStarts.forEach((start, i) => {
+      const a = pickAssignment(start);
+      const g = groups.get(a.id) ?? { assignmentId: a.id, starts: [], kwh: [] };
+      g.starts.push(start);
+      g.kwh.push(usage.intervalActiveKwh[i]);
+      groups.set(a.id, g);
+    });
+
+    const segments: Array<{ usage: UsageData; profile: TariffProfile }> = [];
+    for (const g of groups.values()) {
+      const assignment = assignments.find((a) => a.id === g.assignmentId);
+      if (!assignment) continue;
+      const profile = profiles.get(assignment.tariffProfileId);
+      if (!profile) continue;
+
+      const segActive = g.kwh.reduce((sum, k) => sum + k, 0);
+      // Reactive energy and peak demand aren't tracked per interval here, so split
+      // them across segments by each segment's share of active energy. With a single
+      // assignment — overwhelmingly the common case — this is exact.
+      const share = usage.activeKwh > 0 ? segActive / usage.activeKwh : 1 / groups.size;
+      segments.push({
+        usage: {
+          activeKwh: segActive,
+          reactiveKvarh: usage.reactiveKvarh * share,
+          // Demand is a peak, not a total: each segment is charged on the peak
+          // observed across the period. A period spanning a tariff change is rare
+          // and this errs toward the accurate side for the dominant segment.
+          maxDemandKva: usage.maxDemandKva,
+          intervalStarts: g.starts,
+          intervalActiveKwh: g.kwh,
+          timezone,
+        },
+        profile,
+      });
+    }
+
+    if (segments.length === 0) return empty("no_tariff");
+
+    const pricing = priceSegments(segments);
+    const primary = await db.query.tariffProfiles.findFirst({
+      where: eq(tariffProfiles.id, pickAssignment(periodStart).tariffProfileId),
+      columns: { name: true, currency: true },
+    });
+
+    return {
+      status: "priced" as const,
+      periodStart: periodStart.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+      asOf: pricedTo.toISOString(),
+      isClosed: periodEnd.getTime() <= Date.now(),
+      currency: primary?.currency ?? "ZAR",
+      tariffName: primary?.name ?? null,
+      totalCents: pricing.totalCents,
+      // VAT carried separately so the line items still reconcile against the
+      // VAT-exclusive total, while the card can quote what is actually payable.
+      vatCents: pricing.vatCents,
+      totalInclVatCents: pricing.totalInclVatCents,
+      breakdown: {
+        activeEnergyCents: pricing.activeEnergyCents,
+        demandCents: pricing.demandCents,
+        reactiveEnergyCents: pricing.reactiveEnergyCents,
+        fixedCents: pricing.fixedCents,
+        ancillaryCents: pricing.ancillaryCents,
+      },
+      usage: {
+        activeEnergyKwh: usage.activeKwh.toFixed(3),
+        reactiveEnergyKvarh: usage.reactiveKvarh.toFixed(3),
+        peakDemandKva: usage.maxDemandKva.toFixed(3),
+      },
+      // Every charged line, named and sourced, so the total is auditable rather
+      // than asserted. Sums to `totalCents` by construction.
+      lines: billLines(pricing),
+      notApplied: [],
+      intervalCount: usage.intervalCount,
+    };
+  });
+
+  // A closed period is final: its readings are in and its total cannot move, so
+  // keep it far longer than the live figure rather than re-pricing it every 20 s.
+  // A tariff switch or billing-cycle change drops these explicitly (`btd:` prefix).
+  if (result.isClosed) readCache.set(key, result, CLOSED_PERIOD_TTL);
+  return result;
+}
+
+/**
+ * Do a tariff profile's distributor and a schedule's provider name the same utility?
+ *
+ * Substring matching alone is too strict: real data pairs "City Power Johannesburg"
+ * (profile.distributor) with "City of Johannesburg" (schedule.provider) — neither
+ * contains the other, yet they are the same supplier, and the customer is left with
+ * no downloadable schedule. So names are compared on their significant words, with
+ * corporate filler ("city", "of", "power", "municipality"…) removed: both reduce to
+ * "johannesburg" and match.
+ */
+export function providersMatch(a: string, b: string): boolean {
+  const FILLER = new Set([
+    "city", "of", "the", "power", "municipality", "municipal", "metro",
+    "metropolitan", "local", "electricity", "energy", "utility", "ltd", "pty",
+  ]);
+  const significant = (v: string) =>
+    new Set(
+      v
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 1 && !FILLER.has(w)),
+    );
+  const wa = significant(a);
+  const wb = significant(b);
+  if (wa.size === 0 || wb.size === 0) return false;
+  // Any shared significant word identifies the supplier ("eskom", "johannesburg").
+  for (const w of wa) if (wb.has(w)) return true;
+  return false;
+}
+
+/**
+ * The billing periods a customer can choose between on the cost card.
+ *
+ * Derived from the site's own cycle policy (`recentPeriods`), not calendar
+ * months — a site anchored to the 23rd gets 23rd-to-23rd periods, which is what
+ * its meter readings and its municipal bill are aligned to.
+ *
+ * Periods before the site has any readings are omitted: offering a customer a
+ * period that can only ever say "no data" is noise, not choice.
+ */
+export async function readingsBillPeriods(ctx: AuthContext, input: unknown) {
+  const parsed = readingsBillPeriodsInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  return cachedRead(`bp:${parsed.siteId}:${parsed.limit ?? 6}`, async () => {
+    const now = new Date();
+    const policy = await db.query.billingCyclePolicies.findFirst({
+      where: and(
+        eq(billingCyclePolicies.siteId, parsed.siteId),
+        isNull(billingCyclePolicies.effectiveTo),
+      ),
+    });
+
+    const periods = recentPeriods(
+      {
+        recurrence: policy?.recurrence ?? "calendar_month",
+        anchorDay: policy?.anchorDay ?? undefined,
+      },
+      now,
+      parsed.limit ?? 6,
+    );
+
+    // The site's first reading bounds how far back a period can be meaningful.
+    const meterIds = await siteMeterIds(parsed.siteId);
+    let earliest: Date | null = null;
+    if (meterIds.length > 0) {
+      const res = await db.execute(sql`
+        SELECT MIN(measured_at) AS first_at
+        FROM readings
+        WHERE meter_id IN (${sql.join(meterIds.map((id) => sql`${id}`), sql`, `)})
+      `);
+      const raw = (res.rows[0] as Record<string, unknown> | undefined)?.first_at;
+      if (raw) earliest = new Date(raw as string | number | Date);
+    }
+
+    return {
+      periods: periods
+        .filter((p) => !earliest || p.periodEnd.getTime() > earliest.getTime())
+        // Newest first: the current period is the default selection.
+        .reverse()
+        .map((p) => ({
+          periodStart: p.periodStart.toISOString(),
+          periodEnd: p.periodEnd.toISOString(),
+          // An instant safely INSIDE the period, for billToDate's `asOf`. The end
+          // is exclusive, so a millisecond before it lands in this period.
+          asOf: new Date(
+            Math.min(p.periodEnd.getTime() - 1, now.getTime()),
+          ).toISOString(),
+          isCurrent: p.periodStart.getTime() <= now.getTime() && p.periodEnd.getTime() > now.getTime(),
+          isClosed: p.periodEnd.getTime() <= now.getTime(),
+        })),
+    };
+  });
+}
+
+/**
+ * The complete published rate card for a site's tariff, plus a download link for
+ * the approved schedule document behind it.
+ *
+ * Distinct from `billToDate`, which reports only the charges that actually cost
+ * something this period. A customer asking "what CAN this tariff charge me?"
+ * needs the whole card — including the lines that happen to be zero right now —
+ * or they cannot tell the difference between a charge that does not apply to them
+ * and one that simply has not been incurred yet.
+ *
+ * The schedule is matched by provider + effective date (there is no FK from a
+ * profile to the document it was transcribed from), so the link is best-effort:
+ * `document` is null when no matching schedule is on file, and the rate card is
+ * still returned.
+ */
+export async function readingsTariffSheet(ctx: AuthContext, input: unknown) {
+  const parsed = readingsTariffSheetInput.parse(input);
+  await requireSiteAccess(ctx, parsed.siteId);
+
+  const now = new Date();
+  const assignment = (
+    await db.query.siteTariffAssignments.findMany({
+      where: and(
+        eq(siteTariffAssignments.siteId, parsed.siteId),
+        eq(siteTariffAssignments.role, "landlord"),
+      ),
+    })
+  )
+    .filter((a) => a.effectiveFrom.getTime() <= now.getTime() && (!a.effectiveTo || a.effectiveTo.getTime() > now.getTime()))
+    .sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
+
+  if (!assignment) {
+    return { status: "no_tariff" as const, tariffName: null, rates: [], document: null };
+  }
+
+  const profile = await db.query.tariffProfiles.findFirst({
+    where: eq(tariffProfiles.id, assignment.tariffProfileId),
+  });
+  if (!profile) {
+    return { status: "no_tariff" as const, tariffName: null, rates: [], document: null };
+  }
+
+  const rateRows = await db.query.tariffRates.findMany({
+    where: eq(tariffRates.tariffProfileId, profile.id),
+  });
+
+  // Every rate the tariff defines, named and sourced — the full menu of what this
+  // customer can be billed for.
+  const rates = rateRows.map((r) => {
+    const mapped = mapTariffRate(r);
+    return {
+      chargeType: mapped.chargeType,
+      label: mapped.label ?? mapped.chargeType,
+      source: mapped.source ?? null,
+      unit: mapped.unit,
+      rateValue: mapped.rateValue,
+      rateDisplay: rateDisplayFor(mapped.rateValue, mapped.unit),
+      season: mapped.season,
+      touPeriod: mapped.touPeriod,
+      blockThresholdKwh: mapped.blockThresholdKwh ?? null,
+    };
+  });
+
+  // Best-effort match to the approved schedule PDF: same publishing utility, and
+  // in force when the tariff took effect.
+  const provider = profile.distributor ?? profile.supplyZone;
+  let document: { name: string; provider: string; effectiveFrom: string; url: string } | null =
+    null;
+  if (provider) {
+    const candidates = (await db.query.tariffSchedules.findMany()).filter((sch) =>
+      providersMatch(sch.provider, provider),
+    );
+    const covering = candidates.filter(
+      (sch) =>
+        sch.effectiveFrom.getTime() <= profile.effectiveFrom.getTime() &&
+        (!sch.effectiveTo || sch.effectiveTo.getTime() >= profile.effectiveFrom.getTime()),
+    );
+    const chosen = (covering.length > 0 ? covering : candidates).sort(
+      (a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime(),
+    )[0];
+    if (chosen && (await objectExists(chosen.fileStorageKey))) {
+      document = {
+        name: chosen.name,
+        provider: chosen.provider,
+        effectiveFrom: chosen.effectiveFrom.toISOString(),
+        url: await signObjectUrl(chosen.fileStorageKey, 3600),
+      };
+    }
+  }
+
+  return {
+    status: "ok" as const,
+    tariffName: profile.name,
+    rates,
+    document,
+  };
 }
 
 // Total active energy (kWh) per billing period, for the "energy across billing
@@ -3477,10 +4203,30 @@ async function computeEnergyByPeriod(
       granularity === "month"
         ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1))
         : new Date(now.getTime() - limit * (granularity === "week" ? 7 : 1) * 24 * 60 * 60 * 1000);
-    const rows = await fetchRawReadings(meterIds, { from });
-    const buckets = bucketEnergyByCalendar(rows, granularity, tz);
+    const buckets = await calendarEnergyBuckets(meterIds, from, now, granularity, tz);
     return { basis: granularity, periods: buckets.slice(-limit) };
   }
+
+  // A bar's energy is the register at the end of its period minus the register
+  // at its start, so each period costs two readings per meter — not its samples.
+  const periodBuckets = async (
+    windows: Array<{ periodStart: Date; periodEnd: Date; label: string }>,
+  ) => {
+    const energy = await fetchWindowEnergy(
+      meterIds,
+      windows.map((w) => ({ from: w.periodStart, to: w.periodEnd })),
+      { endExclusive: true },
+    );
+    return windows.map((w, i) => ({
+      label: w.label,
+      periodStart: w.periodStart.toISOString(),
+      periodEnd: w.periodEnd.toISOString(),
+      activeEnergyKwh: Number(energy[i]?.active_kwh ?? 0).toFixed(3),
+      reactiveEnergyKvarh: Number(energy[i]?.reactive_kvarh ?? 0).toFixed(3),
+    }));
+  };
+  const shortDate = (d: Date) =>
+    d.toLocaleDateString("en-ZA", { day: "numeric", month: "short" });
 
   const periods = await db.query.billingPeriods.findMany({
     where: eq(billingPeriods.siteId, siteId),
@@ -3488,30 +4234,15 @@ async function computeEnergyByPeriod(
   });
 
   if (periods.length > 0) {
-    // Bucket by real billing periods (half-open [start, end)); energy = register delta.
-    const buckets = await Promise.all(
-      periods.map(async (p) => {
-        const rows = await fetchRawReadings(meterIds, {
-          from: new Date(p.periodStart),
-          to: new Date(p.periodEnd),
-          endExclusive: true,
-        });
-        const energy = windowEnergy(rows);
-        return {
-          label:
-            p.label ??
-            new Date(p.periodStart).toLocaleDateString("en-ZA", {
-              day: "numeric",
-              month: "short",
-            }),
-          periodStart: new Date(p.periodStart).toISOString(),
-          periodEnd: new Date(p.periodEnd).toISOString(),
-          activeEnergyKwh: energy.activeEnergyKwh,
-          reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
-        };
-      }),
+    // Bucket by real billing periods (half-open [start, end)).
+    const buckets = await periodBuckets(
+      periods.slice(-limit).map((p) => ({
+        periodStart: new Date(p.periodStart),
+        periodEnd: new Date(p.periodEnd),
+        label: p.label ?? shortDate(new Date(p.periodStart)),
+      })),
     );
-    return { basis: "billing_period" as const, periods: buckets.slice(-limit) };
+    return { basis: "billing_period" as const, periods: buckets };
   }
 
   // No billing periods materialized yet. If the site has an active billing policy,
@@ -3534,31 +4265,43 @@ async function computeEnergyByPeriod(
       now,
       limit,
     );
-    const buckets = await Promise.all(
-      windows.map(async (w) => {
-        const rows = await fetchRawReadings(meterIds, {
-          from: w.periodStart,
-          to: w.periodEnd,
-          endExclusive: true,
-        });
-        const energy = windowEnergy(rows);
-        return {
-          label: w.periodStart.toLocaleDateString("en-ZA", { day: "numeric", month: "short" }),
-          periodStart: w.periodStart.toISOString(),
-          periodEnd: w.periodEnd.toISOString(),
-          activeEnergyKwh: energy.activeEnergyKwh,
-          reactiveEnergyKvarh: energy.reactiveEnergyKvarh,
-        };
-      }),
+    const buckets = await periodBuckets(
+      windows.map((w) => ({ ...w, label: shortDate(w.periodStart) })),
     );
     return { basis: "billing_period" as const, periods: buckets };
   }
 
-  // Last resort: no policy at all → bucket the site's raw samples by calendar month.
+  // Last resort: no policy at all → bucket by calendar month.
   const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - limit, 1));
-  const allRows = await fetchRawReadings(meterIds, { from });
-  const months = bucketEnergyByCalendar(allRows, "month", tz);
+  const months = await calendarEnergyBuckets(meterIds, from, now, "month", tz);
   return { basis: "calendar_month" as const, periods: months.slice(-limit) };
+}
+
+/**
+ * Energy per calendar day / week / month from `from` to `to`, by endpoints. Same
+ * buckets and figures as `bucketEnergyByCalendar` over the raw samples; buckets
+ * with no reading are omitted, as they were when buckets came from the samples.
+ */
+async function calendarEnergyBuckets(
+  meterIds: string[],
+  from: Date,
+  to: Date,
+  unit: "day" | "week" | "month",
+  tz: string,
+) {
+  const windows = calendarWindows(from, to, unit, tz);
+  const energy = await fetchWindowEnergy(meterIds, windows, { endExclusive: true });
+  return windows
+    .map((w, i) => ({
+      label: w.label,
+      periodStart: w.periodStart.toISOString(),
+      periodEnd: w.periodEnd.toISOString(),
+      activeEnergyKwh: Number(energy[i]?.active_kwh ?? 0).toFixed(3),
+      reactiveEnergyKvarh: Number(energy[i]?.reactive_kvarh ?? 0).toFixed(3),
+      hasData: energy[i]?.has_data === true,
+    }))
+    .filter((b) => b.hasData)
+    .map(({ hasData: _hasData, ...bucket }) => bucket);
 }
 
 // Clock-aligned demand intervals for a site within a window (docs/02 §4.1

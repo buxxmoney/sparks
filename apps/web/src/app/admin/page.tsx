@@ -468,8 +468,13 @@ export default function AdminPage() {
     }
   };
 
+  // Thin-space groups with a DOT decimal: "R 369 238.90". en-ZA renders
+  // "369 238,90", whose comma reads as a thousands separator to most viewers and
+  // contradicts the dot-decimal energy figures shown alongside it.
   const randFmt = (cents: number) =>
-    `R ${(cents / 100).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    `R ${(cents / 100)
+      .toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      .replace(/,/g, "\u202f")}`;
 
   // listOrganizations is operator-gated; a non-operator gets FORBIDDEN.
   // Heading pinned top-left (matches Sites/Alerts); the denial itself is

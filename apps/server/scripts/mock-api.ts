@@ -6,6 +6,11 @@
  */
 import { os } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
+// The REAL pricing engine — the mock prices its synthetic load curve with the same
+// pure function the server uses, so the figure on screen is genuinely what this
+// usage costs under this tariff.
+import { billLines, priceUsage, rateDisplayFor } from "../src/tariffs";
+import { type CojSchedule, convertTariff } from "../src/tariff-import";
 
 const ORG_ID = "org_mock_1";
 
@@ -58,6 +63,14 @@ const sites = [
   },
 ];
 
+// Load-curve scale. The mock site is on COJ "Business Conventional", which caps
+// at 100 kVA (above that a customer is moved to Large Consumers), so the curve is
+// sized to peak just under that ceiling — otherwise the dashboard would show a
+// site that could not legally hold the tariff it is being priced on.
+const LOAD_BASE_KW = 26;
+const LOAD_RAMP_KW = 19;
+const LOAD_PEAK_KW = 83;
+
 // ── Per-site dashboard data ─────────────────────────────────────────
 // 24h of 30-min demand intervals following a plausible commercial load
 // curve (low overnight, morning ramp, midday plateau, evening falloff).
@@ -74,11 +87,11 @@ function makeIntervals() {
     const t = new Date(now - i * 30 * 60_000);
     const hour = t.getHours() + t.getMinutes() / 60;
     // Load curve: base 140 kW, ramps 07:00→10:00, plateau to 17:00, falls to 21:00.
-    let kw = 140;
-    if (hour >= 7 && hour < 10) kw = 140 + (hour - 7) * 110;
-    else if (hour >= 10 && hour < 17) kw = 470 + Math.sin(hour) * 25;
-    else if (hour >= 17 && hour < 21) kw = 470 - (hour - 17) * 80;
-    kw += (Math.sin(t.getTime() / 7e6) + Math.cos(t.getTime() / 3e6)) * 18;
+    let kw = LOAD_BASE_KW;
+    if (hour >= 7 && hour < 10) kw = LOAD_BASE_KW + (hour - 7) * LOAD_RAMP_KW;
+    else if (hour >= 10 && hour < 17) kw = LOAD_PEAK_KW + Math.sin(hour) * 4;
+    else if (hour >= 17 && hour < 21) kw = LOAD_PEAK_KW - (hour - 17) * 14;
+    kw += (Math.sin(t.getTime() / 7e6) + Math.cos(t.getTime() / 3e6)) * 3;
     const pf = 0.91 + Math.sin(hour) * 0.02;
     const kva = kw / pf;
     out.push({
@@ -97,8 +110,8 @@ const energyPeriods = MONTHS.map((label, i) => ({
   label,
   periodStart: new Date(2025, 7 + i, 1).toISOString(),
   periodEnd: new Date(2025, 8 + i, 1).toISOString(),
-  activeEnergyKwh: (215_000 + Math.sin(i * 1.1) * 32_000 + i * 1_500).toFixed(0),
-  reactiveEnergyKvarh: (68_000 + Math.cos(i * 0.9) * 9_000).toFixed(0),
+  activeEnergyKwh: (37_500 + Math.sin(i * 1.1) * 5_600 + i * 260).toFixed(0),
+  reactiveEnergyKvarh: (11_900 + Math.cos(i * 0.9) * 1_570).toFixed(0),
 }));
 
 // The dashboard branches on `myLevel === "operator"` to render the operator view
@@ -160,6 +173,112 @@ const devices = [
   lastSeenAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
 }));
 
+// ── Live bill estimation ────────────────────────────────────────────────
+// The mock site sits on the REAL City Power FY26/27 "Business Conventional/
+// Prepaid" tariff, loaded from tariffs/2026/2027-COJ.json and converted by the
+// same `convertTariff` the importer uses. So the figure on screen is what this
+// usage genuinely costs under the published schedule — not an invented number.
+//
+// MOCK_TARIFF=<id> prices against a different tariff from the same schedule
+// (e.g. industrial_lv_tou); MOCK_NO_TARIFF=1 simulates a site with none assigned.
+const MOCK_NO_TARIFF = process.env.MOCK_NO_TARIFF === "1";
+const MOCK_TARIFF_ID = process.env.MOCK_TARIFF ?? "business_conventional_prepaid";
+
+const cojSchedule = (await Bun.file(
+  new URL("../../../tariffs/2026/2027-COJ.json", import.meta.url),
+).json()) as CojSchedule;
+const mockTariff = convertTariff(cojSchedule, MOCK_TARIFF_ID);
+
+// The schedule marks its rates VAT-exclusive but never states the rate itself,
+// so the importer cannot source it. Stored profiles carry `vatFraction: 0.15`;
+// the mock mirrors that so its total matches what the real server produces.
+mockTariff.profile.vatFraction = 0.15;
+
+if (mockTariff.unsupported.length > 0) {
+  // Loud on startup: these are charges the published tariff defines that the
+  // pricer does not yet apply, so the mock's total is knowingly incomplete.
+  console.log(`\n[mock] tariff "${mockTariff.name}" — ${mockTariff.unsupported.length} unsupported rule(s):`);
+  for (const u of mockTariff.unsupported) console.log(`  · ${u.rule}: ${u.effect}`);
+  console.log("");
+}
+
+// Price the elapsed part of the current billing period with the REAL pricer, over
+// the same 30-min intervals the load chart draws — so the mock's total is the
+// number the real server would produce for this usage, not a hand-picked figure.
+function mockBillToDate() {
+  const start = mockPeriodStart();
+  const now = new Date();
+  const intervalMs = 30 * 60_000;
+
+  const intervalStarts: Date[] = [];
+  const intervalActiveKwh: number[] = [];
+  let reactiveKvarh = 0;
+  let maxDemandKva = 0;
+
+  for (let t = start.getTime(); t + intervalMs <= now.getTime(); t += intervalMs) {
+    const d = new Date(t);
+    const hour = d.getHours() + d.getMinutes() / 60;
+    // Same commercial load curve the 24h chart uses, so the money and the graph
+    // tell one story.
+    let kw = LOAD_BASE_KW;
+    if (hour >= 7 && hour < 10) kw = LOAD_BASE_KW + (hour - 7) * LOAD_RAMP_KW;
+    else if (hour >= 10 && hour < 17) kw = LOAD_PEAK_KW + Math.sin(hour) * 4;
+    else if (hour >= 17 && hour < 21) kw = LOAD_PEAK_KW - (hour - 17) * 14;
+    kw += (Math.sin(t / 7e6) + Math.cos(t / 3e6)) * 3;
+    const pf = 0.91 + Math.sin(hour) * 0.02;
+    const kva = kw / pf;
+
+    intervalStarts.push(d);
+    intervalActiveKwh.push(kw / 2);            // kW over a half-hour → kWh
+    reactiveKvarh += (kva - kw) / 2;
+    if (kva > maxDemandKva) maxDemandKva = kva;
+  }
+
+  const activeKwh = intervalActiveKwh.reduce((sum, k) => sum + k, 0);
+  const pricing = priceUsage(
+    {
+      activeKwh,
+      maxDemandKva,
+      reactiveKvarh,
+      intervalStarts,
+      intervalActiveKwh,
+      timezone: "Africa/Johannesburg",
+    },
+    mockTariff.profile,
+  );
+
+  return {
+    status: "priced" as const,
+    periodStart: start.toISOString(),
+    periodEnd: new Date(start.getFullYear(), start.getMonth() + 1, start.getDate()).toISOString(),
+    asOf: now.toISOString(),
+    currency: mockTariff.currency,
+    tariffName: mockTariff.name,
+    totalCents: pricing.totalCents,
+    vatCents: pricing.vatCents,
+    totalInclVatCents: pricing.totalInclVatCents,
+    breakdown: {
+      activeEnergyCents: pricing.activeEnergyCents,
+      demandCents: pricing.demandCents,
+      reactiveEnergyCents: pricing.reactiveEnergyCents,
+      fixedCents: pricing.fixedCents,
+      ancillaryCents: pricing.ancillaryCents,
+    },
+    usage: {
+      activeEnergyKwh: activeKwh.toFixed(3),
+      reactiveEnergyKvarh: reactiveKvarh.toFixed(3),
+      peakDemandKva: maxDemandKva.toFixed(3),
+    },
+    lines: billLines(pricing),
+    // Charges the published schedule defines but the pricer does not apply. Shown
+    // to the customer rather than hidden: a total that silently omits a known
+    // charge is exactly the kind of unexplained figure this breakdown exists to
+    // eliminate.
+    notApplied: mockTariff.unsupported,
+    intervalCount: intervalStarts.length,
+  };
+}
+
 const router = {
   session: {
     me: os.handler(async () => ({
@@ -186,8 +305,8 @@ const router = {
     latest: os.handler(async () => ({
       reading: {
         time: new Date(Date.now() - 30_000).toISOString(),
-        totalPowerKw: "486.20",
-        totalApparentKva: "531.75",
+        totalPowerKw: "84.90",
+        totalApparentKva: "92.85",
       },
     })),
     monthToDate: os.handler(async () => {
@@ -198,15 +317,81 @@ const router = {
       const days = Math.max(1, (Date.now() - start.getTime()) / 86_400_000);
       return {
         periodStart: start.toISOString(),
-        activeEnergyKwh: (days * 2_040).toFixed(2),
-        peakDemandKva: (days < 3 ? 498.6 : 612.4).toFixed(2),
-        reactiveEnergyKvarh: (days * 610).toFixed(2),
+        activeEnergyKwh: (days * 1_240).toFixed(2),
+        peakDemandKva: (days < 3 ? 86.4 : 97.2).toFixed(2),
+        reactiveEnergyKvarh: (days * 371).toFixed(2),
       };
     }),
     energyByPeriod: os.handler(async () => ({
       basis: "billing_period",
       periods: energyPeriods,
     })),
+    // The full published rate card + a link to the approved schedule. The mock has
+    // no object storage, so `document` points at the utility's public tariff page
+    // rather than a signed PDF URL — enough to build the UI against.
+    // Selectable billing periods, mirroring the real procedure's shape.
+    billPeriods: os.handler(async () => {
+      const now = new Date();
+      const out: Array<{ periodStart: string; periodEnd: string; asOf: string; isCurrent: boolean; isClosed: boolean }> = [];
+      for (let back = 0; back < 3; back++) {
+        const ref = new Date(now.getFullYear(), now.getMonth() - back, 15);
+        const start = mockPeriodStart(ref);
+        const end = new Date(start.getFullYear(), start.getMonth() + 1, start.getDate());
+        out.push({
+          periodStart: start.toISOString(),
+          periodEnd: end.toISOString(),
+          asOf: new Date(Math.min(end.getTime() - 1, now.getTime())).toISOString(),
+          isCurrent: start <= now && end > now,
+          isClosed: end <= now,
+        });
+      }
+      return { periods: out };
+    }),
+    tariffSheet: os.handler(async () =>
+      MOCK_NO_TARIFF
+        ? { status: "no_tariff" as const, tariffName: null, rates: [], document: null }
+        : {
+            status: "ok" as const,
+            tariffName: mockTariff.name,
+            rates: mockTariff.profile.rates.map((r) => ({
+              chargeType: r.chargeType,
+              label: r.label ?? r.chargeType,
+              source: r.source ?? null,
+              unit: r.unit,
+              rateValue: r.rateValue,
+              rateDisplay: rateDisplayFor(r.rateValue, r.unit),
+              season: r.season,
+              touPeriod: r.touPeriod,
+              blockThresholdKwh: r.blockThresholdKwh ?? null,
+            })),
+            document: {
+              name: cojSchedule.meta.title ?? "Schedule of Approved Tariffs",
+              provider: cojSchedule.meta.issuer,
+              effectiveFrom: new Date(2026, 6, 1).toISOString(),
+              url: "http://localhost:3001/mock-docs/2027-COJ.pdf",
+            },
+          },
+    ),
+    billToDate: os.handler(async () =>
+      MOCK_NO_TARIFF
+        ? {
+            status: "no_tariff" as const,
+            periodStart: mockPeriodStart().toISOString(),
+            periodEnd: null,
+            asOf: new Date().toISOString(),
+            currency: "ZAR",
+            tariffName: null,
+            totalCents: null,
+            vatCents: null,
+            totalInclVatCents: null,
+            breakdown: null,
+            usage: null,
+            lines: [],
+            notApplied: [],
+            intervalCount: 0,
+          }
+        : mockBillToDate(),
+    ),
   },
   devices: {
     list: os.handler(async () => ({ devices })),
@@ -378,6 +563,25 @@ Bun.serve({
         },
         { headers: cors },
       );
+    }
+
+    // The approved tariff schedule itself. In production this is an object-storage
+    // key signed by `signObjectUrl`; the mock has no bucket, so it serves the same
+    // PDF that lives beside its JSON transcription in tariffs/.
+    if (url.pathname === "/mock-docs/2027-COJ.pdf") {
+      const file = Bun.file(new URL("../../../tariffs/2026/2027-COJ.pdf", import.meta.url));
+      if (!(await file.exists())) {
+        return new Response("tariff schedule PDF not found", { status: 404, headers: cors });
+      }
+      return new Response(file, {
+        headers: {
+          ...cors,
+          "content-type": "application/pdf",
+          // `inline` so it opens in the browser's viewer rather than forcing a
+          // save — a customer checking a rate wants to read it, not file it.
+          "content-disposition": 'inline; filename="City-Power-Approved-Tariffs-FY26-27.pdf"',
+        },
+      });
     }
 
     if (url.pathname.startsWith("/rpc")) {
